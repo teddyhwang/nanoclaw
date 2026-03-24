@@ -30,8 +30,13 @@ RUN apt-get update && apt-get install -y \
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
-# Install agent-browser and claude-code globally
-RUN npm install -g agent-browser @anthropic-ai/claude-code
+# Install agent-browser, claude-code, and qmd globally
+RUN npm install -g agent-browser @anthropic-ai/claude-code @tobilu/qmd
+
+# Install gws (Google Workspace CLI) to a globally accessible location
+RUN curl --proto '=https' --tlsv1.2 -LsSf \
+    https://github.com/googleworkspace/cli/releases/latest/download/gws-installer.sh | sh \
+    && mv /root/.cargo/bin/gws /usr/local/bin/gws
 
 # Create app directory
 WORKDIR /app

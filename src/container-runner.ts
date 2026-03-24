@@ -4,6 +4,7 @@
  */
 import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import {
@@ -198,6 +199,48 @@ function buildVolumeMounts(
     containerPath: '/app/src',
     readonly: false,
   });
+
+  // Mount QMD cache (search index) and config
+  // Cache needs write access because SQLite opens in WAL mode
+  const qmdCacheDir = path.join(
+    process.env.HOME || os.homedir(),
+    '.cache',
+    'qmd',
+  );
+  if (fs.existsSync(qmdCacheDir)) {
+    mounts.push({
+      hostPath: qmdCacheDir,
+      containerPath: '/home/node/.cache/qmd',
+      readonly: false,
+    });
+  }
+  const qmdConfigDir = path.join(
+    process.env.HOME || os.homedir(),
+    '.config',
+    'qmd',
+  );
+  if (fs.existsSync(qmdConfigDir)) {
+    mounts.push({
+      hostPath: qmdConfigDir,
+      containerPath: '/home/node/.config/qmd',
+      readonly: true,
+    });
+  }
+
+  // Mount Google Workspace CLI credentials
+  // Needs write access for token refresh (token_cache.json)
+  const gwsConfigDir = path.join(
+    process.env.HOME || os.homedir(),
+    '.config',
+    'gws',
+  );
+  if (fs.existsSync(gwsConfigDir)) {
+    mounts.push({
+      hostPath: gwsConfigDir,
+      containerPath: '/home/node/.config/gws',
+      readonly: false,
+    });
+  }
 
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {

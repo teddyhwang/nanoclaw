@@ -1,4 +1,11 @@
-import { Client, Events, GatewayIntentBits, Message, TextChannel } from 'discord.js';
+import {
+  Client,
+  Events,
+  GatewayIntentBits,
+  Message,
+  Partials,
+  TextChannel,
+} from 'discord.js';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
@@ -37,6 +44,7 @@ export class DiscordChannel implements Channel {
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.DirectMessages,
       ],
+      partials: [Partials.Channel],
     });
 
     this.client.on(Events.MessageCreate, async (message: Message) => {
@@ -88,18 +96,20 @@ export class DiscordChannel implements Channel {
 
       // Handle attachments — store placeholders so the agent knows something was sent
       if (message.attachments.size > 0) {
-        const attachmentDescriptions = [...message.attachments.values()].map((att) => {
-          const contentType = att.contentType || '';
-          if (contentType.startsWith('image/')) {
-            return `[Image: ${att.name || 'image'}]`;
-          } else if (contentType.startsWith('video/')) {
-            return `[Video: ${att.name || 'video'}]`;
-          } else if (contentType.startsWith('audio/')) {
-            return `[Audio: ${att.name || 'audio'}]`;
-          } else {
-            return `[File: ${att.name || 'file'}]`;
-          }
-        });
+        const attachmentDescriptions = [...message.attachments.values()].map(
+          (att) => {
+            const contentType = att.contentType || '';
+            if (contentType.startsWith('image/')) {
+              return `[Image: ${att.name || 'image'}]`;
+            } else if (contentType.startsWith('video/')) {
+              return `[Video: ${att.name || 'video'}]`;
+            } else if (contentType.startsWith('audio/')) {
+              return `[Audio: ${att.name || 'audio'}]`;
+            } else {
+              return `[File: ${att.name || 'file'}]`;
+            }
+          },
+        );
         if (content) {
           content = `${content}\n${attachmentDescriptions.join('\n')}`;
         } else {
@@ -125,7 +135,13 @@ export class DiscordChannel implements Channel {
 
       // Store chat metadata for discovery
       const isGroup = message.guild !== null;
-      this.opts.onChatMetadata(chatJid, timestamp, chatName, 'discord', isGroup);
+      this.opts.onChatMetadata(
+        chatJid,
+        timestamp,
+        chatName,
+        'discord',
+        isGroup,
+      );
 
       // Only deliver full message for registered groups
       const group = this.opts.registeredGroups()[chatJid];
@@ -234,6 +250,45 @@ export class DiscordChannel implements Channel {
       }
     } catch (err) {
       logger.debug({ jid, err }, 'Failed to send Discord typing indicator');
+    }
+  }
+
+  async addReaction(
+    jid: string,
+    messageId: string,
+    emoji: string,
+  ): Promise<void> {
+    if (!this.client) return;
+    try {
+      const channelId = jid.replace(/^dc:/, '');
+      const channel = await this.client.channels.fetch(channelId);
+      if (channel && 'messages' in channel) {
+        const msg = await (channel as TextChannel).messages.fetch(messageId);
+        await msg.react(emoji);
+      }
+    } catch (err) {
+      logger.debug({ jid, messageId, emoji, err }, 'Failed to add reaction');
+    }
+  }
+
+  async removeReaction(
+    jid: string,
+    messageId: string,
+    emoji: string,
+  ): Promise<void> {
+    if (!this.client) return;
+    try {
+      const channelId = jid.replace(/^dc:/, '');
+      const channel = await this.client.channels.fetch(channelId);
+      if (channel && 'messages' in channel) {
+        const msg = await (channel as TextChannel).messages.fetch(messageId);
+        const botId = this.client.user?.id;
+        if (botId) {
+          await msg.reactions.resolve(emoji)?.users.remove(botId);
+        }
+      }
+    } catch (err) {
+      logger.debug({ jid, messageId, emoji, err }, 'Failed to remove reaction');
     }
   }
 }
