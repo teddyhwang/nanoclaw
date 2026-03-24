@@ -1,4 +1,5 @@
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import {
@@ -33,7 +34,6 @@ import {
   getAllTasks,
   getMessagesSince,
   getNewMessages,
-  getRegisteredGroup,
   getRouterState,
   initDatabase,
   setRegisteredGroup,
@@ -57,6 +57,12 @@ import {
   loadSenderAllowlist,
   shouldDropMessage,
 } from './sender-allowlist.js';
+import { startHomekitWatcher } from './homekit-watcher.js';
+import {
+  classifyMessage,
+  markAssistantRoute,
+  markDevRoute,
+} from './message-router-llm.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { Channel, NewMessage, RegisteredGroup } from './types.js';
 import { logger } from './logger.js';
@@ -71,6 +77,8 @@ let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
 
 const channels: Channel[] = [];
+const devTypingIntervals = new Map<string, ReturnType<typeof setInterval>>();
+const devReactionMessages = new Map<string, { messageId: string }>();
 const queue = new GroupQueue();
 
 function loadState(): void {
@@ -220,8 +228,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           ? result.result
           : JSON.stringify(result.result);
       // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-      const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
+      // Also strip prompt echo: sometimes the SDK result includes the
+      // "Human: <context .../>...<messages>...</messages>" prefix.
+      const text = raw
+        .replace(/<internal>[\s\S]*?<\/internal>/g, '')
+        .replace(
+          /^Human:\s*<context[^>]*\/>\s*<messages>[\s\S]*?<\/messages>\s*/i,
+          '',
+        )
+        .trim();
+      logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
       if (text) {
         await channel.sendMessage(chatJid, text);
         outputSentToUser = true;
@@ -548,6 +564,81 @@ async function main(): Promise<void> {
         return;
       }
 
+      // Route message: /dev prefix or LLM classification → pi session vs container agent
+      if (!msg.is_from_me && !msg.is_bot_message && registeredGroups[chatJid]) {
+        const isExplicitDev = trimmed.startsWith('/dev ') || trimmed === '/dev';
+        const messageContent = isExplicitDev
+          ? trimmed.slice(4).trim()
+          : trimmed;
+
+        const forwardToPi = (content: string, method: string) => {
+          if (!content) return;
+          const piQueueDir = path.join(
+            os.homedir(),
+            '.config',
+            'nanoclaw',
+            'pi-queue',
+          );
+          fs.mkdirSync(piQueueDir, { recursive: true });
+          const queueFile = path.join(piQueueDir, `${Date.now()}-msg.json`);
+          fs.writeFileSync(
+            queueFile,
+            JSON.stringify({
+              chatJid,
+              sender: msg.sender,
+              senderName: msg.sender_name,
+              content,
+              timestamp: msg.timestamp,
+            }),
+          );
+          markDevRoute(chatJid);
+          logger.info(
+            { chatJid, sender: msg.sender_name, method },
+            'Dev message forwarded to pi',
+          );
+          const ackChannel = findChannel(channels, chatJid);
+          if (ackChannel) {
+            // Clear any existing typing interval for this chat
+            const existing = devTypingIntervals.get(chatJid);
+            if (existing) clearInterval(existing);
+
+            // Add 🤔 reaction to the user's message to indicate thinking
+            ackChannel.addReaction?.(chatJid, msg.id, '🤔')?.catch(() => {});
+            devReactionMessages.set(chatJid, { messageId: msg.id });
+
+            // Safety: auto-clear reaction after 120 seconds in case no reply comes
+            const reactionMsgId = msg.id;
+            setTimeout(() => {
+              const tracked = devReactionMessages.get(chatJid);
+              if (tracked?.messageId === reactionMsgId) {
+                ackChannel
+                  .removeReaction?.(chatJid, reactionMsgId, '🤔')
+                  ?.catch(() => {});
+                devReactionMessages.delete(chatJid);
+              }
+            }, 120 * 1000);
+          }
+        };
+
+        if (isExplicitDev) {
+          forwardToPi(messageContent, 'explicit');
+          return;
+        }
+
+        // Async classification — classify then either forward or store
+        classifyMessage(trimmed, chatJid)
+          .catch(() => 'assistant' as const)
+          .then((route) => {
+            if (route === 'dev') {
+              forwardToPi(messageContent, 'auto');
+            } else {
+              markAssistantRoute(chatJid);
+              storeMessage(msg);
+            }
+          });
+        return;
+      }
+
       // Sender allowlist drop mode: discard messages from denied senders before storing
       if (!msg.is_from_me && !msg.is_bot_message && registeredGroups[chatJid]) {
         const cfg = loadSenderAllowlist();
@@ -560,6 +651,25 @@ async function main(): Promise<void> {
               { chatJid, sender: msg.sender },
               'sender-allowlist: dropping message (drop mode)',
             );
+          }
+          // Notify owner via DM about denied message
+          const ownerDmJid = 'dc:1485414819614949377';
+          if (chatJid !== ownerDmJid) {
+            const ownerChannel = findChannel(channels, ownerDmJid);
+            if (ownerChannel) {
+              const senderLabel = msg.sender_name || msg.sender;
+              ownerChannel
+                .sendMessage(
+                  ownerDmJid,
+                  `⚠️ Blocked message from **${senderLabel}** (${msg.sender}) in ${chatJid}:\n> ${msg.content}`,
+                )
+                .catch((err) =>
+                  logger.error(
+                    { err },
+                    'Failed to notify owner of blocked message',
+                  ),
+                );
+            }
           }
           return;
         }
@@ -632,7 +742,106 @@ async function main(): Promise<void> {
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) =>
       writeGroupsSnapshot(gf, im, ag, rj),
+    onTasksChanged: () => {
+      const tasks = getAllTasks();
+      const taskRows = tasks.map((t) => ({
+        id: t.id,
+        groupFolder: t.group_folder,
+        prompt: t.prompt,
+        schedule_type: t.schedule_type,
+        schedule_value: t.schedule_value,
+        status: t.status,
+        next_run: t.next_run,
+      }));
+      for (const group of Object.values(registeredGroups)) {
+        writeTasksSnapshot(group.folder, group.isMain === true, taskRows);
+      }
+    },
   });
+  // Pi outbox watcher — poll for replies from the pi dev session
+  const piOutboxDir = path.join(
+    os.homedir(),
+    '.config',
+    'nanoclaw',
+    'pi-outbox',
+  );
+  fs.mkdirSync(piOutboxDir, { recursive: true });
+  setInterval(() => {
+    try {
+      const files = fs
+        .readdirSync(piOutboxDir)
+        .filter((f) => f.endsWith('.json'))
+        .sort();
+      for (const file of files) {
+        const filePath = path.join(piOutboxDir, file);
+        try {
+          const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+          fs.unlinkSync(filePath);
+          if (data.chatJid && data.message) {
+            const channel = findChannel(channels, data.chatJid);
+            if (channel) {
+              // Stop typing indicator for this chat (legacy cleanup)
+              const typingInterval = devTypingIntervals.get(data.chatJid);
+              if (typingInterval) {
+                clearInterval(typingInterval);
+                devTypingIntervals.delete(data.chatJid);
+              }
+
+              // Switch reaction from 🤔 to 📝 (writing), send message, then clear both.
+              const tracked = devReactionMessages.get(data.chatJid);
+              const sendReply = async () => {
+                if (tracked && channel.addReaction && channel.removeReaction) {
+                  const { messageId } = tracked;
+                  devReactionMessages.delete(data.chatJid);
+                  try {
+                    await channel.removeReaction(data.chatJid, messageId, '🤔');
+                    await channel.addReaction(data.chatJid, messageId, '📝');
+                    await channel.sendMessage(data.chatJid, data.message);
+                  } finally {
+                    await channel
+                      .removeReaction(data.chatJid, messageId, '📝')
+                      .catch(() => {});
+                    await channel
+                      .removeReaction(data.chatJid, messageId, '🤔')
+                      .catch(() => {});
+                  }
+                } else {
+                  await channel.sendMessage(data.chatJid, data.message);
+                }
+
+                // Keep dev context alive — pi just replied to this chat
+                markDevRoute(data.chatJid);
+                logger.info(
+                  { jid: data.chatJid },
+                  'Pi outbox message sent to Discord',
+                );
+              };
+
+              sendReply().catch((err) =>
+                logger.error({ err }, 'Failed to send pi outbox message'),
+              );
+            }
+          }
+        } catch {
+          try {
+            fs.unlinkSync(filePath);
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }, 1000);
+
+  // HomeKit event watcher — monitors automation sequences, alerts on failure
+  const ownerDmJid = 'dc:1485414819614949377';
+  startHomekitWatcher(async (jid, text) => {
+    const channel = findChannel(channels, jid);
+    if (channel) await channel.sendMessage(jid, text);
+  }, ownerDmJid);
+
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
   startMessageLoop().catch((err) => {

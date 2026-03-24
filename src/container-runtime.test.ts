@@ -62,15 +62,15 @@ describe('ensureContainerRuntimeRunning', () => {
       `${CONTAINER_RUNTIME_BIN} system status`,
       { stdio: 'pipe' },
     );
-    expect(logger.debug).toHaveBeenCalledWith('Container runtime already running');
+    expect(logger.debug).toHaveBeenCalledWith(
+      'Container runtime already running',
+    );
   });
 
   it('auto-starts when system status fails', () => {
-    // First call (system status) fails
     mockExecSync.mockImplementationOnce(() => {
       throw new Error('not running');
     });
-    // Second call (system start) succeeds
     mockExecSync.mockReturnValueOnce('');
 
     ensureContainerRuntimeRunning();
@@ -100,7 +100,6 @@ describe('ensureContainerRuntimeRunning', () => {
 
 describe('cleanupOrphans', () => {
   it('stops orphaned nanoclaw containers from JSON output', () => {
-    // Apple Container ls returns JSON
     const lsOutput = JSON.stringify([
       { status: 'running', configuration: { id: 'nanoclaw-group1-111' } },
       { status: 'stopped', configuration: { id: 'nanoclaw-group2-222' } },
@@ -108,12 +107,10 @@ describe('cleanupOrphans', () => {
       { status: 'running', configuration: { id: 'other-container' } },
     ]);
     mockExecSync.mockReturnValueOnce(lsOutput);
-    // stop calls succeed
     mockExecSync.mockReturnValue('');
 
     cleanupOrphans();
 
-    // ls + 2 stop calls (only running nanoclaw- containers)
     expect(mockExecSync).toHaveBeenCalledTimes(3);
     expect(mockExecSync).toHaveBeenNthCalledWith(
       2,
@@ -145,7 +142,7 @@ describe('cleanupOrphans', () => {
       throw new Error('container not available');
     });
 
-    cleanupOrphans(); // should not throw
+    cleanupOrphans();
 
     expect(logger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ err: expect.any(Error) }),
@@ -159,14 +156,12 @@ describe('cleanupOrphans', () => {
       { status: 'running', configuration: { id: 'nanoclaw-b-2' } },
     ]);
     mockExecSync.mockReturnValueOnce(lsOutput);
-    // First stop fails
     mockExecSync.mockImplementationOnce(() => {
       throw new Error('already stopped');
     });
-    // Second stop succeeds
     mockExecSync.mockReturnValueOnce('');
 
-    cleanupOrphans(); // should not throw
+    cleanupOrphans();
 
     expect(mockExecSync).toHaveBeenCalledTimes(3);
     expect(logger.info).toHaveBeenCalledWith(
