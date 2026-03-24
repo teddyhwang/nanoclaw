@@ -34,5 +34,8 @@ groups/global/*
 
 # Skills system (local per-installation state)
 .nanoclaw/
+.agents/
+.pi/dev-session/
+db/dev-agent-state.json
 
 agents-sdk-docs
