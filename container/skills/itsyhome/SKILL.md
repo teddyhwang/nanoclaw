@@ -67,7 +67,40 @@ Device and room names with spaces must be URL-encoded:
 | Living Room | Christmas Tree, Living Room Lights, TV Backlight, Left, Middle, Right |
 | Office | Elgato, Floor Lamp, Hue lightstrip, Left Desk, Right Desk |
 | Outside | Front Door Lights, Front Roof Lights, Backyard, Backyard Roof, Driveway, Porch Lights |
-| Security | Aqara Smart Lock, Away, Home, Night |
+| Security | Aqara Smart Lock, DSC (alarm panel), Away (switch), Night (switch) |
+
+## Security / Alarm System
+
+The DSC alarm panel (via Envisalink) is the **authoritative source** for the alarm state. It exposes a `SecuritySystem` service with these values:
+
+| SecuritySystemCurrentState | Meaning |
+|---|---|
+| 0 | **Stay Armed** (Home) |
+| 1 | **Away Armed** |
+| 2 | **Night Armed** |
+| 3 | **Disarmed** |
+| 4 | **Alarm Triggered** |
+
+To check the actual alarm state, look at the DSC accessory's `SecuritySystemCurrentState` value — **not** the Away/Night switches. The Away and Night switches are virtual switches used for automation triggers; their on/off state does NOT directly indicate the alarm mode.
+
+**When reporting alarm status to the user:**
+- Read `SecuritySystemCurrentState` from DSC → map to the table above
+- Say "Stay Armed" / "Home" for value 0, "Away Armed" for 1, "Night Armed" for 2, "Disarmed" for 3
+
+### Controlling the alarm (via service ID)
+
+The DSC SecuritySystem service ID is `53D95070-5CA7-502A-AC46-7C67DFB6ED4B`.
+
+```bash
+# Arm Stay (Home)
+curl -s http://host.docker.internal:8423/arm/stay/53D95070-5CA7-502A-AC46-7C67DFB6ED4B
+
+# Arm Away
+curl -s http://host.docker.internal:8423/arm/away/53D95070-5CA7-502A-AC46-7C67DFB6ED4B
+
+# Disarm
+curl -s http://host.docker.internal:8423/disarm/53D95070-5CA7-502A-AC46-7C67DFB6ED4B
+```
 
 ## Security Rules
 

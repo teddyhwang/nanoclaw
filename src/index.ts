@@ -79,7 +79,17 @@ let messageLoopRunning = false;
 const channels: Channel[] = [];
 const devTypingIntervals = new Map<string, ReturnType<typeof setInterval>>();
 const devReactionMessages = new Map<string, { messageId: string }>();
+const devStreamMessages = new Map<string, { messageId: string }>();
 const queue = new GroupQueue();
+
+function splitDiscordChunks(text: string, maxLength = 2000): string[] {
+  if (!text) return [''];
+  const chunks: string[] = [];
+  for (let i = 0; i < text.length; i += maxLength) {
+    chunks.push(text.slice(i, i + maxLength));
+  }
+  return chunks;
+}
 
 function loadState(): void {
   lastTimestamp = getRouterState('last_timestamp') || '';
@@ -567,6 +577,7 @@ async function main(): Promise<void> {
       // Route message: /dev prefix or LLM classification → pi session vs container agent
       if (!msg.is_from_me && !msg.is_bot_message && registeredGroups[chatJid]) {
         const isExplicitDev = trimmed.startsWith('/dev ') || trimmed === '/dev';
+        const isExplicitAssistant = TRIGGER_PATTERN.test(trimmed);
         const messageContent = isExplicitDev
           ? trimmed.slice(4).trim()
           : trimmed;
@@ -581,6 +592,7 @@ async function main(): Promise<void> {
           );
           fs.mkdirSync(piQueueDir, { recursive: true });
           const queueFile = path.join(piQueueDir, `${Date.now()}-msg.json`);
+          const forwardedToPiAt = new Date().toISOString();
           fs.writeFileSync(
             queueFile,
             JSON.stringify({
@@ -589,11 +601,21 @@ async function main(): Promise<void> {
               senderName: msg.sender_name,
               content,
               timestamp: msg.timestamp,
+              sourceMessageId: msg.id,
+              discordMessageTimestamp: msg.timestamp,
+              forwardedToPiAt,
             }),
           );
           markDevRoute(chatJid);
           logger.info(
-            { chatJid, sender: msg.sender_name, method },
+            {
+              chatJid,
+              sender: msg.sender_name,
+              method,
+              sourceMessageId: msg.id,
+              discordMessageTimestamp: msg.timestamp,
+              forwardedToPiAt,
+            },
             'Dev message forwarded to pi',
           );
           const ackChannel = findChannel(channels, chatJid);
@@ -622,6 +644,14 @@ async function main(): Promise<void> {
 
         if (isExplicitDev) {
           forwardToPi(messageContent, 'explicit');
+          return;
+        }
+
+        // Explicit assistant trigger (@Optimus ...) should route to the
+        // container assistant even if the chat is currently in dev context.
+        if (isExplicitAssistant) {
+          markAssistantRoute(chatJid);
+          storeMessage(msg);
           return;
         }
 
@@ -766,12 +796,27 @@ async function main(): Promise<void> {
     'pi-outbox',
   );
   fs.mkdirSync(piOutboxDir, { recursive: true });
-  setInterval(() => {
+  const PI_OUTBOX_POLL_MS = 1000;
+  const PI_OUTBOX_MAX_IDLE_POLL_MS = PI_OUTBOX_POLL_MS * 5;
+  let piOutboxPollMs = PI_OUTBOX_POLL_MS;
+
+  const pollPiOutbox = () => {
     try {
       const files = fs
         .readdirSync(piOutboxDir)
         .filter((f) => f.endsWith('.json'))
         .sort();
+
+      if (files.length === 0) {
+        piOutboxPollMs = Math.min(
+          PI_OUTBOX_MAX_IDLE_POLL_MS,
+          piOutboxPollMs * 2,
+        );
+        return;
+      }
+
+      piOutboxPollMs = PI_OUTBOX_POLL_MS;
+
       for (const file of files) {
         const filePath = path.join(piOutboxDir, file);
         try {
@@ -780,45 +825,135 @@ async function main(): Promise<void> {
           if (data.chatJid && data.message) {
             const channel = findChannel(channels, data.chatJid);
             if (channel) {
-              // Stop typing indicator for this chat (legacy cleanup)
-              const typingInterval = devTypingIntervals.get(data.chatJid);
-              if (typingInterval) {
-                clearInterval(typingInterval);
-                devTypingIntervals.delete(data.chatJid);
-              }
-
-              // Switch reaction from 🤔 to 📝 (writing), send message, then clear both.
-              const tracked = devReactionMessages.get(data.chatJid);
-              const sendReply = async () => {
-                if (tracked && channel.addReaction && channel.removeReaction) {
-                  const { messageId } = tracked;
-                  devReactionMessages.delete(data.chatJid);
-                  try {
-                    await channel.removeReaction(data.chatJid, messageId, '🤔');
-                    await channel.addReaction(data.chatJid, messageId, '📝');
-                    await channel.sendMessage(data.chatJid, data.message);
-                  } finally {
-                    await channel
-                      .removeReaction(data.chatJid, messageId, '📝')
-                      .catch(() => {});
-                    await channel
-                      .removeReaction(data.chatJid, messageId, '🤔')
-                      .catch(() => {});
+              const replyPolledAt = new Date().toISOString();
+              const latency = data.latency as
+                | {
+                    promptId?: string;
+                    queueToDequeueMs?: number;
+                    dequeueToPiAcceptMs?: number;
+                    dequeueToFirstAssistantMs?: number;
+                    dequeueToFirstTokenMs?: number;
+                    totalAgentMs?: number;
+                    totalFromForwardMs?: number;
+                    forwardedToPiAt?: string;
                   }
+                | undefined;
+              const kind = (data.kind as string | undefined) || 'final';
+
+              const stopTyping = () => {
+                const typingInterval = devTypingIntervals.get(data.chatJid);
+                if (typingInterval) {
+                  clearInterval(typingInterval);
+                  devTypingIntervals.delete(data.chatJid);
+                }
+              };
+
+              const finishReaction = async () => {
+                const tracked = devReactionMessages.get(data.chatJid);
+                if (
+                  !tracked ||
+                  !channel.addReaction ||
+                  !channel.removeReaction
+                ) {
+                  return;
+                }
+                const { messageId } = tracked;
+                devReactionMessages.delete(data.chatJid);
+                try {
+                  await channel.removeReaction(data.chatJid, messageId, '🤔');
+                  await channel.removeReaction(data.chatJid, messageId, '📝');
+                } catch {
+                  // ignore reaction cleanup failures
+                }
+              };
+
+              const markWritingReaction = async () => {
+                const tracked = devReactionMessages.get(data.chatJid);
+                if (
+                  !tracked ||
+                  !channel.addReaction ||
+                  !channel.removeReaction
+                ) {
+                  return;
+                }
+                const { messageId } = tracked;
+                try {
+                  await channel.removeReaction(data.chatJid, messageId, '🤔');
+                  await channel.addReaction(data.chatJid, messageId, '📝');
+                } catch {
+                  // ignore reaction update failures
+                }
+              };
+
+              const sendReply = async () => {
+                if (kind === 'stream_start' || kind === 'stream_update') {
+                  await markWritingReaction();
+                  const existing = devStreamMessages.get(data.chatJid);
+                  if (existing && channel.editMessage) {
+                    await channel.editMessage(
+                      data.chatJid,
+                      existing.messageId,
+                      data.message,
+                    );
+                  } else if (!existing && channel.sendMessageWithId) {
+                    const messageId = await channel.sendMessageWithId(
+                      data.chatJid,
+                      data.message,
+                    );
+                    if (messageId) {
+                      devStreamMessages.set(data.chatJid, { messageId });
+                    }
+                  }
+                  markDevRoute(data.chatJid);
+                  return;
+                }
+
+                stopTyping();
+                await markWritingReaction();
+                const existing = devStreamMessages.get(data.chatJid);
+                if (existing && channel.editMessage) {
+                  const chunks = splitDiscordChunks(data.message);
+                  await channel.editMessage(
+                    data.chatJid,
+                    existing.messageId,
+                    chunks[0],
+                  );
+                  for (const chunk of chunks.slice(1)) {
+                    await channel.sendMessage(data.chatJid, chunk);
+                  }
+                  devStreamMessages.delete(data.chatJid);
                 } else {
                   await channel.sendMessage(data.chatJid, data.message);
                 }
 
+                await finishReaction();
+
                 // Keep dev context alive — pi just replied to this chat
                 markDevRoute(data.chatJid);
                 logger.info(
-                  { jid: data.chatJid },
+                  {
+                    jid: data.chatJid,
+                    replyPolledAt,
+                    totalFromForwardMs: latency?.totalFromForwardMs,
+                    totalAgentMs: latency?.totalAgentMs,
+                    queueToDequeueMs: latency?.queueToDequeueMs,
+                    dequeueToPiAcceptMs: latency?.dequeueToPiAcceptMs,
+                    dequeueToFirstAssistantMs:
+                      latency?.dequeueToFirstAssistantMs,
+                    dequeueToFirstTokenMs: latency?.dequeueToFirstTokenMs,
+                    outboxToDiscordSendMs:
+                      latency?.forwardedToPiAt !== undefined
+                        ? new Date(replyPolledAt).getTime() -
+                          new Date(latency.forwardedToPiAt).getTime() -
+                          (latency.totalFromForwardMs || 0)
+                        : undefined,
+                  },
                   'Pi outbox message sent to Discord',
                 );
               };
 
               sendReply().catch((err) =>
-                logger.error({ err }, 'Failed to send pi outbox message'),
+                logger.error({ err, kind }, 'Failed to send pi outbox message'),
               );
             }
           }
@@ -831,9 +966,13 @@ async function main(): Promise<void> {
         }
       }
     } catch {
-      /* ignore */
+      piOutboxPollMs = Math.min(PI_OUTBOX_MAX_IDLE_POLL_MS, piOutboxPollMs * 2);
+    } finally {
+      setTimeout(pollPiOutbox, piOutboxPollMs);
     }
-  }, 1000);
+  };
+
+  setTimeout(pollPiOutbox, piOutboxPollMs);
 
   // HomeKit event watcher — monitors automation sequences, alerts on failure
   const ownerDmJid = 'dc:1485414819614949377';

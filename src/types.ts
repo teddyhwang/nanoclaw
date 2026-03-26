@@ -86,6 +86,10 @@ export interface Channel {
   isConnected(): boolean;
   ownsJid(jid: string): boolean;
   disconnect(): Promise<void>;
+  // Optional: send and return the created platform message id.
+  sendMessageWithId?(jid: string, text: string): Promise<string | null>;
+  // Optional: edit an existing platform message.
+  editMessage?(jid: string, messageId: string, text: string): Promise<void>;
   // Optional: typing indicator. Channels that support it implement it.
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
   // Optional: add/remove emoji reactions on a message.

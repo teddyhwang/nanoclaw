@@ -57,6 +57,86 @@ interface VolumeMount {
   readonly: boolean;
 }
 
+const snapshotContentCache = new Map<string, string>();
+
+function writeFileIfChanged(filePath: string, content: string): void {
+  const cached = snapshotContentCache.get(filePath);
+  if (cached === content) return;
+
+  if (cached === undefined) {
+    try {
+      const existing = fs.readFileSync(filePath, 'utf-8');
+      if (existing === content) {
+        snapshotContentCache.set(filePath, content);
+        return;
+      }
+    } catch {
+      // file missing or unreadable; fall through to write
+    }
+  }
+
+  fs.writeFileSync(filePath, content);
+  snapshotContentCache.set(filePath, content);
+}
+
+function buildSkillsSourceStamp(skillsSrc: string): string {
+  const entries: string[] = [];
+
+  const walk = (dir: string, relativeDir = ''): void => {
+    const names = fs.readdirSync(dir).sort();
+    for (const name of names) {
+      const fullPath = path.join(dir, name);
+      const relPath = relativeDir ? path.join(relativeDir, name) : name;
+      const stat = fs.statSync(fullPath);
+      if (stat.isDirectory()) {
+        entries.push(`dir:${relPath}`);
+        walk(fullPath, relPath);
+      } else {
+        entries.push(`file:${relPath}:${stat.size}:${stat.mtimeMs}`);
+      }
+    }
+  };
+
+  walk(skillsSrc);
+  return entries.join('\n');
+}
+
+function syncContainerSkills(groupSessionsDir: string): void {
+  const skillsSrc = path.join(process.cwd(), 'container', 'skills');
+  if (!fs.existsSync(skillsSrc)) return;
+
+  const skillsDst = path.join(groupSessionsDir, 'skills');
+  const stampFile = path.join(groupSessionsDir, '.skills-sync-stamp');
+  const sourceStamp = buildSkillsSourceStamp(skillsSrc);
+
+  let currentStamp = '';
+  try {
+    currentStamp = fs.readFileSync(stampFile, 'utf-8');
+  } catch {
+    // first sync or missing stamp
+  }
+
+  if (currentStamp === sourceStamp && fs.existsSync(skillsDst)) {
+    return;
+  }
+
+  logger.debug(
+    { groupSessionsDir },
+    'Syncing container skills into group session',
+  );
+  fs.rmSync(skillsDst, { recursive: true, force: true });
+  fs.mkdirSync(skillsDst, { recursive: true });
+
+  for (const skillDir of fs.readdirSync(skillsSrc)) {
+    const srcDir = path.join(skillsSrc, skillDir);
+    if (!fs.statSync(srcDir).isDirectory()) continue;
+    const dstDir = path.join(skillsDst, skillDir);
+    fs.cpSync(srcDir, dstDir, { recursive: true });
+  }
+
+  fs.writeFileSync(stampFile, sourceStamp);
+}
+
 function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
@@ -148,16 +228,8 @@ function buildVolumeMounts(
   }
 
   // Sync skills from container/skills/ into each group's .claude/skills/
-  const skillsSrc = path.join(process.cwd(), 'container', 'skills');
-  const skillsDst = path.join(groupSessionsDir, 'skills');
-  if (fs.existsSync(skillsSrc)) {
-    for (const skillDir of fs.readdirSync(skillsSrc)) {
-      const srcDir = path.join(skillsSrc, skillDir);
-      if (!fs.statSync(srcDir).isDirectory()) continue;
-      const dstDir = path.join(skillsDst, skillDir);
-      fs.cpSync(srcDir, dstDir, { recursive: true });
-    }
-  }
+  // only when the source tree changed.
+  syncContainerSkills(groupSessionsDir);
   mounts.push({
     hostPath: groupSessionsDir,
     containerPath: '/home/node/.claude',
@@ -239,6 +311,20 @@ function buildVolumeMounts(
       hostPath: gwsConfigDir,
       containerPath: '/home/node/.config/gws',
       readonly: false,
+    });
+  }
+
+  // Mount Lunch Money API token (read-only)
+  const lunchmoneyConfigDir = path.join(
+    process.env.HOME || os.homedir(),
+    '.config',
+    'lunchmoney',
+  );
+  if (fs.existsSync(lunchmoneyConfigDir)) {
+    mounts.push({
+      hostPath: lunchmoneyConfigDir,
+      containerPath: '/home/node/.config/lunchmoney',
+      readonly: true,
     });
   }
 
@@ -718,7 +804,7 @@ export function writeTasksSnapshot(
     : tasks.filter((t) => t.groupFolder === groupFolder);
 
   const tasksFile = path.join(groupIpcDir, 'current_tasks.json');
-  fs.writeFileSync(tasksFile, JSON.stringify(filteredTasks, null, 2));
+  writeFileIfChanged(tasksFile, JSON.stringify(filteredTasks, null, 2));
 }
 
 export interface AvailableGroup {
@@ -746,12 +832,11 @@ export function writeGroupsSnapshot(
   const visibleGroups = isMain ? groups : [];
 
   const groupsFile = path.join(groupIpcDir, 'available_groups.json');
-  fs.writeFileSync(
+  writeFileIfChanged(
     groupsFile,
     JSON.stringify(
       {
         groups: visibleGroups,
-        lastSync: new Date().toISOString(),
       },
       null,
       2,

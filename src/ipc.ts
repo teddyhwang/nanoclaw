@@ -26,6 +26,7 @@ export interface IpcDeps {
 }
 
 let ipcWatcherRunning = false;
+const IPC_MAX_IDLE_POLL_INTERVAL = IPC_POLL_INTERVAL * 5;
 
 export function startIpcWatcher(deps: IpcDeps): void {
   if (ipcWatcherRunning) {
@@ -37,7 +38,11 @@ export function startIpcWatcher(deps: IpcDeps): void {
   const ipcBaseDir = path.join(DATA_DIR, 'ipc');
   fs.mkdirSync(ipcBaseDir, { recursive: true });
 
+  let currentPollInterval = IPC_POLL_INTERVAL;
+
   const processIpcFiles = async () => {
+    let processedAny = false;
+
     // Scan all group IPC directories (identity determined by directory)
     let groupFolders: string[];
     try {
@@ -47,7 +52,11 @@ export function startIpcWatcher(deps: IpcDeps): void {
       });
     } catch (err) {
       logger.error({ err }, 'Error reading IPC base directory');
-      setTimeout(processIpcFiles, IPC_POLL_INTERVAL);
+      currentPollInterval = Math.min(
+        IPC_MAX_IDLE_POLL_INTERVAL,
+        currentPollInterval * 2,
+      );
+      setTimeout(processIpcFiles, currentPollInterval);
       return;
     }
 
@@ -70,6 +79,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
           const messageFiles = fs
             .readdirSync(messagesDir)
             .filter((f) => f.endsWith('.json'));
+          if (messageFiles.length > 0) processedAny = true;
           for (const file of messageFiles) {
             const filePath = path.join(messagesDir, file);
             try {
@@ -121,6 +131,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
           const taskFiles = fs
             .readdirSync(tasksDir)
             .filter((f) => f.endsWith('.json'));
+          if (taskFiles.length > 0) processedAny = true;
           for (const file of taskFiles) {
             const filePath = path.join(tasksDir, file);
             try {
@@ -147,7 +158,10 @@ export function startIpcWatcher(deps: IpcDeps): void {
       }
     }
 
-    setTimeout(processIpcFiles, IPC_POLL_INTERVAL);
+    currentPollInterval = processedAny
+      ? IPC_POLL_INTERVAL
+      : Math.min(IPC_MAX_IDLE_POLL_INTERVAL, currentPollInterval * 2);
+    setTimeout(processIpcFiles, currentPollInterval);
   };
 
   processIpcFiles();
