@@ -4,6 +4,7 @@
  */
 import { execSync } from 'child_process';
 import {
+  loadInvestmentData,
   saveInvestmentData,
   InvestmentData,
   YearData,
@@ -409,12 +410,13 @@ function parsePredictionModel(): {
 async function main() {
   console.log('📊 Importing investment data from Google Sheets...\n');
 
+  const existing = loadInvestmentData();
   const data: InvestmentData = {
     years: {},
     salaries: [],
     savingsVsSalaries: [],
     predictionModel: { roiGoal: 10, annualSavings: 50000, years: [] },
-    properties: [],
+    properties: existing?.properties || [],
     lastUpdated: new Date().toISOString(),
   };
 

@@ -65,6 +65,21 @@ async function fetchInvestments() {
     $('loading').classList.add('hidden');
     $('app').classList.remove('hidden');
     lucide.createIcons();
+
+    // Refresh button
+    $('refresh-btn').addEventListener('click', async () => {
+      const btn = $('refresh-btn');
+      btn.classList.add('spinning');
+      try {
+        const [newData] = await Promise.all([fetchInvestments(), new Promise(r => setTimeout(r, 500))]);
+        DATA = newData;
+        const view = viewFromPath(location.pathname);
+        renderHeaderStats(view);
+        showView(view);
+        lucide.createIcons();
+      } catch (e) { console.error(e); }
+      btn.classList.remove('spinning');
+    });
   } catch (err) {
     $('loading').innerHTML = `<span style="color:${C.red}">Error: ${err.message}</span>`;
   }

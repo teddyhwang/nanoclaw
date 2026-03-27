@@ -138,7 +138,7 @@ function render(data) {
   renderNetWorth(data.accounts, data.properties || []);
   renderIncome(data.transactions);
   renderAccounts(data.accounts);
-  renderProperties(data.properties || []);
+  renderProperties(data.properties || [], data.accounts);
   renderDonut(data.transactions);
   renderDaily(data.transactions);
   renderWeekly(data.transactions);
@@ -151,10 +151,16 @@ function render(data) {
 
 // ── Properties ──────────────────────────────────────────────
 
-function renderProperties(properties) {
+function renderProperties(properties, accounts) {
   const list = $('properties-list');
   list.innerHTML = '';
-  const total = properties.reduce((s, p) => s + p.value, 0);
+  const propTotal = properties.reduce((s, p) => s + p.value, 0);
+
+  // Valuations header
+  const valLabel = document.createElement('div');
+  valLabel.className = 'prop-section-label';
+  valLabel.textContent = 'Valuations';
+  list.appendChild(valLabel);
 
   for (let i = 0; i < properties.length; i++) {
     const p = properties[i];
@@ -170,10 +176,53 @@ function renderProperties(properties) {
     list.appendChild(row);
   }
 
-  const totalRow = document.createElement('div');
-  totalRow.className = 'prop-total';
-  totalRow.innerHTML = `<span class="prop-name">Total Properties</span><span class="prop-val">${fmt(total)}</span>`;
-  list.appendChild(totalRow);
+  // Valuations total
+  const propTotalRow = document.createElement('div');
+  propTotalRow.className = 'prop-total';
+  propTotalRow.innerHTML = `<span class="prop-name">${properties.length} properties</span><span class="prop-val" style="color:var(--text-hi)">${fmt(propTotal)}</span>`;
+  list.appendChild(propTotalRow);
+
+  // Loans/mortgages from accounts
+  const loans = accounts.filter(a => normType(a.type) === 'loan');
+  if (loans.length) {
+    const loanLabel = document.createElement('div');
+    loanLabel.className = 'prop-section-label';
+    loanLabel.textContent = 'Mortgages & Loans';
+    list.appendChild(loanLabel);
+
+    // Sort loans to match property order by keyword matching
+    const sortedLoans = [...loans].sort((a, b) => {
+      const findIdx = (name) => {
+        const n = (name || '').toLowerCase();
+        return properties.findIndex(p => p.name.toLowerCase().split(/\s+/).some(w => w.length > 3 && n.includes(w)));
+      };
+      return (findIdx(a.display_name) === -1 ? 999 : findIdx(a.display_name)) - (findIdx(b.display_name) === -1 ? 999 : findIdx(b.display_name));
+    });
+
+    let loanTotal = 0;
+    for (const l of sortedLoans) {
+      const bal = l.to_base != null ? l.to_base : parseFloat(l.balance);
+      loanTotal += bal;
+      let name = l.display_name || '';
+      if (l.institution_name && name.startsWith(l.institution_name)) name = name.slice(l.institution_name.length).replace(/^\s+/, '');
+      name = name.replace(/^LINE OF CREDIT\s*-\s*/i, '');
+      const row = document.createElement('div');
+      row.className = 'prop-row';
+      row.innerHTML = `<span class="prop-name">${name}</span><span class="prop-val" style="color:var(--red)">${fmtFull(-Math.abs(bal))}</span>`;
+      list.appendChild(row);
+    }
+
+    const loanTotalRow = document.createElement('div');
+    loanTotalRow.className = 'prop-total';
+    loanTotalRow.innerHTML = `<span class="prop-name">${loans.length} loans</span><span class="prop-val" style="color:var(--red)">${fmt(loanTotal)}</span>`;
+    list.appendChild(loanTotalRow);
+
+    // Net equity
+    const netRow = document.createElement('div');
+    netRow.className = 'prop-total';
+    netRow.innerHTML = `<span class="prop-name">Net Equity</span><span class="prop-val" style="color:var(--green)">${fmt(propTotal + loanTotal)}</span>`;
+    list.appendChild(netRow);
+  }
 }
 
 async function saveProperty(input) {
@@ -209,7 +258,7 @@ function renderNetWorth(accounts, properties) {
   $('net-worth').textContent = fmt(Object.values(g).reduce((s,v) => s+v, 0));
 
   const bd = $('nw-breakdown'); bd.innerHTML = '';
-  for (const [k,lbl] of [['cash','Cash'],['investment','Invest'],['property','Property'],['credit','Credit'],['loan','Loans']]) {
+  for (const [k,lbl] of [['cash','Cash'],['investment','Invest'],['property','Property'],['credit','Credit']]) {
     if (g[k] === undefined) continue;
     const v = g[k], pill = document.createElement('div');
     pill.className = 'nw-pill';
@@ -242,8 +291,8 @@ function renderIncome(transactions) {
 
 function renderAccounts(accounts) {
   const list = $('account-list'); list.innerHTML = '';
-  const typeOrder = ['cash','investment','credit','loan','other'];
-  const typeLabels = { cash:'Cash & Checking', investment:'Investments', credit:'Credit Cards', loan:'Loans & Mortgages', other:'Other' };
+  const typeOrder = ['cash','investment','credit','other'];
+  const typeLabels = { cash:'Cash & Checking', investment:'Investments', credit:'Credit Cards', other:'Other' };
   const grouped = {};
   for (const a of accounts) { const t = normType(a.type); (grouped[t]||=[]).push(a); }
 
