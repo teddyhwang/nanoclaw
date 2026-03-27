@@ -37,6 +37,20 @@ export async function updateInvestmentField(
   });
 }
 
+export interface AmazonMatch {
+  products: string[];
+  order_id?: string;
+  match_type: 'item' | 'order' | 'pair' | 'triple' | 'refund';
+}
+
+export async function fetchAmazonMatches(): Promise<
+  Record<string, AmazonMatch>
+> {
+  const r = await fetch('/api/amazon-matches');
+  if (!r.ok) return {};
+  return r.json();
+}
+
 export async function saveInvestmentData(data: InvestmentData): Promise<void> {
   await fetch('/api/investments/save', {
     method: 'POST',

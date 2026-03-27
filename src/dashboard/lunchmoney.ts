@@ -204,10 +204,9 @@ export async function getTransactions(
     return readCache<LMTransactions>(CACHE_FILE)!.data;
   }
 
-  // Fetch last 90 days of transactions
+  // Fetch all transactions from LM account start
   const endDate = new Date();
-  const startDate = new Date();
-  startDate.setDate(startDate.getDate() - 90);
+  const startDate = new Date('2020-01-01');
 
   const fmt = (d: Date) => d.toISOString().slice(0, 10);
   let allTx: LMTransaction[] = [];

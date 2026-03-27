@@ -30,7 +30,7 @@ export const CHART_COLORS = [
   COLORS.accent,
 ];
 
-export const TX_PER_PAGE = 30;
+export const TX_PER_PAGE = 100;
 
 export const EXCLUDED_CATS = [
   'payment, transfer',

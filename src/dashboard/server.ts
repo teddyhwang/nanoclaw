@@ -23,6 +23,7 @@ import {
   updateYearField,
 } from './investments.js';
 import { getLiveCurrentYear } from './live-accounts.js';
+import { matchTransactions, hasAmazonData } from './amazon-matcher.js';
 
 const PORT = parseInt(process.env.DASHBOARD_PORT || '3002', 10);
 const HOST = process.env.DASHBOARD_HOST || '0.0.0.0';
@@ -135,6 +136,14 @@ async function handleApi(
         return;
       }
       sendJson(res, { ok: true });
+    } else if (pathname === '/api/amazon-matches') {
+      const txResp = await getTransactions();
+      if (!hasAmazonData()) {
+        sendJson(res, {});
+        return;
+      }
+      const matches = matchTransactions(txResp.transactions);
+      sendJson(res, matches);
     } else if (pathname === '/api/investments/save' && req.method === 'POST') {
       const chunks: Buffer[] = [];
       req.on('data', (c: Buffer) => chunks.push(c));

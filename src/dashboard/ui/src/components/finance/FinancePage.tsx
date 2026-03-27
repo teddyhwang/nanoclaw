@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect } from 'react';
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -19,7 +19,8 @@ import type { DashboardData } from '../../types';
 import { buildCategoryMap } from '../../utils/categories';
 import { relTime } from '../../utils/format';
 import { COLORS, DATE_RANGE_OPTIONS } from '../../constants';
-import { fetchDashboard, saveProperties } from '../../api';
+import { fetchDashboard, saveProperties, fetchAmazonMatches } from '../../api';
+import type { AmazonMatch } from '../../api';
 import { useFilterState } from '../../hooks/useFilterState';
 import { Layout } from '../Layout';
 import { Loading } from '../Loading';
@@ -62,6 +63,12 @@ interface Props {
 export function FinancePage({ initialData }: Props) {
   const [data, setData] = useState(initialData);
   const [refreshing, setRefreshing] = useState(false);
+  const [amazonMatches, setAmazonMatches] = useState<Record<string, AmazonMatch>>({});
+  const [txExpanded, setTxExpanded] = useState(false);
+
+  useEffect(() => {
+    fetchAmazonMatches().then(setAmazonMatches).catch(() => {});
+  }, []);
 
   const {
     filters,
@@ -211,6 +218,9 @@ export function FinancePage({ initialData }: Props) {
           txSort={txSort}
           hasChartFilter={hasChartFilter}
           hasActiveFilters={hasActiveFilters}
+          amazonMatches={amazonMatches}
+          expanded={txExpanded}
+          onToggleExpand={() => setTxExpanded((v) => !v)}
           onSetFilter={setFilter}
           onSetFilters={setFilters}
           onSetTxSort={setTxSort}

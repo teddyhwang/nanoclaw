@@ -1,10 +1,12 @@
-import { useMemo, useState, useCallback } from 'react';
+import { useMemo, useState, useCallback, useRef } from 'react';
+import { Maximize2, Minimize2 } from 'lucide-react';
 import type { Transaction, FilterState, SortState } from '../../types';
 import type { CategoryMap, CategoryGroupMap } from '../../utils/categories';
+import type { AmazonMatch } from '../../api';
 import { spendAmt, isSpend, isIncome, getCategoryGroup } from '../../utils/categories';
 import { fmtFull, fmtDate } from '../../utils/format';
 import { getDateRange } from '../../utils/dates';
-import { TX_PER_PAGE, EXCLUDED_CATS } from '../../constants';
+import { EXCLUDED_CATS } from '../../constants';
 import { usePrivacy } from '../../contexts/PrivacyContext';
 import { FilterPills } from './FilterPills';
 
@@ -17,6 +19,9 @@ interface Props {
   txSort: SortState;
   hasChartFilter: boolean;
   hasActiveFilters: boolean;
+  amazonMatches?: Record<string, AmazonMatch>;
+  expanded?: boolean;
+  onToggleExpand?: () => void;
   onSetFilter: (type: string, value: string | null) => void;
   onSetFilters: (updater: (prev: FilterState) => FilterState) => void;
   onSetTxSort: (updater: (prev: SortState) => SortState) => void;
@@ -32,13 +37,33 @@ export function TransactionsPanel({
   txSort,
   hasChartFilter,
   hasActiveFilters: _hasActiveFilters,
+  amazonMatches = {},
+  expanded = false,
+  onToggleExpand,
   onSetFilter,
   onSetFilters,
   onSetTxSort,
   onClearAll,
 }: Props) {
   const { privacyMode } = usePrivacy();
-  const [page, setPage] = useState(0);
+  const [collapsing, setCollapsing] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  const handleToggle = useCallback(() => {
+    if (expanded) {
+      setCollapsing(true);
+      setTimeout(() => {
+        setCollapsing(false);
+        onToggleExpand?.();
+        // On mobile, scroll to the transactions panel after collapsing
+        requestAnimationFrame(() => {
+          panelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
+      }, 250);
+    } else {
+      onToggleExpand?.();
+    }
+  }, [expanded, onToggleExpand]);
 
   // Category dropdown options
   const categoryOptions = useMemo(() => {
@@ -116,10 +141,7 @@ export function TransactionsPanel({
     return result;
   }, [transactions, categoryMap, categoryGroupMap, debitsNeg, filters, txSort, hasChartFilter]);
 
-  // Reset page when filters change
-  const currentPage = Math.min(page, Math.max(0, Math.ceil(filtered.length / TX_PER_PAGE) - 1));
-  const pageData = filtered.slice(currentPage * TX_PER_PAGE, (currentPage + 1) * TX_PER_PAGE);
-  const totalPages = Math.max(1, Math.ceil(filtered.length / TX_PER_PAGE));
+
 
   const handleSort = useCallback(
     (col: string) => {
@@ -138,7 +160,7 @@ export function TransactionsPanel({
   };
 
   return (
-    <div className="panel tx-panel">
+    <div ref={panelRef} className={`panel tx-panel${expanded ? ' tx-expanded' : ''}${collapsing ? ' tx-collapsing' : ''}`}>
       <div className="tx-head">
         <div className="tx-head-left">
           <span className="panel-head-text">Transactions</span>
@@ -156,6 +178,15 @@ export function TransactionsPanel({
           />
         </div>
         <div className="tx-controls">
+          {onToggleExpand && (
+            <button
+              className="btn-icon"
+              title={expanded ? 'Collapse transactions' : 'Expand transactions'}
+              onClick={handleToggle}
+            >
+              {expanded ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+            </button>
+          )}
           <input
             type="text"
             className="input-sm"
@@ -163,7 +194,6 @@ export function TransactionsPanel({
             value={filters.search}
             onChange={(e) => {
               onSetFilters((prev) => ({ ...prev, search: e.target.value.toLowerCase() }));
-              setPage(0);
             }}
           />
           <select
@@ -171,7 +201,6 @@ export function TransactionsPanel({
             value={filters.catId}
             onChange={(e) => {
               onSetFilters((prev) => ({ ...prev, catId: e.target.value }));
-              setPage(0);
             }}
           >
             <option value="">All Categories</option>
@@ -200,15 +229,25 @@ export function TransactionsPanel({
             </tr>
           </thead>
           <tbody>
-            {pageData.map((tx) => {
+            {filtered.map((tx) => {
               const cat = categoryMap[tx.category_id];
               const amt = spendAmt(tx, debitsNeg);
               const isCr = amt < 0;
               const inc = isIncome(tx, categoryMap);
+              const amzMatch = amazonMatches[String(tx.id)];
               return (
                 <tr key={tx.id}>
                   <td className="date">{fmtDate(tx.date)}</td>
-                  <td className="payee">{tx.payee || tx.original_name || '—'}</td>
+                  <td className="payee">
+                    {tx.payee || tx.original_name || '—'}
+                    {amzMatch && (
+                      <div className="amazon-detail">
+                        {amzMatch.products.map((p, i) => (
+                          <span key={i} className="amazon-product">{p}</span>
+                        ))}
+                      </div>
+                    )}
+                  </td>
                   <td className="cat">{cat?.name || '—'}</td>
                   <td className={`r ${isCr || inc ? 'credit' : 'debit'}`}>
                     {isCr ? '+' : ''}
@@ -221,21 +260,9 @@ export function TransactionsPanel({
         </table>
       </div>
       <div className="tx-foot">
-        <button className="btn-sm" disabled={currentPage === 0} onClick={() => setPage((p) => p - 1)}>
-          ←
-        </button>
         <span className="tx-info">
-          {filtered.length
-            ? `${currentPage * TX_PER_PAGE + 1}–${Math.min((currentPage + 1) * TX_PER_PAGE, filtered.length)} of ${filtered.length}`
-            : 'No transactions'}
+          {filtered.length ? `${filtered.length} transactions` : 'No transactions'}
         </span>
-        <button
-          className="btn-sm"
-          disabled={currentPage >= totalPages - 1}
-          onClick={() => setPage((p) => p + 1)}
-        >
-          →
-        </button>
       </div>
     </div>
   );
