@@ -267,6 +267,7 @@ export interface DashboardData {
   categories: LMCategory[];
   accounts: LMAccount[];
   transactions: LMTransaction[];
+  properties: { name: string; value: number }[];
   txDateRange: { start: string; end: string };
   cachedAt: {
     meta: string | null;
@@ -284,6 +285,24 @@ export async function getDashboardData(
     getTransactions(),
   ]);
 
+  // Load properties from investment data
+  let properties: { name: string; value: number }[] = [];
+  try {
+    const fsModule = await import('fs');
+    const pathModule = await import('path');
+    const propFile = pathModule.default.resolve(
+      process.cwd(),
+      'db',
+      'investments.json',
+    );
+    if (fsModule.default.existsSync(propFile)) {
+      const data = JSON.parse(fsModule.default.readFileSync(propFile, 'utf-8'));
+      properties = data.properties || [];
+    }
+  } catch {
+    /* ignore */
+  }
+
   const metaCache = readCache<LMMeta>('lm-meta.json');
   const balCache = readCache<LMBalances>('lm-balances.json');
   const txCache = readCache<LMTransactions>('lm-transactions.json');
@@ -293,6 +312,7 @@ export async function getDashboardData(
     categories: meta.categories,
     accounts: balances.accounts,
     transactions: txData.transactions,
+    properties,
     txDateRange: { start: txData.startDate, end: txData.endDate },
     cachedAt: {
       meta: metaCache?.fetchedAt ?? null,

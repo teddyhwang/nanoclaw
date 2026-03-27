@@ -147,7 +147,7 @@ function renderHeaderStats(view) {
     const totalNet = totalGross - totalTax;
     const savPct = totalNet ? (cur.summary.total / totalNet * 100) : 0;
     el.innerHTML = `
-      <div class="hdr-stat"><span class="hdr-stat-label">Lifetime Earnings</span><span class="hdr-stat-val highlight">${fmt(totalGross)}</span></div>
+      <div class="hdr-stat"><span class="hdr-stat-label">Lifetime Earnings</span><span class="hdr-stat-val hero">${fmt(totalGross)}</span></div>
       <div class="hdr-stat"><span class="hdr-stat-label">Lifetime Tax</span><span class="hdr-stat-val neg">${fmt(totalTax)}</span></div>
       <div class="hdr-stat"><span class="hdr-stat-label">Lifetime Net</span><span class="hdr-stat-val pos">${fmt(totalNet)}</span></div>
       <div class="hdr-stat"><span class="hdr-stat-label">Total Savings</span><span class="hdr-stat-val highlight">${fmt(cur.summary.total)}</span></div>
@@ -155,7 +155,7 @@ function renderHeaderStats(view) {
     `;
   } else {
     el.innerHTML = `
-      <div class="hdr-stat"><span class="hdr-stat-label">Total Savings</span><span class="hdr-stat-val highlight">${fmt(cur.summary.total)}</span></div>
+      <div class="hdr-stat"><span class="hdr-stat-label">Total Savings</span><span class="hdr-stat-val hero">${fmt(cur.summary.total)}</span></div>
       <div class="hdr-stat"><span class="hdr-stat-label">YTD Return</span><span class="hdr-stat-val ${statClass(cur.returns.total.returnAmount) === 'positive' ? 'pos' : 'neg'}">${fmt(cur.returns.total.returnAmount)}</span></div>
       <div class="hdr-stat"><span class="hdr-stat-label">YTD Return %</span><span class="hdr-stat-val ${statClass(cur.returns.total.returnPct) === 'positive' ? 'pos' : 'neg'}">${fmtPct(cur.returns.total.returnPct)}</span></div>
       <div class="hdr-stat"><span class="hdr-stat-label">Total Debt</span><span class="hdr-stat-val neg">${fmt(cur.debt.totalDebt)}</span></div>
@@ -401,10 +401,10 @@ function renderYear(el, year) {
           <span></span><span class="pg-header">Teddy</span><span class="pg-header">Nicole</span><span class="pg-header">Total</span>
           <span class="pg-label">Gross Salary</span>${editableField(year, ['salary','teddy','gross'], teddyGross)}${editableField(year, ['salary','nicole','gross'], nicoleGross)}<span class="pg-val">${fmtFull(totalGross)}</span>
           <span class="pg-label">Tax (${teddyTaxRate}% / ${nicoleTaxRate}%)</span><span class="pg-val neg">${fmtFull(teddyTax)}</span><span class="pg-val neg">${fmtFull(nicoleTax)}</span><span class="pg-val neg">${fmtFull(totalTax)}</span>
-          <span class="pg-label pg-total">Net Income</span><span class="pg-val pg-total pos">${fmtFull(teddyGross - teddyTax)}</span><span class="pg-val pg-total pos">${fmtFull(nicoleGross - nicoleTax)}</span><span class="pg-val pg-total pos">${fmtFull(totalNet)}</span>
+          <span class="pg-label pg-total">Net Income</span><span class="pg-val pg-total orange">${fmtFull(teddyGross - teddyTax)}</span><span class="pg-val pg-total orange">${fmtFull(nicoleGross - nicoleTax)}</span><span class="pg-val pg-total orange">${fmtFull(totalNet)}</span>
         </div>
 
-        <h3 style="margin-top:16px">Contributions</h3>
+        <h3 style="margin-top:auto; padding-top:10px">Contributions</h3>
         <div class="person-grid">
           <span></span><span class="pg-header">Teddy</span><span class="pg-header">Nicole</span><span class="pg-header">Total</span>
           <span class="pg-label">RRSP</span>${editableField(year, ['contributions','rrsp','teddy'], d.contributions.rrsp.teddy)}${editableField(year, ['contributions','rrsp','nicole'], d.contributions.rrsp.nicole)}<span class="pg-val">${fmtFull(d.contributions.rrsp.teddy + d.contributions.rrsp.nicole)}</span>
@@ -421,7 +421,7 @@ function renderYear(el, year) {
         <div class="data-row"><span class="dl">TD Savings</span><span class="dv blue">${fmtFull(d.summary.tdSavings)}</span></div>
         <div class="data-row"><span class="dl">Wealthsimple</span><span class="dv blue">${fmtFull(d.summary.wealthsimple)}</span></div>
         ${d.summary.shopifyRsu ? `<div class="data-row"><span class="dl">Shopify RSU</span><span class="dv blue">${fmtFull(d.summary.shopifyRsu)}</span></div>` : ''}
-        <div class="data-row total"><span class="dl">Total Investments</span><span class="dv">${fmtFull(d.summary.total)}</span></div>
+        <div class="data-row total"><span class="dl">Total Investments</span><span class="dv blue">${fmtFull(d.summary.total)}</span></div>
         ${debtEntries.length ? `
           ${debtEntries.map(([k, v]) => `<div class="data-row"><span class="dl">${k}</span><span class="dv neg">${fmtFull(v)}</span></div>`).join('')}
           <div class="data-row total"><span class="dl">Total Debt</span><span class="dv neg">${fmtFull(d.debt.totalDebt)}</span></div>
@@ -453,7 +453,7 @@ function renderYear(el, year) {
           ${rrspProviders.map(([p, v]) => `
             <span class="pg-label">${p}</span><span class="pg-val">${fmtFull(v.teddy)}</span><span class="pg-val">${fmtFull(v.nicole)}</span><span class="pg-val">${fmtFull(v.teddy + v.nicole)}</span>
           `).join('')}
-          <span class="pg-label pg-total">TOTAL</span><span class="pg-val pg-total">${fmtFull(d.accounts.totalRrsp.teddy)}</span><span class="pg-val pg-total">${fmtFull(d.accounts.totalRrsp.nicole)}</span><span class="pg-val pg-total">${fmtFull(d.accounts.totalRrsp.total)}</span>
+          <span class="pg-label pg-total">TOTAL</span><span class="pg-val pg-total orange">${fmtFull(d.accounts.totalRrsp.teddy)}</span><span class="pg-val pg-total orange">${fmtFull(d.accounts.totalRrsp.nicole)}</span><span class="pg-val pg-total orange">${fmtFull(d.accounts.totalRrsp.total)}</span>
         </div>
       </div>
 
@@ -468,10 +468,10 @@ function renderYear(el, year) {
           ${hasWithdrawals ? `
             <span class="pg-label">Withdrawals</span><span class="pg-val neg">${fmtFull(d.contributions.tfsaWithdrawals.teddy)}</span><span class="pg-val neg">${fmtFull(d.contributions.tfsaWithdrawals.nicole)}</span><span class="pg-val neg">${fmtFull(d.contributions.tfsaWithdrawals.teddy + d.contributions.tfsaWithdrawals.nicole)}</span>
           ` : ''}
-          <span class="pg-label pg-total">TOTAL</span><span class="pg-val pg-total">${fmtFull(d.accounts.totalTfsa.teddy)}</span><span class="pg-val pg-total">${fmtFull(d.accounts.totalTfsa.nicole)}</span><span class="pg-val pg-total">${fmtFull(d.accounts.totalTfsa.total)}</span>
+          <span class="pg-label pg-total">TOTAL</span><span class="pg-val pg-total orange">${fmtFull(d.accounts.totalTfsa.teddy)}</span><span class="pg-val pg-total orange">${fmtFull(d.accounts.totalTfsa.nicole)}</span><span class="pg-val pg-total orange">${fmtFull(d.accounts.totalTfsa.total)}</span>
         </div>
         ${otherItems.length ? `
-          <h3 style="margin-top:16px">Other</h3>
+          <h3 style="margin-top:10px">Other</h3>
           ${otherItems.map(([k, v]) => `<div class="data-row"><span class="dl">${k}</span><span class="dv">${fmtFull(v)}</span></div>`).join('')}
         ` : ''}
       </div>

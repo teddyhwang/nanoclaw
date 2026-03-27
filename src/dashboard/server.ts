@@ -77,6 +77,20 @@ async function handleApi(
       const force = url.searchParams.get('force') === 'true';
       const data = await getTransactions(force);
       sendJson(res, data);
+    } else if (pathname === '/api/properties') {
+      const data = loadInvestmentData();
+      sendJson(res, data?.properties || []);
+    } else if (pathname === '/api/properties/save' && req.method === 'POST') {
+      const chunks: Buffer[] = [];
+      req.on('data', (c: Buffer) => chunks.push(c));
+      await new Promise<void>((resolve) => req.on('end', resolve));
+      const props = JSON.parse(Buffer.concat(chunks).toString());
+      const data = loadInvestmentData();
+      if (data) {
+        data.properties = props;
+        saveInvestmentData(data);
+      }
+      sendJson(res, { ok: true });
     } else if (pathname === '/api/investments') {
       const data = loadInvestmentData();
       if (!data) {

@@ -6,6 +6,7 @@
 .hdr-stat-label { font-size: 9px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); margin-bottom: 2px; }
 .hdr-stat-val { font-weight: 600; font-variant-numeric: tabular-nums; font-size: 13px; }
 .hdr-stat-val.highlight { color: var(--orange); text-shadow: 0 0 14px rgba(255,143,64,0.25); }
+.hdr-stat-val.hero { color: var(--orange); text-shadow: 0 0 14px rgba(255,143,64,0.25); font-size: 22px; }
 .hdr-stat-val.pos { color: var(--green); text-shadow: 0 0 12px rgba(170,217,76,0.2); }
 .hdr-stat-val.neg { color: var(--red); text-shadow: 0 0 12px rgba(240,113,120,0.2); }
 
@@ -106,30 +107,39 @@
   background: var(--bg-panel);
   backdrop-filter: blur(12px) saturate(1.1);
   border: 1px solid var(--border);
-  border-radius: var(--r); padding: 14px;
+  border-radius: var(--r); padding: 12px;
   box-shadow: 0 2px 12px rgba(0,0,0,0.2), inset 0 1px 0 rgba(255,255,255,0.02);
+  display: flex; flex-direction: column;
 }
 .yr-card.full { grid-column: 1 / -1; }
 .yr-card h3 {
   font-size: 11px; font-weight: 600; text-transform: uppercase;
-  letter-spacing: 1px; color: var(--accent); margin-bottom: 10px;
+  letter-spacing: 1px; color: var(--accent); margin-bottom: 8px;
   text-shadow: 0 0 16px rgba(89,194,255,0.15);
 }
+.yr-card h3 + h3, .yr-card .person-grid + h3, .yr-card .data-row + h3 { margin-top: 12px; }
 
 /* Data rows — use box-shadow for separators to avoid double lines with total border-top */
 .data-row {
   display: flex; justify-content: space-between; align-items: center;
-  padding: 5px 0;
+  padding: 4px 0;
 }
-.data-row:not(.total) { box-shadow: 0 1px 0 rgba(62,75,89,0.3); }
+.data-row:not(.total) { box-shadow: 0 1px 0 rgba(62,75,89,0.25); }
 .data-row:last-child:not(.total) { box-shadow: none; }
 .data-row:has(+ .data-row.total) { box-shadow: none; }
-.data-row.total { border-top: 1px solid var(--border-lit); font-weight: 600; margin-top: 4px; padding-top: 6px; }
+.data-row.total {
+  border-top: 1px solid var(--border-lit); font-weight: 600; margin-top: 2px; padding: 6px 8px;
+  background: rgba(89,194,255,0.04); border-radius: 3px;
+}
 .data-row .dl { color: var(--text); font-size: 12px; }
 .data-row .dv { font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums; color: var(--text-hi); }
-.data-row .dv.pos { color: var(--green); }
-.data-row .dv.neg { color: var(--red); }
-.data-row .dv.blue { color: var(--blue); }
+.data-row .dv.pos { color: var(--green); text-shadow: 0 0 10px rgba(170,217,76,0.15); }
+.data-row .dv.neg { color: var(--red); text-shadow: 0 0 10px rgba(240,113,120,0.15); }
+.data-row .dv.blue { color: var(--blue); text-shadow: 0 0 10px rgba(89,194,255,0.15); }
+.data-row .dv.orange { color: var(--orange); text-shadow: 0 0 10px rgba(255,143,64,0.15); }
+.person-grid .pg-val.orange { color: var(--orange); text-shadow: 0 0 10px rgba(255,143,64,0.15); }
+.data-row.total .dl { color: var(--text-hi); }
+.data-row.total .dv { font-size: 14px; }
 
 /* Editable field */
 .editable {
@@ -160,8 +170,12 @@
 .person-grid .pg-val:not(.pg-total),
 .person-grid .editable { padding: 5px 0; }
 .person-grid .editable { padding: 3px 6px; }
-.person-grid .pg-total { font-weight: 600; padding-top: 8px; margin-top: 0;
-  border-top: 1px solid var(--border-lit); box-shadow: none; }
+.person-grid .pg-total {
+  font-weight: 600; padding: 6px 4px 4px; margin-top: 0;
+  border-top: 1px solid var(--border-lit); box-shadow: none;
+  background: rgba(89,194,255,0.04); border-radius: 3px;
+  color: var(--text-max);
+}
 
 /* ── Salary table ──────────────────────────────────────────── */
 .salary-table {

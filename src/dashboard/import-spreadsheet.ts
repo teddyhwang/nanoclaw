@@ -414,6 +414,7 @@ async function main() {
     salaries: [],
     savingsVsSalaries: [],
     predictionModel: { roiGoal: 10, annualSavings: 50000, years: [] },
+    properties: [],
     lastUpdated: new Date().toISOString(),
   };
 

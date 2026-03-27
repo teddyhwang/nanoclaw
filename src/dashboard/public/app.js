@@ -135,9 +135,10 @@ function render(data) {
   const ca = data.cachedAt;
   $('cache-info').textContent = [ca.balances && `bal ${relTime(ca.balances)}`, ca.transactions && `tx ${relTime(ca.transactions)}`].filter(Boolean).join(' · ');
 
-  renderNetWorth(data.accounts);
+  renderNetWorth(data.accounts, data.properties || []);
   renderIncome(data.transactions);
   renderAccounts(data.accounts);
+  renderProperties(data.properties || []);
   renderDonut(data.transactions);
   renderDaily(data.transactions);
   renderWeekly(data.transactions);
@@ -148,9 +149,53 @@ function render(data) {
   $('app').classList.remove('hidden');
 }
 
+// ── Properties ──────────────────────────────────────────────
+
+function renderProperties(properties) {
+  const list = $('properties-list');
+  list.innerHTML = '';
+  const total = properties.reduce((s, p) => s + p.value, 0);
+
+  for (let i = 0; i < properties.length; i++) {
+    const p = properties[i];
+    const row = document.createElement('div');
+    row.className = 'prop-row';
+    row.innerHTML = `
+      <span class="prop-name">${p.name}</span>
+      <input class="prop-edit" data-idx="${i}" value="${fmtFull(p.value)}" data-raw="${p.value}"
+        onfocus="this.value=this.dataset.raw;this.select()"
+        onblur="saveProperty(this)"
+        onkeydown="if(event.key==='Enter')this.blur()">
+    `;
+    list.appendChild(row);
+  }
+
+  const totalRow = document.createElement('div');
+  totalRow.className = 'prop-total';
+  totalRow.innerHTML = `<span class="prop-name">Total Properties</span><span class="prop-val">${fmt(total)}</span>`;
+  list.appendChild(totalRow);
+}
+
+async function saveProperty(input) {
+  const idx = parseInt(input.dataset.idx);
+  const raw = parseFloat(input.value.replace(/[$,]/g, '')) || 0;
+  input.dataset.raw = raw;
+  input.value = fmtFull(raw);
+  DATA.properties[idx].value = raw;
+  try {
+    await fetch('/api/properties/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(DATA.properties),
+    });
+    render(DATA);
+  } catch (e) { console.error('Save failed:', e); }
+}
+window.saveProperty = saveProperty;
+
 // ── Net Worth ───────────────────────────────────────────────
 
-function renderNetWorth(accounts) {
+function renderNetWorth(accounts, properties) {
   const g = {};
   for (const a of accounts) {
     const t = normType(a.type); if (!g[t]) g[t] = 0;
@@ -159,10 +204,12 @@ function renderNetWorth(accounts) {
     else if (t === 'loan') g[t] -= Math.abs(b);
     else g[t] += b;
   }
+  const propTotal = (properties || []).reduce((s, p) => s + p.value, 0);
+  if (propTotal) g['property'] = propTotal;
   $('net-worth').textContent = fmt(Object.values(g).reduce((s,v) => s+v, 0));
 
   const bd = $('nw-breakdown'); bd.innerHTML = '';
-  for (const [k,lbl] of [['cash','Cash'],['investment','Invest'],['credit','Credit'],['loan','Loans']]) {
+  for (const [k,lbl] of [['cash','Cash'],['investment','Invest'],['property','Property'],['credit','Credit'],['loan','Loans']]) {
     if (g[k] === undefined) continue;
     const v = g[k], pill = document.createElement('div');
     pill.className = 'nw-pill';

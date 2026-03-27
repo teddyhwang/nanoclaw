@@ -138,6 +138,7 @@ export interface InvestmentData {
     annualSavings: number;
     years: PredictionRow[];
   };
+  properties: { name: string; value: number }[];
   lastUpdated: string;
 }
 
