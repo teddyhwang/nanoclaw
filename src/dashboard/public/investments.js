@@ -712,19 +712,40 @@ function renderSalaries(el) {
 
   // Salary chart
   const recent = sal;
+  const totalNetByYear = recent.map(s => (s.teddyGross - s.teddyTax) + (s.nicoleGross - s.nicoleTax));
+  const totalNetYoY = recent.map((s, i) => {
+    if (i === 0) return null;
+    const prev = recent[i - 1];
+    const prevNet = (prev.teddyGross - prev.teddyTax) + (prev.nicoleGross - prev.nicoleTax);
+    const curNet = (s.teddyGross - s.teddyTax) + (s.nicoleGross - s.nicoleTax);
+    return prevNet ? ((curNet - prevNet) / prevNet) * 100 : null;
+  });
   charts.salary = new Chart($('chart-salary'), {
     type: 'bar',
     data: {
       labels: recent.map(s => s.year),
       datasets: [
-        { label: 'Teddy Net', data: recent.map(s => s.teddyGross - s.teddyTax), backgroundColor: C.blue+'bb', borderRadius: 3 },
-        { label: 'Nicole Net', data: recent.map(s => s.nicoleGross - s.nicoleTax), backgroundColor: C.purple+'bb', borderRadius: 3 },
+        { label: 'Teddy Net', data: recent.map(s => s.teddyGross - s.teddyTax), backgroundColor: C.blue+'bb', borderRadius: 3, stack: 'net' },
+        { label: 'Nicole Net', data: recent.map(s => s.nicoleGross - s.nicoleTax), backgroundColor: C.purple+'bb', borderRadius: 3, stack: 'net' },
+        { label: 'YoY Change %', data: totalNetYoY, type: 'line', yAxisID: 'y1', borderColor: C.yellow, backgroundColor: 'transparent', pointBackgroundColor: totalNetYoY.map(v => v == null ? C.yellow : (v >= 0 ? C.green : C.red)), pointBorderColor: totalNetYoY.map(v => v == null ? C.yellow : (v >= 0 ? C.green : C.red)), pointRadius: 3, pointHoverRadius: 4, borderWidth: 2, tension: 0.3, spanGaps: true },
       ],
     },
     options: {
       responsive: true, maintainAspectRatio: false,
-      scales: { x: { stacked: true, grid: { display: false }, ticks: { autoSkip: true, maxRotation: 0 } }, y: { stacked: true, ticks: { callback: v => fmt(v) } } },
-      plugins: { tooltip: { callbacks: { label: ctx => ` ${ctx.dataset.label}: ${fmt(ctx.raw)}` } } },
+      scales: {
+        x: { stacked: true, grid: { display: false }, ticks: { autoSkip: true, maxRotation: 0 } },
+        y: { stacked: true, ticks: { callback: v => fmt(v) } },
+        y1: { position: 'right', grid: { display: false }, ticks: { callback: v => `${v}%` } },
+      },
+      plugins: {
+        tooltip: {
+          callbacks: {
+            label: ctx => ctx.dataset.yAxisID === 'y1'
+              ? ` ${ctx.dataset.label}: ${ctx.raw == null ? '—' : ctx.raw.toFixed(1) + '%'}`
+              : ` ${ctx.dataset.label}: ${fmt(ctx.raw)}`
+          }
+        }
+      },
     },
   });
 }
