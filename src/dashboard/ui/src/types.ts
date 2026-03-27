@@ -74,6 +74,41 @@ export type SortState = {
   dir: 1 | -1;
 };
 
+// ── Health types ────────────────────────────────────────────
+
+export interface HealthData {
+  steps: { date: string; steps: number }[];
+  restingHeartRate: { date: string; value: number }[];
+  heartRateVariability: { date: string; value: number }[];
+  weight: { date: string; value: number }[];
+  bodyFat: { date: string; value: number }[];
+  activityRings: {
+    date: string;
+    moveActual: number;
+    moveGoal: number;
+    exerciseActual: number;
+    exerciseGoal: number;
+    standActual: number;
+    standGoal: number;
+  }[];
+  workouts: {
+    date: string;
+    type: string;
+    duration: number;
+    distance: number | null;
+    calories: number | null;
+    avgHR: number | null;
+    maxHR: number | null;
+  }[];
+  workoutTypeBreakdown: {
+    type: string;
+    count: number;
+    totalDuration: number;
+    totalCalories: number;
+  }[];
+  weeklyStepAverage: { week: string; avgSteps: number }[];
+}
+
 // ── Investment types ────────────────────────────────────────
 
 export interface PersonSplit {

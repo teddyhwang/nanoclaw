@@ -6,10 +6,12 @@ import { PrivacyProvider } from './contexts/PrivacyContext';
 import { Loading } from './components/Loading';
 import { FinancePage } from './components/finance/FinancePage';
 import { InvestmentsPage } from './components/investments/InvestmentsPage';
+import { HealthPage } from './components/health/HealthPage';
 
 export function App() {
   const [financeData, setFinanceData] = useState<DashboardData | null>(null);
   const [investmentData, setInvestmentData] = useState<InvestmentData | null>(null);
+  const [, setHealthLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -24,6 +26,7 @@ export function App() {
       }
       setFinanceData(finance);
       setInvestmentData(investments);
+      setHealthLoaded(true);
       setLoading(false);
     });
   }, []);
@@ -65,6 +68,7 @@ export function App() {
               )
             }
           />
+          <Route path="/health" element={<HealthPage />} />
           <Route
             path="/investments/:year"
             element={

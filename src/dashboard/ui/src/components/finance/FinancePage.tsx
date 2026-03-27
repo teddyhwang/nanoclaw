@@ -142,25 +142,25 @@ export function FinancePage({ initialData }: Props) {
     .filter(Boolean)
     .join(' · ');
 
-  const headerRight = (
-    <>
-      <span className="cache-info">{cacheInfo}</span>
-      <select
-        className="select-sm"
-        value={filters.dateRange}
-        onChange={(e) => handleDateRangeChange(e.target.value)}
-      >
-        {DATE_RANGE_OPTIONS.map((opt) => (
-          <option key={opt.value} value={opt.value}>
-            {opt.label}
-          </option>
-        ))}
-      </select>
-    </>
-  );
-
   return (
-    <Layout headerRight={headerRight} refreshing={refreshing} onRefresh={handleRefresh}>
+    <Layout refreshing={refreshing} onRefresh={handleRefresh}>
+      <nav className="sub-nav">
+        {DATE_RANGE_OPTIONS.map((opt) => (
+          <button
+            key={opt.value}
+            className={`sub-tab${filters.dateRange === opt.value ? ' active' : ''}`}
+            onClick={() => handleDateRangeChange(opt.value)}
+          >
+            {opt.label}
+          </button>
+        ))}
+        {cacheInfo && (
+          <>
+            <div className="sub-sep" />
+            <span className="cache-info">{cacheInfo}</span>
+          </>
+        )}
+      </nav>
       <FinanceSummary
         accounts={data.accounts}
         properties={data.properties}

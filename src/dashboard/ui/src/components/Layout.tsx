@@ -1,7 +1,8 @@
 import { type ReactNode } from 'react';
 import { NavLink } from 'react-router-dom';
-import { Wallet, Eye, EyeOff, RefreshCw } from 'lucide-react';
+import { Wallet, Eye, EyeOff, RefreshCw, Heart } from 'lucide-react';
 import { usePrivacy } from '../contexts/PrivacyContext';
+import { useLocation } from 'react-router-dom';
 
 interface LayoutProps {
   children: ReactNode;
@@ -12,12 +13,15 @@ interface LayoutProps {
 
 export function Layout({ children, headerRight, refreshing, onRefresh }: LayoutProps) {
   const { privacyMode, togglePrivacy } = usePrivacy();
+  const location = useLocation();
+  const isHealth = location.pathname.startsWith('/health');
+  const LogoIcon = isHealth ? Heart : Wallet;
 
   return (
     <div id="app">
       <header>
         <div className="header-left">
-          <Wallet className="logo-icon" size={20} />
+          <LogoIcon className="logo-icon" size={20} />
           <nav className="top-nav">
             <NavLink to="/" end className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}>
               Finance
@@ -25,17 +29,22 @@ export function Layout({ children, headerRight, refreshing, onRefresh }: LayoutP
             <NavLink to="/investments" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}>
               Investments
             </NavLink>
+            <NavLink to="/health" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}>
+              Health
+            </NavLink>
           </nav>
         </div>
         <div className="header-right">
           {headerRight}
-          <button
-            className={`btn-privacy${privacyMode ? ' active' : ''}`}
-            title="Toggle privacy mode"
-            onClick={togglePrivacy}
-          >
-            {privacyMode ? <EyeOff size={16} /> : <Eye size={16} />}
-          </button>
+          {!isHealth && (
+            <button
+              className={`btn-privacy${privacyMode ? ' active' : ''}`}
+              title="Toggle privacy mode"
+              onClick={togglePrivacy}
+            >
+              {privacyMode ? <EyeOff size={16} /> : <Eye size={16} />}
+            </button>
+          )}
           {onRefresh && (
             <button
               className={`btn-icon${refreshing ? ' spinning' : ''}`}

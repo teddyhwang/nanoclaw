@@ -1,4 +1,4 @@
-import type { DashboardData, InvestmentData } from './types';
+import type { DashboardData, InvestmentData, HealthData } from './types';
 
 export async function fetchDashboard(
   refreshBalances = false,
@@ -13,6 +13,18 @@ export async function fetchDashboard(
 
 export async function fetchInvestments(): Promise<InvestmentData> {
   const r = await fetch('/api/investments');
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function fetchHealth(params?: {
+  days?: number;
+  since?: string;
+}): Promise<HealthData> {
+  const qs = params?.since
+    ? `since=${params.since}`
+    : `days=${params?.days ?? 90}`;
+  const r = await fetch(`/api/health?${qs}`);
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }

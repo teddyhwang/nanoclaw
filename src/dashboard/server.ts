@@ -24,6 +24,7 @@ import {
 } from './investments.js';
 import { getLiveCurrentYear } from './live-accounts.js';
 import { matchTransactions, hasAmazonData } from './amazon-matcher.js';
+import { getHealthData } from './health.js';
 
 const PORT = parseInt(process.env.DASHBOARD_PORT || '3002', 10);
 const HOST = process.env.DASHBOARD_HOST || '0.0.0.0';
@@ -144,6 +145,17 @@ async function handleApi(
       }
       const matches = matchTransactions(txResp.transactions);
       sendJson(res, matches);
+    } else if (pathname === '/api/health') {
+      const url = new URL(req.url!, `http://${req.headers.host}`);
+      const sinceParam = url.searchParams.get('since');
+      const daysParam = url.searchParams.get('days');
+      const opts = sinceParam
+        ? { since: sinceParam }
+        : {
+            days: Math.min(Math.max(parseInt(daysParam || '90', 10), 1), 5500),
+          };
+      const data = getHealthData(opts);
+      sendJson(res, data);
     } else if (pathname === '/api/investments/save' && req.method === 'POST') {
       const chunks: Buffer[] = [];
       req.on('data', (c: Buffer) => chunks.push(c));
