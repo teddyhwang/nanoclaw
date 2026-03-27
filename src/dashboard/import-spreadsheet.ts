@@ -7,9 +7,9 @@ import {
   saveInvestmentData,
   InvestmentData,
   YearData,
-  SalaryRow,
   SavingsVsSalaryRow,
   PredictionRow,
+  SalaryRow,
 } from './investments.js';
 
 const SPREADSHEET_ID = '1D7K_45TGvqBhl3gL94P3lGbAhimxaKZGHsS1Y9SK8xA';
@@ -297,27 +297,18 @@ function parseYearTab(year: number): YearData | null {
         teddy: {
           gross: teddyActualSalary,
           rrspDeduction: rrspContrib.teddy,
-          afterRrspTaxRate: teddyAfterRrspRate,
           actualTaxRate: teddyActualRate,
-          afterRrspTax: teddyAfterRrspTax,
           actualTax: teddyActualTax,
         },
         nicole: {
           gross: nicoleActualSalary,
           rrspDeduction: rrspContrib.nicole,
-          afterRrspTaxRate: nicoleAfterRrspRate,
           actualTaxRate: nicoleActualRate,
-          afterRrspTax: nicoleAfterRrspTax,
           actualTax: nicoleActualTax,
         },
-        totalGross,
-        totalTax,
-        totalNet,
       },
       contributions: {
         rrsp: rrspContrib,
-        taxRefund,
-        rrspCost,
         tfsa: tfsaContrib,
         tfsaWithdrawals,
         respContributions,
@@ -369,16 +360,8 @@ function parseSalaries(): SalaryRow[] {
       year: parseInt(r[1]),
       teddyGross: parseNum(r[2]),
       teddyTax: parseNum(r[3]),
-      teddyNet: parseNum(r[4]),
       nicoleGross: parseNum(r[5]),
       nicoleTax: parseNum(r[6]),
-      nicoleNet: parseNum(r[7]),
-      totalGross: parseNum(r[8]),
-      totalTax: parseNum(r[9]),
-      totalNet: parseNum(r[10]),
-      teddyYoY: parseNum(r[11]),
-      nicoleYoY: parseNum(r[12]),
-      totalYoY: parseNum(r[13]),
     }));
 }
 

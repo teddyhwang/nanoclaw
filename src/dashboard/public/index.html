@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>NanoClaw Finance</title>
+  <title>Tico Finance</title>
   <link rel="stylesheet" href="/style.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
   <script src="https://unpkg.com/lucide@latest"></script>
@@ -24,14 +24,20 @@
           <a href="/investments" class="nav-link">Investments</a>
         </nav>
         <div class="nw-inline">
-          <span class="nw-value" id="net-worth">—</span>
           <span class="nw-label">net worth</span>
+          <span class="nw-value" id="net-worth">—</span>
         </div>
         <div class="nw-pills" id="nw-breakdown"></div>
+        <div class="income-spend" id="income-spend"></div>
       </div>
       <div class="header-right">
-        <div class="income-spend" id="income-spend"></div>
         <span class="cache-info" id="cache-info"></span>
+        <select id="tx-date-range" class="select-sm">
+          <option value="thisMonth">This Month</option>
+          <option value="lastMonth">Last Month</option>
+          <option value="90days" selected>Last 90 Days</option>
+          <option value="all">All Time</option>
+        </select>
         <button id="privacy-btn" class="btn-privacy" title="Toggle privacy mode"><i data-lucide="eye"></i></button>
         <button id="refresh-btn" class="btn-icon" title="Refresh balances"><i data-lucide="refresh-cw"></i></button>
       </div>
@@ -76,12 +82,6 @@
             <div class="filter-pills" id="filter-pills"></div>
           </div>
           <div class="tx-controls">
-            <select id="tx-date-range" class="select-sm">
-              <option value="thisMonth">This Month</option>
-              <option value="lastMonth">Last Month</option>
-              <option value="90days" selected>Last 90 Days</option>
-              <option value="all">All Time</option>
-            </select>
             <input type="text" id="tx-search" placeholder="Search…" class="input-sm">
             <select id="tx-category-filter" class="select-sm">
               <option value="">All Categories</option>

@@ -1,12 +1,12 @@
 /* ── NanoClaw Financial Dashboard ─────────────────────────── */
 
 const C = {
-  bg:'#151718', panel:'#1e2021', card:'#282a2b',
-  border:'#2a3a40', muted:'#8a9da6', accent:'#43a5d5',
-  text:'#d0d4d7', hi:'#eef0f2', max:'#ffffff',
-  red:'#Cd3f45', orange:'#db7b55', yellow:'#e6cd69',
-  green:'#9fca56', cyan:'#55dbbe', blue:'#55b5db',
-  purple:'#a074c4', brown:'#8a553f',
+  bg:'#0b0e14', panel:'#131721', card:'#202229',
+  border:'#3e4b59', muted:'#6c7a8a', accent:'#59c2ff',
+  text:'#bfbdb6', hi:'#e6e1cf', max:'#f2f0e7',
+  red:'#f07178', orange:'#ff8f40', yellow:'#ffb454',
+  green:'#aad94c', cyan:'#95e6cb', blue:'#59c2ff',
+  purple:'#d2a6ff', brown:'#e6b450',
 };
 const COLORS = [C.blue, C.green, C.yellow, C.purple, C.cyan, C.orange, C.red, C.brown, C.accent];
 
@@ -54,10 +54,23 @@ const fmtFull = (n, cur) => _fmt(n, cur, 2);
 function fmtDate(dateStr) {
   return new Date(dateStr + 'T00:00:00').toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
 }
+let categoryGroupMap = {}; // category id → group name
 function buildCategoryMap(categories) {
   const m = {};
-  for (const c of categories) { m[c.id] = c; if (c.children) for (const ch of c.children) m[ch.id] = ch; }
+  categoryGroupMap = {};
+  for (const c of categories) {
+    m[c.id] = c;
+    if (c.children) {
+      for (const ch of c.children) {
+        m[ch.id] = ch;
+        categoryGroupMap[ch.id] = c.name;
+      }
+    }
+  }
   return m;
+}
+function getCategoryGroup(catId) {
+  return categoryGroupMap[catId] || categoryMap[catId]?.name || 'Uncategorized';
 }
 function spendAmt(tx) { const v = parseFloat(tx.amount); return debitsNeg ? -v : v; }
 
@@ -161,8 +174,7 @@ function renderNetWorth(accounts) {
 // ── Income vs Spending (this month) ─────────────────────────
 
 function renderIncome(transactions) {
-  const now = new Date();
-  const ms = toISO(monthStart(now)), me = toISO(now);
+  const { from: ms, to: me } = getDateRange();
   let inc = 0, spend = 0;
   for (const tx of transactions) {
     if (tx.date < ms || tx.date > me) continue;
@@ -211,11 +223,11 @@ function renderAccounts(accounts) {
 
 let donutChart, donutLabels = [];
 function renderDonut(transactions) {
-  const now = new Date(), ms = toISO(monthStart(now)), me = toISO(now);
+  const { from: ms, to: me } = getDateRange();
   const byCat = {};
   for (const tx of transactions) {
     if (tx.date >= ms && tx.date <= me && isSpend(tx)) {
-      const cn = categoryMap[tx.category_id]?.name || 'Uncategorized';
+      const cn = getCategoryGroup(tx.category_id);
       byCat[cn] = (byCat[cn]||0) + spendAmt(tx);
     }
   }
@@ -258,13 +270,12 @@ function renderDonut(transactions) {
 
 let dailyChart;
 function renderDaily(transactions) {
-  const now = new Date(), ms = monthStart(now);
-  const days = new Date(now.getFullYear(), now.getMonth()+1, 0).getDate();
+  const { from, to } = getDateRange();
   const byDay = {};
-  for (let d=1; d<=days; d++) byDay[`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`] = 0;
   for (const tx of transactions) {
-    const td = new Date(tx.date+'T00:00:00');
-    if (td >= ms && td <= now && isSpend(tx)) byDay[tx.date] = (byDay[tx.date]||0) + spendAmt(tx);
+    if (tx.date >= from && tx.date <= to && isSpend(tx)) {
+      byDay[tx.date] = (byDay[tx.date]||0) + spendAmt(tx);
+    }
   }
   dailyDates = Object.keys(byDay).sort();
   const vals = dailyDates.map(d => byDay[d]);
@@ -277,7 +288,7 @@ function renderDaily(transactions) {
   dailyChart = new Chart($('chart-daily-spending'), {
     type: 'bar',
     data: {
-      labels: dailyDates.map(d => d.slice(8)),
+      labels: dailyDates.map(d => { const dt = new Date(d+'T00:00:00'); return dt.toLocaleDateString('en-CA', { month:'short', day:'numeric' }); }),
       datasets: [
         { label:'Daily', data:vals, backgroundColor:barColors(), borderColor:barBorders(), borderWidth:2, borderRadius:2, order:2 },
         { label:'Cumulative', data:cum, type:'line', borderColor:C.cyan, backgroundColor:'transparent', pointRadius:0, borderWidth:1.5, tension:.3, yAxisID:'y1', order:1 },
@@ -305,9 +316,11 @@ function renderDaily(transactions) {
 
 let weeklyChart;
 function renderWeekly(transactions) {
+  const { from, to } = getDateRange();
   const weeks = {};
   for (const tx of transactions) {
     if (!isSpend(tx)) continue;
+    if (tx.date < from || tx.date > to) continue;
     const wr = weekRange(tx.date);
     weeks[wr.start] = (weeks[wr.start]||0) + spendAmt(tx);
   }
@@ -369,7 +382,7 @@ function renderWeekly(transactions) {
 
 let merchantChart, merchantLabels = [];
 function renderMerchants(transactions) {
-  const now = new Date(), ms = toISO(monthStart(now)), me = toISO(now);
+  const { from: ms, to: me } = getDateRange();
   const RECURRING_CATS = ['condo mortgage','mortgage','condo fees','rent'];
   const byM = {};
   for (const tx of transactions) {
@@ -442,8 +455,8 @@ function clearAllFilters() {
   filters.search = ''; filters.catId = '';
   $('tx-search').value = '';
   $('tx-category-filter').value = '';
-  $('tx-date-range').value = '90days';
   filters.dateRange = '90days';
+  $('tx-date-range').value = '90days';
   updateChartHighlights();
   applyFilters();
   renderFilterPills();
@@ -566,11 +579,7 @@ function setupTx(transactions) {
   newCf.id = 'tx-category-filter';
   newCf.addEventListener('change', () => { filters.catId = newCf.value; applyFilters(); renderFilterPills(); });
 
-  const drEl = $('tx-date-range');
-  const newDr = drEl.cloneNode(true);
-  drEl.replaceWith(newDr);
-  newDr.id = 'tx-date-range';
-  newDr.addEventListener('change', () => { filters.dateRange = newDr.value; applyFilters(); });
+  // Date range is in the header now — listener set up in init
 
   const prevEl = $('tx-prev'), nextEl = $('tx-next');
   const newPrev = prevEl.cloneNode(true), newNext = nextEl.cloneNode(true);
@@ -634,7 +643,7 @@ function applyFilters() {
     if (filters.day && tx.date !== filters.day) return false;
     if (filters.weekStart && (tx.date < filters.weekStart || tx.date > filters.weekEnd)) return false;
     if (filters.category) {
-      const cn = categoryMap[tx.category_id]?.name || 'Uncategorized';
+      const cn = getCategoryGroup(tx.category_id);
       if (cn !== filters.category) return false;
     }
     if (filters.merchant) {
@@ -690,6 +699,17 @@ function renderPage() {
 (async () => {
   try { render(await fetchDash()); lucide.createIcons(); }
   catch (err) { $('loading').innerHTML = `<span style="color:${C.red}">Error: ${err.message}</span>`; }
+
+  // Date range — re-render charts + income + transactions
+  $('tx-date-range').addEventListener('change', () => {
+    filters.dateRange = $('tx-date-range').value;
+    renderIncome(DATA.transactions);
+    renderDonut(DATA.transactions);
+    renderDaily(DATA.transactions);
+    renderWeekly(DATA.transactions);
+    renderMerchants(DATA.transactions);
+    applyFilters();
+  });
 
   // Privacy mode
   const privBtn = $('privacy-btn');

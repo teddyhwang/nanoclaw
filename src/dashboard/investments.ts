@@ -21,9 +21,7 @@ export interface Person {
 export interface SalaryInfo {
   gross: number;
   rrspDeduction: number;
-  afterRrspTaxRate: number;
   actualTaxRate: number;
-  afterRrspTax: number;
   actualTax: number;
 }
 
@@ -32,14 +30,9 @@ export interface YearData {
   salary: {
     teddy: SalaryInfo;
     nicole: SalaryInfo;
-    totalGross: number;
-    totalTax: number;
-    totalNet: number;
   };
   contributions: {
     rrsp: Person;
-    taxRefund: Person;
-    rrspCost: Person;
     tfsa: Person;
     tfsaWithdrawals: Person;
     respContributions: number;
@@ -97,16 +90,8 @@ export interface SalaryRow {
   year: number;
   teddyGross: number;
   teddyTax: number;
-  teddyNet: number;
   nicoleGross: number;
   nicoleTax: number;
-  nicoleNet: number;
-  totalGross: number;
-  totalTax: number;
-  totalNet: number;
-  teddyYoY: number;
-  nicoleYoY: number;
-  totalYoY: number;
 }
 
 export interface SalaryTotals {

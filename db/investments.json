@@ -6,35 +6,20 @@
         "teddy": {
           "gross": 132053.4,
           "rrspDeduction": 20000,
-          "afterRrspTaxRate": 33.89,
           "actualTaxRate": 43.41,
-          "afterRrspTax": 32662.99,
           "actualTax": 41344.99
         },
         "nicole": {
           "gross": 77804,
           "rrspDeduction": 21000,
-          "afterRrspTaxRate": 24.15,
           "actualTaxRate": 29.65,
-          "afterRrspTax": 12648.9,
           "actualTax": 18960.66
-        },
-        "totalGross": 209857.4,
-        "totalTax": 60305.65,
-        "totalNet": 149551.75
+        }
       },
       "contributions": {
         "rrsp": {
           "teddy": 20000,
           "nicole": 21000
-        },
-        "taxRefund": {
-          "teddy": 8682,
-          "nicole": 6311.76
-        },
-        "rrspCost": {
-          "teddy": -11318,
-          "nicole": -14688.24
         },
         "tfsa": {
           "teddy": 0,
@@ -176,35 +161,20 @@
         "teddy": {
           "gross": 156523.75,
           "rrspDeduction": 30000,
-          "afterRrspTaxRate": 43.41,
           "actualTaxRate": 47.97,
-          "afterRrspTax": 38703.7,
           "actualTax": 52253.59
         },
         "nicole": {
           "gross": 104228.26,
           "rrspDeduction": 25000,
-          "afterRrspTaxRate": 29.65,
           "actualTaxRate": 31.48,
-          "afterRrspTax": 19325.51,
           "actualTax": 27405.71
-        },
-        "totalGross": 260752.01,
-        "totalTax": 79659.3,
-        "totalNet": 181092.71
+        }
       },
       "contributions": {
         "rrsp": {
           "teddy": 30000,
           "nicole": 25000
-        },
-        "taxRefund": {
-          "teddy": 13549.89,
-          "nicole": 8080.2
-        },
-        "rrspCost": {
-          "teddy": -16450.11,
-          "nicole": -16919.8
         },
         "tfsa": {
           "teddy": 5000,
@@ -352,35 +322,20 @@
         "teddy": {
           "gross": 214812.97,
           "rrspDeduction": 51000,
-          "afterRrspTaxRate": 43.41,
           "actualTaxRate": 47.97,
-          "afterRrspTax": 55417,
           "actualTax": 80240.54
         },
         "nicole": {
           "gross": 119485.6,
           "rrspDeduction": 19000,
-          "afterRrspTaxRate": 33.89,
           "actualTaxRate": 37.91,
-          "afterRrspTax": 27131.39,
           "actualTax": 35379.29
-        },
-        "totalGross": 334298.57,
-        "totalTax": 115619.83,
-        "totalNet": 218678.74
+        }
       },
       "contributions": {
         "rrsp": {
           "teddy": 51000,
           "nicole": 19000
-        },
-        "taxRefund": {
-          "teddy": 24823.54,
-          "nicole": 8247.9
-        },
-        "rrspCost": {
-          "teddy": -26176.46,
-          "nicole": -10752.1
         },
         "tfsa": {
           "teddy": 900,
@@ -535,35 +490,20 @@
         "teddy": {
           "gross": 188188.08,
           "rrspDeduction": 26000,
-          "afterRrspTaxRate": 53.53,
           "actualTaxRate": 53.53,
-          "afterRrspTax": 51350.01,
           "actualTax": 66651.39
         },
         "nicole": {
           "gross": 153033.07,
           "rrspDeduction": 23000,
-          "afterRrspTaxRate": 31.48,
           "actualTaxRate": 37.91,
-          "afterRrspTax": 39594.93,
           "actualTax": 49579.23
-        },
-        "totalGross": 341221.15,
-        "totalTax": 116230.62,
-        "totalNet": 224990.53
+        }
       },
       "contributions": {
         "rrsp": {
           "teddy": 26000,
           "nicole": 23000
-        },
-        "taxRefund": {
-          "teddy": 15301.38,
-          "nicole": 9984.3
-        },
-        "rrspCost": {
-          "teddy": -10698.62,
-          "nicole": -13015.7
         },
         "tfsa": {
           "teddy": 0,
@@ -714,35 +654,20 @@
         "teddy": {
           "gross": 983526.43,
           "rrspDeduction": 26000,
-          "afterRrspTaxRate": 53.53,
           "actualTaxRate": 53.53,
-          "afterRrspTax": 477094.63,
           "actualTax": 491012.43
         },
         "nicole": {
           "gross": 105430.43,
           "rrspDeduction": 23000,
-          "afterRrspTaxRate": 31.48,
           "actualTaxRate": 37.91,
-          "afterRrspTax": 18930.63,
           "actualTax": 28914.93
-        },
-        "totalGross": 1088956.86,
-        "totalTax": 519927.35,
-        "totalNet": 569029.51
+        }
       },
       "contributions": {
         "rrsp": {
           "teddy": 26000,
           "nicole": 23000
-        },
-        "taxRefund": {
-          "teddy": 13917.8,
-          "nicole": 9984.3
-        },
-        "rrspCost": {
-          "teddy": -12082.2,
-          "nicole": -13015.7
         },
         "tfsa": {
           "teddy": 67887.87,
@@ -899,35 +824,20 @@
         "teddy": {
           "gross": 2109111,
           "rrspDeduction": 34000,
-          "afterRrspTaxRate": 53.53,
           "actualTaxRate": 53.53,
-          "afterRrspTax": 1074508.71,
           "actualTax": 1092708.91
         },
         "nicole": {
           "gross": 30101.11,
           "rrspDeduction": 23500,
-          "afterRrspTaxRate": 20.05,
           "actualTaxRate": 20.05,
-          "afterRrspTax": 1323.52,
           "actualTax": 6035.27
-        },
-        "totalGross": 2139212.11,
-        "totalTax": 1098744.18,
-        "totalNet": 1040467.93
+        }
       },
       "contributions": {
         "rrsp": {
           "teddy": 34000,
           "nicole": 23500
-        },
-        "taxRefund": {
-          "teddy": 18200.2,
-          "nicole": 4711.75
-        },
-        "rrspCost": {
-          "teddy": -15799.8,
-          "nicole": -18788.25
         },
         "tfsa": {
           "teddy": 7000,
@@ -1083,34 +993,19 @@
         "teddy": {
           "gross": 631094,
           "rrspDeduction": 30000,
-          "afterRrspTaxRate": 53.53,
           "actualTaxRate": 53.53,
-          "afterRrspTax": 284956.62,
           "actualTax": 301015.62
         },
         "nicole": {
           "gross": 7427,
           "rrspDeduction": 0,
-          "afterRrspTaxRate": 20.05,
           "actualTaxRate": 20.05,
-          "afterRrspTax": 0,
           "actualTax": 0
-        },
-        "totalGross": 638521,
-        "totalTax": 301015.62,
-        "totalNet": 337505.38
+        }
       },
       "contributions": {
         "rrsp": {
           "teddy": 30000,
-          "nicole": 0
-        },
-        "taxRefund": {
-          "teddy": 16059,
-          "nicole": 0
-        },
-        "rrspCost": {
-          "teddy": -13941,
           "nicole": 0
         },
         "tfsa": {
@@ -1267,34 +1162,19 @@
         "teddy": {
           "gross": 682998,
           "rrspDeduction": 30000,
-          "afterRrspTaxRate": 53.53,
           "actualTaxRate": 53.53,
-          "afterRrspTax": 310766.85,
           "actualTax": 326825.85
         },
         "nicole": {
           "gross": 25392,
           "rrspDeduction": 0,
-          "afterRrspTaxRate": 20.05,
           "actualTaxRate": 20.05,
-          "afterRrspTax": 0,
           "actualTax": 0
-        },
-        "totalGross": 708390,
-        "totalTax": 326825.85,
-        "totalNet": 381564.15
+        }
       },
       "contributions": {
         "rrsp": {
           "teddy": 30000,
-          "nicole": 0
-        },
-        "taxRefund": {
-          "teddy": 16059,
-          "nicole": 0
-        },
-        "rrspCost": {
-          "teddy": -13941,
           "nicole": 0
         },
         "tfsa": {
@@ -1452,35 +1332,20 @@
         "teddy": {
           "gross": 743447,
           "rrspDeduction": 31648,
-          "afterRrspTaxRate": 53.53,
           "actualTaxRate": 53.53,
-          "afterRrspTax": 340667.51,
           "actualTax": 357608.68
         },
         "nicole": {
           "gross": 22332,
           "rrspDeduction": 2324,
-          "afterRrspTaxRate": 20.05,
           "actualTaxRate": 20.05,
-          "afterRrspTax": 0,
           "actualTax": 0
-        },
-        "totalGross": 765779,
-        "totalTax": 357608.68,
-        "totalNet": 408170.32
+        }
       },
       "contributions": {
         "rrsp": {
           "teddy": 31648,
           "nicole": 2324
-        },
-        "taxRefund": {
-          "teddy": 16941.17,
-          "nicole": 0
-        },
-        "rrspCost": {
-          "teddy": -14706.83,
-          "nicole": -2324
         },
         "tfsa": {
           "teddy": 7000,
@@ -1637,35 +1502,20 @@
         "teddy": {
           "gross": 759104,
           "rrspDeduction": 30000,
-          "afterRrspTaxRate": 53.53,
           "actualTaxRate": 53.53,
-          "afterRrspTax": 348986.33,
           "actualTax": 365045.33
         },
         "nicole": {
           "gross": 22332,
           "rrspDeduction": 2324,
-          "afterRrspTaxRate": 20.05,
           "actualTaxRate": 20.05,
-          "afterRrspTax": 0,
           "actualTax": 0
-        },
-        "totalGross": 781436,
-        "totalTax": 365045.33,
-        "totalNet": 416390.67
+        }
       },
       "contributions": {
         "rrsp": {
           "teddy": 30000,
           "nicole": 2324
-        },
-        "taxRefund": {
-          "teddy": 16059,
-          "nicole": 0
-        },
-        "rrspCost": {
-          "teddy": -13941,
-          "nicole": -2324
         },
         "tfsa": {
           "teddy": 7000,
@@ -1822,34 +1672,19 @@
         "teddy": {
           "gross": 800000,
           "rrspDeduction": 30000,
-          "afterRrspTaxRate": 53.53,
           "actualTaxRate": 53.53,
-          "afterRrspTax": 370177.94,
           "actualTax": 386236.94
         },
         "nicole": {
           "gross": 25000,
           "rrspDeduction": 0,
-          "afterRrspTaxRate": 20.05,
           "actualTaxRate": 20.05,
-          "afterRrspTax": 0,
           "actualTax": 0
-        },
-        "totalGross": 825000,
-        "totalTax": 386236.94,
-        "totalNet": 438763.06
+        }
       },
       "contributions": {
         "rrsp": {
           "teddy": 30000,
-          "nicole": 0
-        },
-        "taxRefund": {
-          "teddy": 16059,
-          "nicole": 0
-        },
-        "rrspCost": {
-          "teddy": -13941,
           "nicole": 0
         },
         "tfsa": {
@@ -1864,46 +1699,52 @@
       },
       "accounts": {
         "rrsp": {
-          "TD": {
-            "teddy": 460906.28,
-            "nicole": 191270.27
-          },
           "Wealthsimple": {
-            "teddy": 277608.74,
-            "nicole": 106884.05
+            "teddy": 262745.18,
+            "nicole": 99213.27
+          },
+          "TD": {
+            "teddy": 458460.56,
+            "nicole": 221593.68
           }
         },
         "totalRrsp": {
-          "teddy": 738515.02,
-          "nicole": 328154.32,
-          "total": 1066669.34
+          "teddy": 721205.74,
+          "nicole": 320806.95,
+          "total": 1042012.69
         },
         "tfsa": {
           "Wealthsimple": {
-            "teddy": 8614.02,
-            "nicole": 14.44
+            "teddy": 45105.05,
+            "nicole": 45133.51
+          },
+          "TD": {
+            "teddy": 89566.97,
+            "nicole": 95228.46
           }
         },
         "totalTfsa": {
-          "teddy": 142129,
-          "nicole": 145925.94,
-          "total": 288054.94
+          "teddy": 134672.02000000002,
+          "nicole": 140361.97,
+          "total": 275033.99
         },
-        "privateInvesting": 403666.65,
-        "resp": 25682.1
+        "privateInvesting": 4740.64,
+        "nonRegistered": 4740.64,
+        "crypto": 527.96,
+        "resp": 30180.08
       },
       "summary": {
-        "tdSavings": 1116525.3,
-        "wealthsimple": 672547.73,
+        "tdSavings": 1300634.27,
+        "wealthsimple": 457465.61000000004,
         "shopifyRsu": 0,
-        "total": 1789073.03
+        "total": 1758099.8800000001
       },
       "returns": {
         "td": {
           "startingBalance": 1314183.53,
-          "currentBalance": 1302242.02,
-          "returnAmount": -11941.51,
-          "returnPct": -0.91
+          "currentBalance": 1300634.27,
+          "returnAmount": -13549.26000000001,
+          "returnPct": -1.03100211581559
         },
         "wealthsimple": {
           "teddyStart": 326222.76,
@@ -1911,27 +1752,26 @@
           "teddyCurrent": 319219.18,
           "nicoleCurrent": 153036.81,
           "totalStart": 479889.5,
-          "totalCurrent": 472255.99,
-          "returnAmount": -19575.02,
-          "returnPct": -1.59
+          "totalCurrent": 457465.61000000004,
+          "returnAmount": -22423.889999999956,
+          "returnPct": -4.672719448956469
         },
         "total": {
-          "returnAmount": -19575.02,
-          "returnPct": -1.09
+          "returnAmount": -35973.149999999965,
+          "returnPct": -2.0051106838164756
         },
-        "goal": 179407.3,
-        "totalGoal": 1973480.33,
-        "currentVsGoal": -198982.32,
-        "pctDifference": -11.09
+        "goal": 179407.303,
+        "totalGoal": 1973480.333,
+        "currentVsGoal": -215380.45299999998,
+        "pctDifference": -10.913736985287706
       },
       "debt": {
-        "totalDebt": -1235000,
-        "Beecroft Mortgage": -475000,
-        "Gibson Square Mortgage": -330000,
-        "Pettit Mortgage": 0,
-        "Valhalla Road Mortgage": -430000
+        "Valhalla Road Mortgage": -435509,
+        "Beecroft Mortgage": -478765.86,
+        "Gibson Square Mortgage": -333702.63,
+        "totalDebt": -1247977.49
       },
-      "subtotal": 554073.03,
+      "subtotal": 510122.39000000013,
       "taxBrackets": [
         {
           "upTo": 53891,
@@ -2007,301 +1847,141 @@
       "year": 2007,
       "teddyGross": 17292,
       "teddyTax": 0,
-      "teddyNet": 17292,
       "nicoleGross": 10133,
-      "nicoleTax": 200,
-      "nicoleNet": 9933,
-      "totalGross": 27425,
-      "totalTax": 200,
-      "totalNet": 27225,
-      "teddyYoY": 0,
-      "nicoleYoY": 0,
-      "totalYoY": 0
+      "nicoleTax": 200
     },
     {
       "year": 2008,
       "teddyGross": 58815,
       "teddyTax": 11763,
-      "teddyNet": 47052,
       "nicoleGross": 10093,
-      "nicoleTax": 200,
-      "nicoleNet": 9893,
-      "totalGross": 68908,
-      "totalTax": 11963,
-      "totalNet": 56945,
-      "teddyYoY": 240.13,
-      "nicoleYoY": -0.39,
-      "totalYoY": 151.26
+      "nicoleTax": 200
     },
     {
       "year": 2009,
       "teddyGross": 28944,
       "teddyTax": 0,
-      "teddyNet": 28944,
       "nicoleGross": 14882,
-      "nicoleTax": 400,
-      "nicoleNet": 14482,
-      "totalGross": 43826,
-      "totalTax": 400,
-      "totalNet": 43426,
-      "teddyYoY": -50.79,
-      "nicoleYoY": 47.45,
-      "totalYoY": -36.4
+      "nicoleTax": 400
     },
     {
       "year": 2010,
       "teddyGross": 70341,
       "teddyTax": 12185.82,
-      "teddyNet": 58155.18,
       "nicoleGross": 31444,
-      "nicoleTax": 2213.52,
-      "nicoleNet": 29230.48,
-      "totalGross": 101785,
-      "totalTax": 14399.34,
-      "totalNet": 87385.66,
-      "teddyYoY": 143.02,
-      "nicoleYoY": 111.29,
-      "totalYoY": 132.25
+      "nicoleTax": 2213.52
     },
     {
       "year": 2011,
       "teddyGross": 83548,
       "teddyTax": 16501.75,
-      "teddyNet": 67046.25,
       "nicoleGross": 42177,
-      "nicoleTax": 6398.73,
-      "nicoleNet": 35778.27,
-      "totalGross": 125725,
-      "totalTax": 22900.48,
-      "totalNet": 102824.52,
-      "teddyYoY": 18.78,
-      "nicoleYoY": 34.13,
-      "totalYoY": 23.52
+      "nicoleTax": 6398.73
     },
     {
       "year": 2012,
       "teddyGross": 94699.58,
       "teddyTax": 22307.47,
-      "teddyNet": 72392.11,
       "nicoleGross": 25093.22,
-      "nicoleTax": 2762.31,
-      "nicoleNet": 22330.91,
-      "totalGross": 119792.8,
-      "totalTax": 25069.78,
-      "totalNet": 94723.02,
-      "teddyYoY": 13.35,
-      "nicoleYoY": -40.5,
-      "totalYoY": -4.72
+      "nicoleTax": 2762.31
     },
     {
       "year": 2013,
       "teddyGross": 106768.9,
       "teddyTax": 26393.68,
-      "teddyNet": 80375.22,
       "nicoleGross": 15298,
-      "nicoleTax": 389.01,
-      "nicoleNet": 14908.99,
-      "totalGross": 122066.9,
-      "totalTax": 26782.69,
-      "totalNet": 95284.21,
-      "teddyYoY": 12.74,
-      "nicoleYoY": -39.04,
-      "totalYoY": 1.9
+      "nicoleTax": 389.01
     },
     {
       "year": 2014,
       "teddyGross": 124424.93,
       "teddyTax": 32133.63,
-      "teddyNet": 92291.3,
       "nicoleGross": 15116,
-      "nicoleTax": 316.16,
-      "nicoleNet": 14799.84,
-      "totalGross": 139540.93,
-      "totalTax": 32449.79,
-      "totalNet": 107091.14,
-      "teddyYoY": 16.54,
-      "nicoleYoY": -1.19,
-      "totalYoY": 14.32
+      "nicoleTax": 316.16
     },
     {
       "year": 2015,
       "teddyGross": 119806.16,
       "teddyTax": 22413.38,
-      "teddyNet": 97392.78,
       "nicoleGross": 43399,
-      "nicoleTax": 6992.63,
-      "nicoleNet": 36406.37,
-      "totalGross": 163205.16,
-      "totalTax": 29406.01,
-      "totalNet": 133799.15,
-      "teddyYoY": -3.71,
-      "nicoleYoY": 187.11,
-      "totalYoY": 16.96
+      "nicoleTax": 6992.63
     },
     {
       "year": 2016,
       "teddyGross": 132053.4,
       "teddyTax": 17419.67,
-      "teddyNet": 114633.73,
       "nicoleGross": 77804,
-      "nicoleTax": 10104.35,
-      "nicoleNet": 67699.65,
-      "totalGross": 209857.4,
-      "totalTax": 27524.02,
-      "totalNet": 182333.38,
-      "teddyYoY": 10.22,
-      "nicoleYoY": 79.28,
-      "totalYoY": 28.59
+      "nicoleTax": 10104.35
     },
     {
       "year": 2017,
       "teddyGross": 156523.75,
       "teddyTax": 35256.53,
-      "teddyNet": 121267.22,
       "nicoleGross": 104228.26,
-      "nicoleTax": 16852.37,
-      "nicoleNet": 87375.89,
-      "totalGross": 260752.01,
-      "totalTax": 52108.9,
-      "totalNet": 208643.11,
-      "teddyYoY": 18.53,
-      "nicoleYoY": 33.96,
-      "totalYoY": 24.25
+      "nicoleTax": 16852.37
     },
     {
       "year": 2018,
       "teddyGross": 214812.97,
       "teddyTax": 51903.21,
-      "teddyNet": 162909.76,
       "nicoleGross": 119485.6,
-      "nicoleTax": 24036.82,
-      "nicoleNet": 95448.78,
-      "totalGross": 334298.57,
-      "totalTax": 75940.03,
-      "totalNet": 258358.54,
-      "teddyYoY": 37.24,
-      "nicoleYoY": 14.64,
-      "totalYoY": 28.21
+      "nicoleTax": 24036.82
     },
     {
       "year": 2019,
       "teddyGross": 188188.08,
       "teddyTax": 53879.99,
-      "teddyNet": 134308.09,
       "nicoleGross": 153033.07,
-      "nicoleTax": 36478.71,
-      "nicoleNet": 116554.36,
-      "totalGross": 341221.15,
-      "totalTax": 90358.7,
-      "totalNet": 250862.45,
-      "teddyYoY": -12.39,
-      "nicoleYoY": 28.08,
-      "totalYoY": 2.07
+      "nicoleTax": 36478.71
     },
     {
       "year": 2020,
       "teddyGross": 983526.43,
       "teddyTax": 479300.02,
-      "teddyNet": 504226.41,
       "nicoleGross": 105430.43,
-      "nicoleTax": 19265.91,
-      "nicoleNet": 86164.52,
-      "totalGross": 1088956.86,
-      "totalTax": 498565.93,
-      "totalNet": 590390.93,
-      "teddyYoY": 422.63,
-      "nicoleYoY": -31.11,
-      "totalYoY": 219.14
+      "nicoleTax": 19265.91
     },
     {
       "year": 2021,
       "teddyGross": 2109111,
       "teddyTax": 1072340.29,
-      "teddyNet": 1036770.71,
       "nicoleGross": 30101.11,
-      "nicoleTax": 0,
-      "nicoleNet": 30101.11,
-      "totalGross": 2139212.11,
-      "totalTax": 1072340.29,
-      "totalNet": 1066871.82,
-      "teddyYoY": 114.44,
-      "nicoleYoY": -71.45,
-      "totalYoY": 96.45
+      "nicoleTax": 0
     },
     {
       "year": 2022,
       "teddyGross": 631094,
       "teddyTax": 278297.56,
-      "teddyNet": 352796.44,
       "nicoleGross": 7427,
-      "nicoleTax": 0,
-      "nicoleNet": 7427,
-      "totalGross": 638521,
-      "totalTax": 278297.56,
-      "totalNet": 360223.44,
-      "teddyYoY": -70.08,
-      "nicoleYoY": -75.33,
-      "totalYoY": -70.15
+      "nicoleTax": 0
     },
     {
       "year": 2023,
       "teddyGross": 682998,
       "teddyTax": 301990.79,
-      "teddyNet": 381007.21,
       "nicoleGross": 25392,
-      "nicoleTax": 576.63,
-      "nicoleNet": 24815.37,
-      "totalGross": 708390,
-      "totalTax": 302567.42,
-      "totalNet": 405822.58,
-      "teddyYoY": 8.22,
-      "nicoleYoY": 241.89,
-      "totalYoY": -66.89
+      "nicoleTax": 576.63
     },
     {
       "year": 2024,
       "teddyGross": 743447,
       "teddyTax": 332357.85,
-      "teddyNet": 411089.15,
       "nicoleGross": 22332,
-      "nicoleTax": 624.77,
-      "nicoleNet": 21707.23,
-      "totalGross": 765779,
-      "totalTax": 332982.62,
-      "totalNet": 432796.38,
-      "teddyYoY": 8.85,
-      "nicoleYoY": -12.05,
-      "totalYoY": 8.1
+      "nicoleTax": 624.77
     },
     {
       "year": 2025,
       "teddyGross": 759104,
       "teddyTax": 337495.09,
-      "teddyNet": 421608.91,
       "nicoleGross": 22332,
-      "nicoleTax": 624.77,
-      "nicoleNet": 21707.23,
-      "totalGross": 781436,
-      "totalTax": 338119.86,
-      "totalNet": 443316.14,
-      "teddyYoY": 2.11,
-      "nicoleYoY": 0,
-      "totalYoY": 2.04
+      "nicoleTax": 624.77
     },
     {
       "year": 2026,
       "teddyGross": 800000,
       "teddyTax": 386236.94,
-      "teddyNet": 413763.06,
       "nicoleGross": 25000,
-      "nicoleTax": 0,
-      "nicoleNet": 25000,
-      "totalGross": 825000,
-      "totalTax": 386236.94,
-      "totalNet": 438763.06,
-      "teddyYoY": 5.39,
-      "nicoleYoY": 11.95,
-      "totalYoY": 5.57
+      "nicoleTax": 0
     }
   ],
   "savingsVsSalaries": [
@@ -2660,5 +2340,5 @@
       }
     ]
   },
-  "lastUpdated": "2026-03-27T01:40:47.143Z"
+  "lastUpdated": "2026-03-27T02:43:24.972Z"
 }

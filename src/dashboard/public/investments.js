@@ -1,10 +1,10 @@
 /* ── NanoClaw Investment Dashboard ─────────────────────────── */
 
 const C = {
-  bg:'#151718', panel:'#1e2021', card:'#282a2b', border:'#2a3a40',
-  muted:'#8a9da6', accent:'#43a5d5', text:'#d0d4d7', hi:'#eef0f2', max:'#ffffff',
-  red:'#Cd3f45', orange:'#db7b55', yellow:'#e6cd69', green:'#9fca56',
-  cyan:'#55dbbe', blue:'#55b5db', purple:'#a074c4', brown:'#8a553f',
+  bg:'#0b0e14', panel:'#131721', card:'#202229', border:'#3e4b59',
+  muted:'#6c7a8a', accent:'#59c2ff', text:'#bfbdb6', hi:'#e6e1cf', max:'#f2f0e7',
+  red:'#f07178', orange:'#ff8f40', yellow:'#ffb454', green:'#aad94c',
+  cyan:'#95e6cb', blue:'#59c2ff', purple:'#d2a6ff', brown:'#e6b450',
 };
 const COLORS = [C.blue, C.green, C.yellow, C.purple, C.cyan, C.orange, C.red, C.brown, C.accent];
 
@@ -131,6 +131,37 @@ function showView(view) {
   if (view === 'overview') renderOverview(container);
   else if (view === 'salaries') renderSalaries(container);
   else if (view.startsWith('year-')) renderYear(container, view.replace('year-', ''));
+
+  renderHeaderStats(view);
+}
+
+function renderHeaderStats(view) {
+  const el = $('invest-header-stats');
+  const currentYear = Object.keys(DATA.years).sort((a,b) => b-a)[0];
+  const cur = DATA.years[currentYear];
+
+  if (view === 'salaries') {
+    const sal = DATA.salaries;
+    const totalGross = sal.reduce((s,r) => s + r.teddyGross + r.nicoleGross, 0);
+    const totalTax = sal.reduce((s,r) => s + r.teddyTax + r.nicoleTax, 0);
+    const totalNet = totalGross - totalTax;
+    const savPct = totalNet ? (cur.summary.total / totalNet * 100) : 0;
+    el.innerHTML = `
+      <div class="hdr-stat"><span class="hdr-stat-label">Lifetime Earnings</span><span class="hdr-stat-val highlight">${fmt(totalGross)}</span></div>
+      <div class="hdr-stat"><span class="hdr-stat-label">Lifetime Tax</span><span class="hdr-stat-val neg">${fmt(totalTax)}</span></div>
+      <div class="hdr-stat"><span class="hdr-stat-label">Lifetime Net</span><span class="hdr-stat-val pos">${fmt(totalNet)}</span></div>
+      <div class="hdr-stat"><span class="hdr-stat-label">Total Savings</span><span class="hdr-stat-val highlight">${fmt(cur.summary.total)}</span></div>
+      <div class="hdr-stat"><span class="hdr-stat-label">Savings %</span><span class="hdr-stat-val pos">${savPct.toFixed(1)}%</span></div>
+    `;
+  } else {
+    el.innerHTML = `
+      <div class="hdr-stat"><span class="hdr-stat-label">Total Savings</span><span class="hdr-stat-val highlight">${fmt(cur.summary.total)}</span></div>
+      <div class="hdr-stat"><span class="hdr-stat-label">YTD Return</span><span class="hdr-stat-val ${statClass(cur.returns.total.returnAmount) === 'positive' ? 'pos' : 'neg'}">${fmt(cur.returns.total.returnAmount)}</span></div>
+      <div class="hdr-stat"><span class="hdr-stat-label">YTD Return %</span><span class="hdr-stat-val ${statClass(cur.returns.total.returnPct) === 'positive' ? 'pos' : 'neg'}">${fmtPct(cur.returns.total.returnPct)}</span></div>
+      <div class="hdr-stat"><span class="hdr-stat-label">Total Debt</span><span class="hdr-stat-val neg">${fmt(cur.debt.totalDebt)}</span></div>
+      <div class="hdr-stat"><span class="hdr-stat-label">Net Position</span><span class="hdr-stat-val ${cur.subtotal >= 0 ? 'pos' : 'neg'}">${fmt(cur.subtotal)}</span></div>
+    `;
+  }
 }
 
 // ── Overview ────────────────────────────────────────────────
@@ -141,28 +172,6 @@ function renderOverview(el) {
   const pm = DATA.predictionModel;
 
   el.innerHTML = `
-    <div class="stats-row">
-      <div class="stat-item">
-        <span class="stat-label">Total Savings</span>
-        <span class="stat-value neutral">${fmt(cur.summary.total)}</span>
-      </div>
-      <div class="stat-item">
-        <span class="stat-label">YTD Return</span>
-        <span class="stat-value ${statClass(cur.returns.total.returnAmount)}">${fmt(cur.returns.total.returnAmount)}</span>
-      </div>
-      <div class="stat-item">
-        <span class="stat-label">YTD Return %</span>
-        <span class="stat-value ${statClass(cur.returns.total.returnPct)}">${fmtPct(cur.returns.total.returnPct)}</span>
-      </div>
-      <div class="stat-item">
-        <span class="stat-label">Total Debt</span>
-        <span class="stat-value negative">${fmt(cur.debt.totalDebt)}</span>
-      </div>
-      <div class="stat-item">
-        <span class="stat-label">Net Worth (Investments)</span>
-        <span class="stat-value ${statClass(cur.subtotal)}">${fmt(cur.subtotal)}</span>
-      </div>
-    </div>
     <div class="ov-grid-2x2">
       <div class="ov-cell">
         <h3>Savings Growth — Actual vs Predicted</h3>
@@ -225,8 +234,8 @@ function renderOverview(el) {
     data: {
       labels: salYears.map(s => s.year),
       datasets: [
-        { label: 'Net Income', data: salYears.map(s => s.totalNet), backgroundColor: C.blue+'bb', borderRadius: 3 },
-        { label: 'Tax', data: salYears.map(s => s.totalTax), backgroundColor: C.red+'bb', borderRadius: 3 },
+        { label: 'Net Income', data: salYears.map(s => (s.teddyGross + s.nicoleGross) - (s.teddyTax + s.nicoleTax)), backgroundColor: C.blue+'bb', borderRadius: 3 },
+        { label: 'Tax', data: salYears.map(s => s.teddyTax + s.nicoleTax), backgroundColor: C.red+'bb', borderRadius: 3 },
       ],
     },
     options: {
@@ -235,15 +244,21 @@ function renderOverview(el) {
     },
   });
 
-  // Savings vs Earnings
-  const svs = DATA.savingsVsSalaries;
+  // Savings vs Earnings — built from salary data (2007+), with savings lookup
+  const svsMap = {};
+  for (const s of DATA.savingsVsSalaries) svsMap[s.year] = s.totalSavings;
+  const allSal = DATA.salaries;
+  let cumNet = 0;
+  const cumNets = allSal.map(s => { cumNet += (s.teddyGross - s.teddyTax) + (s.nicoleGross - s.nicoleTax); return cumNet; });
+  const savingsData = allSal.map(s => svsMap[s.year] || 0);
+
   charts.savingsEarnings = new Chart($('chart-savings-earnings'), {
     type: 'line',
     data: {
-      labels: svs.map(s => s.year),
+      labels: allSal.map(s => s.year),
       datasets: [
-        { label: 'Total Savings', data: svs.map(s => s.totalSavings), borderColor: C.green, pointRadius: 3, tension: .3 },
-        { label: 'Cumulative Net Earnings', data: (() => { let s=0; return svs.map(r => { s+=r.totalEarningsAfterTax; return s; }); })(), borderColor: C.blue, pointRadius: 3, tension: .3 },
+        { label: 'Total Savings', data: savingsData, borderColor: C.green, pointRadius: 3, tension: .3 },
+        { label: 'Cumulative Net Earnings', data: cumNets, borderColor: C.blue, pointRadius: 3, tension: .3 },
       ],
     },
     options: {
@@ -308,8 +323,33 @@ async function saveField(input) {
     console.error('Save failed:', e);
   }
 }
-// Make saveField global for inline handler
+
+async function saveSalaryField(input) {
+  const idx = parseInt(input.dataset.idx);
+  const field = input.dataset.field;
+  const raw = parseFloat(input.value.replace(/[$,]/g, '')) || 0;
+  input.dataset.raw = raw;
+  input.value = fmtFull(raw);
+
+  // Update local data — only store the editable field
+  DATA.salaries[idx][field] = raw;
+
+  try {
+    await fetch('/api/investments/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(DATA),
+    });
+    DATA = await fetchInvestments();
+    showView('salaries');
+  } catch (e) {
+    console.error('Save failed:', e);
+  }
+}
+
+// Make save functions global for inline handlers
 window.saveField = saveField;
+window.saveSalaryField = saveSalaryField;
 
 function renderYear(el, year) {
   const d = DATA.years[year];
@@ -456,28 +496,25 @@ function renderYear(el, year) {
 function renderSalaries(el) {
   const sal = DATA.salaries;
   const svs = DATA.savingsVsSalaries;
+  const svsMap = {};
+  for (const s of svs) svsMap[s.year] = s.totalSavings;
   // Compute totals from rows
   const tot = sal.reduce((acc, s) => ({
-    teddyGross: acc.teddyGross + s.teddyGross, teddyTax: acc.teddyTax + s.teddyTax, teddyNet: acc.teddyNet + s.teddyNet,
-    nicoleGross: acc.nicoleGross + s.nicoleGross, nicoleTax: acc.nicoleTax + s.nicoleTax, nicoleNet: acc.nicoleNet + s.nicoleNet,
-    totalGross: acc.totalGross + s.totalGross, totalTax: acc.totalTax + s.totalTax, totalNet: acc.totalNet + s.totalNet,
-  }), { teddyGross:0, teddyTax:0, teddyNet:0, nicoleGross:0, nicoleTax:0, nicoleNet:0, totalGross:0, totalTax:0, totalNet:0 });
+    teddyGross: acc.teddyGross + s.teddyGross, teddyTax: acc.teddyTax + s.teddyTax,
+    nicoleGross: acc.nicoleGross + s.nicoleGross, nicoleTax: acc.nicoleTax + s.nicoleTax,
+  }), { teddyGross:0, teddyTax:0, nicoleGross:0, nicoleTax:0 });
+  const totNet = { teddyNet: tot.teddyGross - tot.teddyTax, nicoleNet: tot.nicoleGross - tot.nicoleTax };
+  const totalGross = tot.teddyGross + tot.nicoleGross;
+  const totalTax = tot.teddyTax + tot.nicoleTax;
+  const totalNet = totalGross - totalTax;
 
   // Current year savings from latest year data
   const latestYear = Object.keys(DATA.years).sort((a,b) => b-a)[0];
   const totalSavings = DATA.years[latestYear]?.summary.total || 0;
-  const savingsPct = tot.totalGross ? (totalSavings / tot.totalGross * 100) : 0;
-  const savingsAfterTaxPct = tot.totalNet ? (totalSavings / tot.totalNet * 100) : 0;
+  const savingsPct = totalGross ? (totalSavings / totalGross * 100) : 0;
+  const savingsAfterTaxPct = totalNet ? (totalSavings / totalNet * 100) : 0;
 
   el.innerHTML = `
-    <div class="stats-row" style="margin-bottom:16px">
-      <div class="stat-item"><span class="stat-label">Lifetime Earnings</span><span class="stat-value neutral">${fmt(tot.totalGross)}</span></div>
-      <div class="stat-item"><span class="stat-label">Lifetime Tax</span><span class="stat-value negative">${fmt(tot.totalTax)}</span></div>
-      <div class="stat-item"><span class="stat-label">Lifetime Net</span><span class="stat-value positive">${fmt(tot.totalNet)}</span></div>
-      <div class="stat-item"><span class="stat-label">Total Savings</span><span class="stat-value neutral">${fmt(totalSavings)}</span></div>
-      <div class="stat-item"><span class="stat-label">Savings % of Gross</span><span class="stat-value neutral">${savingsPct.toFixed(1)}%</span></div>
-      <div class="stat-item"><span class="stat-label">Savings % After Tax</span><span class="stat-value positive">${savingsAfterTaxPct.toFixed(1)}%</span></div>
-    </div>
     <div class="overview-grid">
       <div class="ov-card full">
         <h3>Salary History</h3>
@@ -494,19 +531,35 @@ function renderSalaries(el) {
               <th>Teddy YoY</th><th>Nicole YoY</th><th>Total YoY</th>
             </tr></thead>
             <tbody>
-              ${sal.map(s => `<tr>
-                <td>${s.year}</td><td>${fmt(s.teddyGross)}</td><td>${fmt(s.teddyTax)}</td><td>${fmt(s.teddyNet)}</td>
-                <td>${fmt(s.nicoleGross)}</td><td>${fmt(s.nicoleTax)}</td><td>${fmt(s.nicoleNet)}</td>
-                <td>${fmt(s.totalGross)}</td><td>${fmt(s.totalTax)}</td><td>${fmt(s.totalNet)}</td>
-                <td class="${s.teddyYoY >= 0 ? 'yoy-pos' : 'yoy-neg'}">${fmtPct(s.teddyYoY)}</td>
-                <td class="${s.nicoleYoY >= 0 ? 'yoy-pos' : 'yoy-neg'}">${fmtPct(s.nicoleYoY)}</td>
-                <td class="${s.totalYoY >= 0 ? 'yoy-pos' : 'yoy-neg'}">${fmtPct(s.totalYoY)}</td>
-              </tr>`).join('')}
+              ${sal.map((s, i) => {
+                const prev = i > 0 ? sal[i-1] : null;
+                const tNet = s.teddyGross - s.teddyTax;
+                const nNet = s.nicoleGross - s.nicoleTax;
+                const tGross = s.teddyGross + s.nicoleGross;
+                const tTax = s.teddyTax + s.nicoleTax;
+                const tNetTotal = tGross - tTax;
+                const tYoY = prev && prev.teddyGross ? ((s.teddyGross - prev.teddyGross) / prev.teddyGross * 100) : 0;
+                const nYoY = prev && prev.nicoleGross ? ((s.nicoleGross - prev.nicoleGross) / prev.nicoleGross * 100) : 0;
+                const prevTotal = prev ? prev.teddyGross + prev.nicoleGross : 0;
+                const totYoY = prevTotal ? ((tGross - prevTotal) / prevTotal * 100) : 0;
+                return `<tr>
+                <td>${s.year}</td>
+                <td><input class="editable sal-edit" data-idx="${i}" data-field="teddyGross" value="${fmtFull(s.teddyGross)}" data-raw="${s.teddyGross}" onfocus="this.value=this.dataset.raw;this.select()" onblur="saveSalaryField(this)" onkeydown="if(event.key==='Enter')this.blur()"></td>
+                <td><input class="editable sal-edit" data-idx="${i}" data-field="teddyTax" value="${fmtFull(s.teddyTax)}" data-raw="${s.teddyTax}" onfocus="this.value=this.dataset.raw;this.select()" onblur="saveSalaryField(this)" onkeydown="if(event.key==='Enter')this.blur()"></td>
+                <td>${fmt(tNet)}</td>
+                <td><input class="editable sal-edit" data-idx="${i}" data-field="nicoleGross" value="${fmtFull(s.nicoleGross)}" data-raw="${s.nicoleGross}" onfocus="this.value=this.dataset.raw;this.select()" onblur="saveSalaryField(this)" onkeydown="if(event.key==='Enter')this.blur()"></td>
+                <td><input class="editable sal-edit" data-idx="${i}" data-field="nicoleTax" value="${fmtFull(s.nicoleTax)}" data-raw="${s.nicoleTax}" onfocus="this.value=this.dataset.raw;this.select()" onblur="saveSalaryField(this)" onkeydown="if(event.key==='Enter')this.blur()"></td>
+                <td>${fmt(nNet)}</td>
+                <td>${fmt(tGross)}</td><td>${fmt(tTax)}</td><td>${fmt(tNetTotal)}</td>
+                <td class="${tYoY >= 0 ? 'yoy-pos' : 'yoy-neg'}">${fmtPct(tYoY)}</td>
+                <td class="${nYoY >= 0 ? 'yoy-pos' : 'yoy-neg'}">${fmtPct(nYoY)}</td>
+                <td class="${totYoY >= 0 ? 'yoy-pos' : 'yoy-neg'}">${fmtPct(totYoY)}</td>
+              </tr>`}).join('')}
             </tbody>
             <tfoot><tr style="font-weight:600;border-top:2px solid var(--border-lit)">
-              <td>TOTAL</td><td>${fmt(tot.teddyGross)}</td><td>${fmt(tot.teddyTax)}</td><td>${fmt(tot.teddyNet)}</td>
-              <td>${fmt(tot.nicoleGross)}</td><td>${fmt(tot.nicoleTax)}</td><td>${fmt(tot.nicoleNet)}</td>
-              <td>${fmt(tot.totalGross)}</td><td>${fmt(tot.totalTax)}</td><td>${fmt(tot.totalNet)}</td>
+              <td>TOTAL</td><td>${fmt(tot.teddyGross)}</td><td>${fmt(tot.teddyTax)}</td><td>${fmt(totNet.teddyNet)}</td>
+              <td>${fmt(tot.nicoleGross)}</td><td>${fmt(tot.nicoleTax)}</td><td>${fmt(totNet.nicoleNet)}</td>
+              <td>${fmt(totalGross)}</td><td>${fmt(totalTax)}</td><td>${fmt(totalNet)}</td>
               <td>${fmt(totalSavings)}</td><td>${savingsPct.toFixed(1)}%</td><td>${savingsAfterTaxPct.toFixed(1)}%</td>
             </tr></tfoot>
           </table>
@@ -518,16 +571,23 @@ function renderSalaries(el) {
           <table class="salary-table">
             <thead><tr><th>Year</th><th>Total Savings</th><th>Earnings (Pre-Tax)</th><th>Earnings (Post-Tax)</th><th>Avg Tax Rate</th></tr></thead>
             <tbody>
-              ${svs.map(s => `<tr>
-                <td>${s.year}</td><td>${fmt(s.totalSavings)}</td><td>${fmt(s.totalEarningsBeforeTax)}</td><td>${fmt(s.totalEarningsAfterTax)}</td><td>${s.avgTaxRate.toFixed(2)}%</td>
-              </tr>`).join('')}
+              ${sal.map(s => {
+                const gross = s.teddyGross + s.nicoleGross;
+                const tax = s.teddyTax + s.nicoleTax;
+                const net = gross - tax;
+                const rate = gross ? (tax / gross * 100) : 0;
+                const savings = svsMap[s.year] || 0;
+                return `<tr>
+                <td>${s.year}</td><td>${fmt(savings)}</td><td>${fmt(gross)}</td><td>${fmt(net)}</td><td>${rate.toFixed(2)}%</td>
+              </tr>`;
+              }).join('')}
             </tbody>
             <tfoot><tr style="font-weight:600;border-top:2px solid var(--border-lit)">
               <td>TOTAL</td>
               <td>${fmt(totalSavings)}</td>
-              <td>${fmt(svs.reduce((s,r) => s + r.totalEarningsBeforeTax, 0))}</td>
-              <td>${fmt(svs.reduce((s,r) => s + r.totalEarningsAfterTax, 0))}</td>
-              <td>${(svs.reduce((s,r) => s + r.avgTaxRate, 0) / svs.length).toFixed(2)}%</td>
+              <td>${fmt(totalGross)}</td>
+              <td>${fmt(totalNet)}</td>
+              <td>${totalGross ? (totalTax / totalGross * 100).toFixed(2) : 0}%</td>
             </tr></tfoot>
           </table>
         </div>
@@ -536,19 +596,19 @@ function renderSalaries(el) {
   `;
 
   // Salary chart
-  const recent = sal.filter(s => s.year >= 2015);
+  const recent = sal;
   charts.salary = new Chart($('chart-salary'), {
     type: 'bar',
     data: {
       labels: recent.map(s => s.year),
       datasets: [
-        { label: 'Teddy Net', data: recent.map(s => s.teddyNet), backgroundColor: C.blue+'bb', borderRadius: 3 },
-        { label: 'Nicole Net', data: recent.map(s => s.nicoleNet), backgroundColor: C.purple+'bb', borderRadius: 3 },
+        { label: 'Teddy Net', data: recent.map(s => s.teddyGross - s.teddyTax), backgroundColor: C.blue+'bb', borderRadius: 3 },
+        { label: 'Nicole Net', data: recent.map(s => s.nicoleGross - s.nicoleTax), backgroundColor: C.purple+'bb', borderRadius: 3 },
       ],
     },
     options: {
       responsive: true, maintainAspectRatio: false,
-      scales: { x: { stacked: true, grid: { display: false } }, y: { stacked: true, ticks: { callback: v => fmt(v) } } },
+      scales: { x: { stacked: true, grid: { display: false }, ticks: { autoSkip: true, maxRotation: 0 } }, y: { stacked: true, ticks: { callback: v => fmt(v) } } },
       plugins: { tooltip: { callbacks: { label: ctx => ` ${ctx.dataset.label}: ${fmt(ctx.raw)}` } } },
     },
   });
