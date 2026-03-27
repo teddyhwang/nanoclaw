@@ -24,6 +24,7 @@ const DB_DIR = path.join(process.cwd(), 'db');
 const STATE_FILE = path.join(DB_DIR, 'dev-agent-state.json');
 const LEGACY_STATE_FILE = path.join(LOG_DIR, 'dev-agent-state.json');
 const RPC_TRACE_LOG = path.join(LOG_DIR, 'dev-agent.rpc.jsonl');
+const STATUS_FILE = path.join(DB_DIR, 'dev-agent-status.json');
 const POLL_MS = 500;
 const PROJECT_DIR = process.cwd();
 type ModelConfig = {
@@ -76,10 +77,44 @@ const STREAM_UPDATE_MIN_CHARS = 200;
 let lastStreamFlushAt = 0;
 let lastStreamedText = '';
 let streamMessageStarted = false;
+let lastToolName = '';
 
 function log(msg: string) {
   const ts = new Date().toISOString();
   console.error(`[dev-agent ${ts}] ${msg}`);
+}
+
+function writeStatus() {
+  try {
+    const now = Date.now();
+    const status: Record<string, unknown> = {
+      updatedAt: new Date().toISOString(),
+      isStreaming,
+      currentModel: formatModel(currentRouteModel),
+      preferredModel: formatModel(preferredModel),
+      piProcessAlive: piProcess !== null && !piProcess.killed,
+    };
+    if (activePrompt) {
+      status.activePrompt = {
+        id: activePrompt.id,
+        message: activePrompt.message.slice(0, 200),
+        queuedAs: activePrompt.queuedAs,
+        startedAt: new Date(activePrompt.startedAt).toISOString(),
+        elapsedSec: Math.round((now - activePrompt.startedAt) / 1000),
+        retriedWithFallback: activePrompt.retriedWithFallback,
+        textDeltaCount,
+        responseBufferChars: responseBuffer.length,
+        currentTool: lastToolName || null,
+      };
+    } else {
+      status.activePrompt = null;
+    }
+    const cooldowns = describeActiveCooldowns();
+    if (cooldowns) status.cooldowns = cooldowns;
+    fs.writeFileSync(STATUS_FILE, JSON.stringify(status, null, 2));
+  } catch {
+    // ignore status write failures
+  }
 }
 
 function trace(kind: string, data: Record<string, unknown>) {
@@ -439,6 +474,7 @@ function handlePiEvent(event: Record<string, unknown>) {
           `prompt accepted prompt=${activePrompt.id} queueToPi=${fmtMs(activePrompt.piAcceptedAt - activePrompt.startedAt)}`,
         );
       }
+      writeStatus();
     }
     if (cmd === 'set_model' && success) {
       const data = (event.data || {}) as Record<string, unknown>;
@@ -518,6 +554,7 @@ function handlePiEvent(event: Record<string, unknown>) {
     if (!endedWithThrottleError) {
       activePrompt = null;
     }
+    writeStatus();
     return;
   }
 
@@ -558,17 +595,26 @@ function handlePiEvent(event: Record<string, unknown>) {
       } else {
         log(`assistant message_start prompt=${activePrompt?.id || 'none'}`);
       }
+      writeStatus();
     }
     return;
   }
 
   if (eventType === 'tool_execution_start') {
     const toolName = payload.toolName as string;
+    lastToolName = toolName || '';
     if (toolName === 'send_discord') {
       responseBuffer = '';
       resetStreamingState();
       sendDiscordUsedInCurrentRun = true;
     }
+    writeStatus();
+    return;
+  }
+
+  if (eventType === 'tool_execution_end') {
+    lastToolName = '';
+    writeStatus();
     return;
   }
 
@@ -1042,6 +1088,7 @@ function scheduleQueuePoll(delayMs: number) {
 ensureDirs();
 loadState();
 piProcess = startPi();
+writeStatus();
 
 // Wait a moment for pi to initialize, then start polling
 setTimeout(() => {

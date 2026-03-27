@@ -1,0 +1,82 @@
+import { useState, useEffect } from 'react';
+import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import type { DashboardData, InvestmentData } from './types';
+import { fetchDashboard, fetchInvestments } from './api';
+import { PrivacyProvider } from './contexts/PrivacyContext';
+import { Loading } from './components/Loading';
+import { FinancePage } from './components/finance/FinancePage';
+import { InvestmentsPage } from './components/investments/InvestmentsPage';
+
+export function App() {
+  const [financeData, setFinanceData] = useState<DashboardData | null>(null);
+  const [investmentData, setInvestmentData] = useState<InvestmentData | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    // Load both datasets in parallel
+    Promise.all([
+      fetchDashboard().catch((e) => { console.error('Finance load error:', e); return null; }),
+      fetchInvestments().catch((e) => { console.error('Investments load error:', e); return null; }),
+    ]).then(([finance, investments]) => {
+      if (!finance && !investments) {
+        setError('Failed to load any data. Is the API server running?');
+      }
+      setFinanceData(finance);
+      setInvestmentData(investments);
+      setLoading(false);
+    });
+  }, []);
+
+  if (loading) return <Loading message="Loading dashboard data…" />;
+  if (error) return <Loading error={error} />;
+
+  return (
+    <PrivacyProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route
+            path="/"
+            element={
+              financeData ? (
+                <FinancePage initialData={financeData} />
+              ) : (
+                <Loading error="Finance data unavailable" />
+              )
+            }
+          />
+          <Route
+            path="/investments"
+            element={
+              investmentData ? (
+                <InvestmentsPage initialData={investmentData} />
+              ) : (
+                <Loading error="Investment data unavailable" />
+              )
+            }
+          />
+          <Route
+            path="/investments/salaries"
+            element={
+              investmentData ? (
+                <InvestmentsPage initialData={investmentData} />
+              ) : (
+                <Loading error="Investment data unavailable" />
+              )
+            }
+          />
+          <Route
+            path="/investments/:year"
+            element={
+              investmentData ? (
+                <InvestmentsPage initialData={investmentData} />
+              ) : (
+                <Loading error="Investment data unavailable" />
+              )
+            }
+          />
+        </Routes>
+      </BrowserRouter>
+    </PrivacyProvider>
+  );
+}

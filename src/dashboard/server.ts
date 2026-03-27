@@ -28,12 +28,21 @@ const PORT = parseInt(process.env.DASHBOARD_PORT || '3002', 10);
 const HOST = process.env.DASHBOARD_HOST || '0.0.0.0';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PUBLIC_DIR = path.join(__dirname, 'public');
-// In compiled mode, public dir is at dist/dashboard/public — but we
-// always serve from src/dashboard/public for simplicity (static files).
-const STATIC_DIR = fs.existsSync(PUBLIC_DIR)
-  ? PUBLIC_DIR
-  : path.resolve(process.cwd(), 'src', 'dashboard', 'public');
+// Serve from the React build output (Vite dist), falling back to legacy public dir
+const REACT_DIST = path.resolve(
+  process.cwd(),
+  'src',
+  'dashboard',
+  'ui',
+  'dist',
+);
+const LEGACY_PUBLIC = path.join(__dirname, 'public');
+const LEGACY_SRC = path.resolve(process.cwd(), 'src', 'dashboard', 'public');
+const STATIC_DIR = fs.existsSync(REACT_DIST)
+  ? REACT_DIST
+  : fs.existsSync(LEGACY_PUBLIC)
+    ? LEGACY_PUBLIC
+    : LEGACY_SRC;
 
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html',
@@ -159,11 +168,8 @@ function serveStatic(res: ServerResponse, pathname: string): void {
   }
 
   if (!fs.existsSync(filePath)) {
-    if (pathname.startsWith('/investments')) {
-      // SPA fallback for investment routes
-      filePath = path.join(STATIC_DIR, 'investments.html');
-    } else if (!path.extname(pathname)) {
-      // SPA fallback for finance routes
+    if (!path.extname(pathname)) {
+      // SPA fallback — serve index.html for all non-file routes
       filePath = path.join(STATIC_DIR, 'index.html');
     } else {
       sendError(res, 404, 'Not found');
@@ -195,5 +201,7 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`💰 Tico Dashboard running at http://${HOST}:${PORT}`);
+  console.log(
+    `💰 Tico Dashboard running at http://${HOST}:${PORT} (serving from ${STATIC_DIR})`,
+  );
 });

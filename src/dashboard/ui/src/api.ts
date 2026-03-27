@@ -1,0 +1,46 @@
+import type { DashboardData, InvestmentData } from './types';
+
+export async function fetchDashboard(
+  refreshBalances = false,
+): Promise<DashboardData> {
+  const url = refreshBalances
+    ? '/api/dashboard?refreshBalances=true'
+    : '/api/dashboard';
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function fetchInvestments(): Promise<InvestmentData> {
+  const r = await fetch('/api/investments');
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+export async function saveProperties(properties: unknown[]): Promise<void> {
+  await fetch('/api/properties/save', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(properties),
+  });
+}
+
+export async function updateInvestmentField(
+  year: string,
+  path: string[],
+  value: number,
+): Promise<void> {
+  await fetch('/api/investments/update', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ year, path, value }),
+  });
+}
+
+export async function saveInvestmentData(data: InvestmentData): Promise<void> {
+  await fetch('/api/investments/save', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+}
