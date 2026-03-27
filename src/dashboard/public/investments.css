@@ -39,7 +39,7 @@
 .sub-sep { width: 1px; background: var(--border); margin: 2px 6px; flex-shrink: 0; }
 
 /* View container */
-.view-container { flex: 1; overflow-y: auto; padding: var(--g); display: flex; flex-direction: column; min-height: 0; }
+.view-container { flex: 1; overflow-y: auto; overflow-x: hidden; padding: var(--g); display: flex; flex-direction: column; min-height: 0; }
 
 /* ── Overview 2×2 grid ─────────────────────────────────────── */
 .ov-grid-2x2 {
@@ -103,6 +103,7 @@
   grid-template-columns: 1fr 1fr;
   gap: var(--g);
   align-items: start;
+  min-width: 0;
 }
 .yr-card {
   background: var(--bg-panel);
@@ -111,6 +112,8 @@
   border-radius: var(--r); padding: 12px;
   box-shadow: 0 2px 12px rgba(0,0,0,0.2), inset 0 1px 0 rgba(255,255,255,0.02);
   display: flex; flex-direction: column;
+  min-width: 0;
+  overflow-x: hidden;
 }
 .yr-card.full { grid-column: 1 / -1; }
 .yr-card h3 {
@@ -152,8 +155,77 @@
   margin-left: 4px; vertical-align: middle; letter-spacing: 0.3px;
 }
 .person-grid .pg-val.orange { color: var(--orange); text-shadow: 0 0 10px rgba(255,143,64,0.15); }
+.person-grid .pg-val.pos { color: var(--green); text-shadow: 0 0 10px rgba(170,217,76,0.15); }
+.person-grid .pg-val.neg { color: var(--red); text-shadow: 0 0 10px rgba(240,113,120,0.15); }
 .data-row.total .dl { color: var(--text-hi); }
 .data-row.total .dv { font-size: 14px; }
+.total-card {
+  background: linear-gradient(180deg, rgba(89,194,255,0.06), rgba(89,194,255,0.02));
+}
+.totals-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px 12px;
+}
+.total-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(13,15,20,0.35);
+}
+.total-stat-emphasis {
+  border-color: rgba(89,194,255,0.35);
+  background: rgba(89,194,255,0.08);
+}
+.total-stat-pos {
+  border-color: rgba(170,217,76,0.35);
+  background: rgba(170,217,76,0.08);
+}
+.total-stat-neg {
+  border-color: rgba(240,113,120,0.35);
+  background: rgba(240,113,120,0.08);
+}
+.total-stat-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--muted);
+}
+.total-stat-value {
+  font-size: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-max);
+}
+.total-stat-sub {
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.total-stat-value-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+.total-stat-value-row .total-stat-value,
+.total-stat-value-row .total-stat-sub {
+  white-space: nowrap;
+}
+.total-stat-value-row .total-stat-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.total-stat-value.pos, .total-stat-sub.pos { color: var(--green); text-shadow: 0 0 10px rgba(170,217,76,0.15); }
+.total-stat-value.neg, .total-stat-sub.neg { color: var(--red); text-shadow: 0 0 10px rgba(240,113,120,0.15); }
+.total-stat-value.blue { color: var(--blue); text-shadow: 0 0 10px rgba(89,194,255,0.15); }
+.total-stat-value.orange { color: var(--orange); text-shadow: 0 0 10px rgba(255,143,64,0.15); }
+.summary-card-spacing { margin-bottom: 10px; width: 100%; align-self: stretch; flex-shrink: 0; }
 
 /* Editable field */
 .editable {
@@ -171,10 +243,10 @@
 /* Person columns — align-items:stretch so all cells in a row share the same height,
    then use flexbox inside each cell for vertical centering. This ensures border-top
    on total rows aligns perfectly across all columns. */
-.person-grid { display: grid; grid-template-columns: 1fr auto auto auto; gap: 0 12px; align-items: stretch; }
-.person-grid .pg-label { font-size: 12px; color: var(--text); padding: 5px 0; display: flex; align-items: center; }
-.person-grid .pg-header { font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); text-align: right; padding-bottom: 4px; border-bottom: 1px solid var(--border); display: flex; align-items: flex-end; justify-content: flex-end; }
-.person-grid .pg-val { font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums; text-align: right; color: var(--text-hi); padding: 5px 0; display: flex; align-items: center; justify-content: flex-end; }
+.person-grid { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 0 12px; align-items: stretch; min-width: 0; }
+.person-grid .pg-label { font-size: 12px; color: var(--text); padding: 5px 0; display: flex; align-items: center; min-width: 0; }
+.person-grid .pg-header { font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); text-align: right; padding-bottom: 4px; border-bottom: 1px solid var(--border); display: flex; align-items: flex-end; justify-content: flex-end; min-width: 0; }
+.person-grid .pg-val { font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums; text-align: right; color: var(--text-hi); padding: 5px 0; display: flex; align-items: center; justify-content: flex-end; min-width: 0; }
 .person-grid .editable { margin: 2px 0; display: flex; align-items: center; justify-content: flex-end; }
 /* Row separators — none by default, added via bottom-border on a wrapper approach */
 /* Instead of per-cell shadows, use a single visual separator strategy:
@@ -190,6 +262,9 @@
   background: rgba(89,194,255,0.04); border-radius: 3px;
   color: var(--text-max);
 }
+.person-grid .pg-val.pg-total.pos { color: var(--green); text-shadow: 0 0 10px rgba(170,217,76,0.15); }
+.person-grid .pg-val.pg-total.neg { color: var(--red); text-shadow: 0 0 10px rgba(240,113,120,0.15); }
+.portfolio-grid { margin-bottom: 10px; }
 
 /* ── Salary table ──────────────────────────────────────────── */
 .salary-table {
@@ -222,20 +297,27 @@
   .overview-grid { grid-template-columns: 1fr; }
   .year-grid { grid-template-columns: 1fr; }
   .yr-card.full { grid-column: 1; }
+  .totals-grid { grid-template-columns: 1fr 1fr; }
   .header-mid { display: none; }
 }
 @media (max-width: 640px) {
   .year-grid { grid-template-columns: 1fr; }
   .sub-nav { padding: 4px 8px; }
-  .person-grid { gap: 0 6px; }
+  .totals-grid { grid-template-columns: 1fr 1fr; gap: 8px; min-width: 0; }
+  .total-stat { padding: 8px 10px; gap: 2px; min-width: 0; overflow: hidden; }
+  .total-stat-label { font-size: 9px; }
+  .total-stat-value { font-size: 14px; }
+  .total-stat-sub { font-size: 10px; flex-shrink: 0; }
+  .total-stat-value-row { gap: 6px; }
+  .person-grid { grid-template-columns: minmax(0, 1fr) repeat(3, minmax(0, auto)); gap: 0 4px; }
   .person-grid .pg-label,
   .person-grid .pg-val,
   .person-grid .pg-header { font-size: 10px; }
-  .person-grid .pg-label { font-size: 11px; }
+  .person-grid .pg-label { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .person-grid .pg-val { font-size: 11px; }
-  .editable { width: 100px !important; font-size: 11px; }
-  .data-row .editable { width: 120px !important; }
-  .data-row .dl { font-size: 11px; }
+  .editable { width: 72px !important; min-width: 72px; font-size: 11px; padding: 2px 4px; }
+  .data-row .editable { width: 90px !important; min-width: 90px; }
+  .data-row .dl { font-size: 11px; min-width: 0; }
   .data-row .dv { font-size: 11px; }
   .yr-card { padding: 10px; }
   .yr-card h3 { font-size: 10px; }
@@ -254,4 +336,7 @@
   .salary-table th:nth-child(9), .salary-table td:nth-child(9),
   .salary-table th:nth-child(n+11), .salary-table td:nth-child(n+11) { display: none; }
   .salary-table .sal-edit { font-size: 10px; padding: 2px 2px; }
+}
+@media (max-width: 380px) {
+  .totals-grid { grid-template-columns: 1fr; }
 }

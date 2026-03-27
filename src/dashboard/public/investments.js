@@ -150,43 +150,76 @@ function showView(view) {
   renderHeaderStats(view);
 }
 
-function renderHeaderStats(view) {
+function renderHeaderStats(_view) {
   const el = $('invest-header-stats');
-  const currentYear = Object.keys(DATA.years).sort((a,b) => b-a)[0];
-  const cur = DATA.years[currentYear];
-
-  if (view === 'salaries') {
-    const sal = DATA.salaries;
-    const totalGross = sal.reduce((s,r) => s + r.teddyGross + r.nicoleGross, 0);
-    const totalTax = sal.reduce((s,r) => s + r.teddyTax + r.nicoleTax, 0);
-    const totalNet = totalGross - totalTax;
-    const savPct = totalNet ? (cur.summary.total / totalNet * 100) : 0;
-    el.innerHTML = `
-      <div class="hdr-stat"><span class="hdr-stat-label">Lifetime Earnings</span><span class="hdr-stat-val hero">${fmt(totalGross)}</span></div>
-      <div class="hdr-stat"><span class="hdr-stat-label">Lifetime Tax</span><span class="hdr-stat-val neg">${fmt(totalTax)}</span></div>
-      <div class="hdr-stat"><span class="hdr-stat-label">Lifetime Net</span><span class="hdr-stat-val pos">${fmt(totalNet)}</span></div>
-      <div class="hdr-stat"><span class="hdr-stat-label">Total Savings</span><span class="hdr-stat-val highlight">${fmt(cur.summary.total)}</span></div>
-      <div class="hdr-stat"><span class="hdr-stat-label">Savings %</span><span class="hdr-stat-val pos">${savPct.toFixed(1)}%</span></div>
-    `;
-  } else {
-    el.innerHTML = `
-      <div class="hdr-stat"><span class="hdr-stat-label">Total Savings</span><span class="hdr-stat-val hero">${fmt(cur.summary.total)}</span></div>
-      <div class="hdr-stat"><span class="hdr-stat-label">YTD Return</span><span class="hdr-stat-val ${statClass(cur.returns.total.returnAmount) === 'positive' ? 'pos' : 'neg'}">${fmt(cur.returns.total.returnAmount)}</span></div>
-      <div class="hdr-stat"><span class="hdr-stat-label">YTD Return %</span><span class="hdr-stat-val ${statClass(cur.returns.total.returnPct) === 'positive' ? 'pos' : 'neg'}">${fmtPct(cur.returns.total.returnPct)}</span></div>
-      <div class="hdr-stat"><span class="hdr-stat-label">Total Debt</span><span class="hdr-stat-val neg">${fmt(cur.debt.totalDebt)}</span></div>
-      <div class="hdr-stat"><span class="hdr-stat-label">Net Position</span><span class="hdr-stat-val ${cur.subtotal >= 0 ? 'pos' : 'neg'}">${fmt(cur.subtotal)}</span></div>
-    `;
-  }
+  if (el) el.innerHTML = '';
 }
 
 // ── Overview ────────────────────────────────────────────────
+
+function renderSummaryCard(year, d, liveBadge = '') {
+  const teddyGross = d.salary.teddy.gross;
+  const nicoleGross = d.salary.nicole.gross;
+  const teddyTax = d.salary.teddy.actualTax;
+  const nicoleTax = d.salary.nicole.actualTax;
+  const totalNet = teddyGross + nicoleGross - teddyTax - nicoleTax;
+  const teddyNetContributions =
+    d.contributions.rrsp.teddy +
+    d.contributions.tfsa.teddy -
+    d.contributions.tfsaWithdrawals.teddy;
+  const nicoleNetContributions =
+    d.contributions.rrsp.nicole +
+    d.contributions.tfsa.nicole -
+    d.contributions.tfsaWithdrawals.nicole;
+  const totalContributions =
+    teddyNetContributions +
+    nicoleNetContributions +
+    d.contributions.respContributions;
+
+  return `
+    <div class="yr-card total-card summary-card-spacing">
+      <h3>Summary — ${year}${liveBadge}</h3>
+      <div class="totals-grid">
+        <div class="total-stat total-stat-emphasis total-stat-${valClass(d.returns.total.returnAmount) || 'neutral'}">
+          <span class="total-stat-label">Total Return</span>
+          <div class="total-stat-value-row">
+            <span class="total-stat-value ${valClass(d.returns.total.returnAmount)}">${fmtFull(d.returns.total.returnAmount)}</span>
+            <span class="total-stat-sub ${valClass(d.returns.total.returnAmount)}">${fmtPct(d.returns.total.returnPct)}</span>
+          </div>
+        </div>
+        <div class="total-stat total-stat-emphasis">
+          <span class="total-stat-label">Net Position</span>
+          <span class="total-stat-value ${valClass(d.subtotal)}">${fmtFull(d.subtotal)}</span>
+        </div>
+        <div class="total-stat">
+          <span class="total-stat-label">Total Investments</span>
+          <span class="total-stat-value blue">${fmtFull(d.summary.total)}</span>
+        </div>
+        <div class="total-stat">
+          <span class="total-stat-label">Total Debt</span>
+          <span class="total-stat-value neg">${fmtFull(d.debt.totalDebt)}</span>
+        </div>
+        <div class="total-stat">
+          <span class="total-stat-label">Net Income</span>
+          <span class="total-stat-value orange">${fmtFull(totalNet)}</span>
+        </div>
+        <div class="total-stat">
+          <span class="total-stat-label">Net Contributions</span>
+          <span class="total-stat-value ${valClass(totalContributions)}">${fmtFull(totalContributions)}</span>
+        </div>
+      </div>
+    </div>
+  `;
+}
 
 function renderOverview(el) {
   const currentYear = Object.keys(DATA.years).sort((a,b) => b-a)[0];
   const cur = DATA.years[currentYear];
   const pm = DATA.predictionModel;
+  const liveBadge = cur.accounts.allAccounts ? ' <span class="live-badge">LIVE</span>' : '';
 
   el.innerHTML = `
+    ${renderSummaryCard(currentYear, cur, liveBadge)}
     <div class="ov-grid-2x2">
       <div class="ov-cell">
         <h3>Savings Growth — Actual vs Predicted</h3>
@@ -394,6 +427,18 @@ function renderYear(el, year) {
   const totalTax = teddyTax + nicoleTax;
   const totalNet = totalGross - totalTax;
   const totalRefund = teddyRefund + nicoleRefund;
+  const teddyNetContributions =
+    d.contributions.rrsp.teddy +
+    d.contributions.tfsa.teddy -
+    d.contributions.tfsaWithdrawals.teddy;
+  const nicoleNetContributions =
+    d.contributions.rrsp.nicole +
+    d.contributions.tfsa.nicole -
+    d.contributions.tfsaWithdrawals.nicole;
+  const totalContributions =
+    teddyNetContributions +
+    nicoleNetContributions +
+    d.contributions.respContributions;
 
   const rrspProviders = Object.entries(d.accounts.rrsp);
   const tfsaProviders = Object.entries(d.accounts.tfsa);
@@ -408,8 +453,92 @@ function renderYear(el, year) {
   if (d.accounts.resp) otherItems.push(['RESP', d.accounts.resp]);
 
   el.innerHTML = `
+    ${renderSummaryCard(year, d)}
     <div class="year-grid">
-      <!-- Left: Income & Contributions -->
+      <!-- Left: Returns + Portfolio -->
+      <div class="yr-card">
+        <h3>Returns${liveBadge}</h3>
+        <div class="person-grid">
+          <span></span><span class="pg-header">Start</span><span class="pg-header">Current</span><span class="pg-header">Return</span>
+          ${d.returns.td.startingBalance ? `
+            <span class="pg-label">TD</span><span class="pg-val">${fmt(d.returns.td.startingBalance)}</span><span class="pg-val ${valClass(d.returns.td.returnAmount)}">${fmt(d.returns.td.currentBalance)}</span><span class="pg-val ${valClass(d.returns.td.returnAmount)}">${fmtPct(d.returns.td.returnPct)}</span>
+          ` : ''}
+          ${d.returns.wealthsimple.totalStart ? `
+            <span class="pg-label">Wealthsimple</span><span class="pg-val">${fmt(d.returns.wealthsimple.totalStart)}</span><span class="pg-val ${valClass(d.returns.wealthsimple.returnAmount)}">${fmt(d.returns.wealthsimple.totalCurrent)}</span><span class="pg-val ${valClass(d.returns.wealthsimple.returnAmount)}">${fmtPct(d.returns.wealthsimple.returnPct)}</span>
+          ` : ''}
+          <span class="pg-label pg-total">Total</span><span class="pg-val pg-total">${fmt((d.returns.td.startingBalance||0) + (d.returns.wealthsimple.totalStart||0))}</span><span class="pg-val pg-total ${valClass(d.returns.total.returnAmount)}">${fmt(d.summary.total)}</span><span class="pg-val pg-total ${valClass(d.returns.total.returnAmount)}">${fmtFull(d.returns.total.returnAmount)} (${fmtPct(d.returns.total.returnPct)})</span>
+        </div>
+        ${d.returns.goal ? `
+          <div class="data-row" style="margin-top:8px"><span class="dl">10% Goal</span><span class="dv">${fmtFull(d.returns.goal)}</span></div>
+          <div class="data-row"><span class="dl">vs Goal</span><span class="dv ${valClass(d.returns.currentVsGoal)}">${fmtFull(d.returns.currentVsGoal)} (${fmtPct(d.returns.pctDifference)})</span></div>
+        ` : ''}
+
+        ${d.accounts.allLoans?.length ? `
+          <h3 class="section-gap">Debt${liveBadge}</h3>
+          ${d.accounts.allLoans.map(l => `<div class="data-row"><span class="dl">${l.name} <span class="inst-tag">${l.institution}</span></span><span class="dv neg">${fmtFull(l.balance)}</span></div>`).join('')}
+          <div class="data-row total"><span class="dl">Total Debt</span><span class="dv neg">${fmtFull(d.debt.totalDebt)}</span></div>
+        ` : debtEntries.length ? `
+          <h3 class="section-gap">Debt</h3>
+          ${debtEntries.map(([k, v]) => `<div class="data-row"><span class="dl">${k}</span><span class="dv neg">${fmtFull(v)}</span></div>`).join('')}
+          <div class="data-row total"><span class="dl">Total Debt</span><span class="dv neg">${fmtFull(d.debt.totalDebt)}</span></div>
+        ` : ''}
+
+        <h3 class="section-gap">Portfolio${liveBadge}</h3>
+        ${d.accounts.allAccounts ? `
+          ${(() => {
+            const groups = { rrsp: [], tfsa: [], resp: [], nonreg: [], crypto: [] };
+            const labels = { rrsp: 'RRSP', tfsa: 'TFSA', resp: 'RESP', nonreg: 'Non-registered', crypto: 'Crypto' };
+            for (const a of d.accounts.allAccounts) {
+              const type = a.type === 'cash' ? 'nonreg' : a.type;
+              groups[type]?.push(a) || groups.nonreg.push(a);
+            }
+
+            const personSummaryGrid = (label, providers, totals) => {
+              const entries = Object.entries(providers || {}).filter(([, v]) => (v?.teddy || 0) || (v?.nicole || 0));
+              if (!entries.length) return '';
+              return `
+                <div class="acct-section-label">${label}</div>
+                <div class="person-grid portfolio-grid">
+                  <span></span><span class="pg-header">Teddy</span><span class="pg-header">Nicole</span><span class="pg-header">Total</span>
+                  ${entries.map(([provider, vals]) => `
+                    <span class="pg-label">${provider}</span>
+                    <span class="pg-val">${fmtFull(vals.teddy || 0)}</span>
+                    <span class="pg-val">${fmtFull(vals.nicole || 0)}</span>
+                    <span class="pg-val">${fmtFull((vals.teddy || 0) + (vals.nicole || 0))}</span>
+                  `).join('')}
+                  <span class="pg-label pg-total">${label} Total</span>
+                  <span class="pg-val pg-total">${fmtFull(totals?.teddy || 0)}</span>
+                  <span class="pg-val pg-total">${fmtFull(totals?.nicole || 0)}</span>
+                  <span class="pg-val pg-total orange">${fmtFull(totals?.total || 0)}</span>
+                </div>
+              `;
+            };
+
+            let html = '';
+            html += personSummaryGrid('RRSP', d.accounts.rrsp, d.accounts.totalRrsp);
+            html += personSummaryGrid('TFSA', d.accounts.tfsa, d.accounts.totalTfsa);
+
+            for (const [type, accts] of Object.entries(groups)) {
+              if (!accts.length || type === 'rrsp' || type === 'tfsa') continue;
+              const subtotal = accts.reduce((s, a) => s + a.balance, 0);
+              html += `<div class="acct-section-label">${labels[type] || type}</div>`;
+              html += accts.map(a => {
+                const curLabel = a.currency !== 'cad' ? ' <small style="color:var(--muted)">' + a.currency.toUpperCase() + '</small>' : '';
+                return `<div class="data-row"><span class="dl">${a.name} <span class="inst-tag">${a.institution}</span></span><span class="dv">${fmtFull(a.balance)}${curLabel}</span></div>`;
+              }).join('');
+              html += `<div class="data-row total"><span class="dl">${labels[type]} Total</span><span class="dv orange">${fmtFull(subtotal)}</span></div>`;
+            }
+            return html;
+          })()}
+        ` : `
+          <div class="data-row"><span class="dl">TD Savings</span><span class="dv blue">${fmtFull(d.summary.tdSavings)}</span></div>
+          <div class="data-row"><span class="dl">Wealthsimple</span><span class="dv blue">${fmtFull(d.summary.wealthsimple)}</span></div>
+          ${d.summary.shopifyRsu ? `<div class="data-row"><span class="dl">Shopify RSU</span><span class="dv blue">${fmtFull(d.summary.shopifyRsu)}</span></div>` : ''}
+        `}
+        <div class="data-row total"><span class="dl">Total Investments</span><span class="dv blue">${fmtFull(d.summary.total)}</span></div>
+      </div>
+
+      <!-- Right: Income & Contributions -->
       <div class="yr-card">
         <h3>Income — ${year}</h3>
         <div class="person-grid">
@@ -437,62 +566,8 @@ function renderYear(el, year) {
           <span class="pg-label">TFSA</span>${editableField(year, ['contributions','tfsa','teddy'], d.contributions.tfsa.teddy)}${editableField(year, ['contributions','tfsa','nicole'], d.contributions.tfsa.nicole)}<span class="pg-val">${fmtFull(d.contributions.tfsa.teddy + d.contributions.tfsa.nicole)}</span>
           <span class="pg-label">TFSA Withdrawals</span>${editableField(year, ['contributions','tfsaWithdrawals','teddy'], d.contributions.tfsaWithdrawals.teddy)}${editableField(year, ['contributions','tfsaWithdrawals','nicole'], d.contributions.tfsaWithdrawals.nicole)}<span class="pg-val">${fmtFull(d.contributions.tfsaWithdrawals.teddy + d.contributions.tfsaWithdrawals.nicole)}</span>
           <span class="pg-label">RESP</span>${editableField(year, ['contributions','respContributions'], d.contributions.respContributions)}<span class="pg-val">—</span><span class="pg-val">${fmtFull(d.contributions.respContributions)}</span>
+          <span class="pg-label pg-total">Net Contributions</span><span class="pg-val pg-total">${fmtFull(teddyNetContributions)}</span><span class="pg-val pg-total">${fmtFull(nicoleNetContributions)}</span><span class="pg-val pg-total orange">${fmtFull(totalContributions)}</span>
         </div>
-      </div>
-
-      <!-- Right: Returns + Portfolio -->
-      <div class="yr-card">
-        <h3>Returns${liveBadge}</h3>
-        <div class="person-grid">
-          <span></span><span class="pg-header">Start</span><span class="pg-header">Current</span><span class="pg-header">Return</span>
-          ${d.returns.td.startingBalance ? `
-            <span class="pg-label">TD</span><span class="pg-val">${fmt(d.returns.td.startingBalance)}</span><span class="pg-val">${fmt(d.returns.td.currentBalance)}</span><span class="pg-val ${valClass(d.returns.td.returnAmount)}">${fmtPct(d.returns.td.returnPct)}</span>
-          ` : ''}
-          ${d.returns.wealthsimple.totalStart ? `
-            <span class="pg-label">Wealthsimple</span><span class="pg-val">${fmt(d.returns.wealthsimple.totalStart)}</span><span class="pg-val">${fmt(d.returns.wealthsimple.totalCurrent)}</span><span class="pg-val ${valClass(d.returns.wealthsimple.returnAmount)}">${fmtPct(d.returns.wealthsimple.returnPct)}</span>
-          ` : ''}
-          <span class="pg-label pg-total">Total</span><span class="pg-val pg-total">${fmt((d.returns.td.startingBalance||0) + (d.returns.wealthsimple.totalStart||0))}</span><span class="pg-val pg-total">${fmt(d.summary.total)}</span><span class="pg-val pg-total ${valClass(d.returns.total.returnAmount)}">${fmtFull(d.returns.total.returnAmount)} (${fmtPct(d.returns.total.returnPct)})</span>
-        </div>
-        ${d.returns.goal ? `
-          <div class="data-row" style="margin-top:8px"><span class="dl">10% Goal</span><span class="dv">${fmtFull(d.returns.goal)}</span></div>
-          <div class="data-row"><span class="dl">vs Goal</span><span class="dv ${valClass(d.returns.currentVsGoal)}">${fmtFull(d.returns.currentVsGoal)} (${fmtPct(d.returns.pctDifference)})</span></div>
-        ` : ''}
-
-        <h3 class="section-gap">Portfolio${liveBadge}</h3>
-        ${d.accounts.allAccounts ? `
-          ${(() => {
-            const groups = { rrsp: [], tfsa: [], resp: [], cash: [], nonreg: [], crypto: [] };
-            const labels = { rrsp: 'RRSP', tfsa: 'TFSA', resp: 'RESP', cash: 'Cash', nonreg: 'Non-registered', crypto: 'Crypto' };
-            for (const a of d.accounts.allAccounts) groups[a.type]?.push(a) || (groups.cash = groups.cash || []).push(a);
-            let html = '';
-            for (const [type, accts] of Object.entries(groups)) {
-              if (!accts.length) continue;
-              const subtotal = accts.reduce((s, a) => s + a.balance, 0);
-              html += `<div class="acct-section-label">${labels[type] || type}</div>`;
-              html += accts.map(a => {
-                const curLabel = a.currency !== 'cad' ? ' <small style="color:var(--muted)">' + a.currency.toUpperCase() + '</small>' : '';
-                return `<div class="data-row"><span class="dl">${a.name} <span class="inst-tag">${a.institution}</span></span><span class="dv">${fmtFull(a.balance)}${curLabel}</span></div>`;
-              }).join('');
-              html += `<div class="data-row total"><span class="dl">${labels[type]} Total</span><span class="dv orange">${fmtFull(subtotal)}</span></div>`;
-            }
-            return html;
-          })()}
-        ` : `
-          <div class="data-row"><span class="dl">TD Savings</span><span class="dv blue">${fmtFull(d.summary.tdSavings)}</span></div>
-          <div class="data-row"><span class="dl">Wealthsimple</span><span class="dv blue">${fmtFull(d.summary.wealthsimple)}</span></div>
-          ${d.summary.shopifyRsu ? `<div class="data-row"><span class="dl">Shopify RSU</span><span class="dv blue">${fmtFull(d.summary.shopifyRsu)}</span></div>` : ''}
-        `}
-        <div class="data-row total"><span class="dl">Total Investments</span><span class="dv blue">${fmtFull(d.summary.total)}</span></div>
-
-        ${d.accounts.allLoans?.length ? `
-          <h3 class="section-gap">Debt${liveBadge}</h3>
-          ${d.accounts.allLoans.map(l => `<div class="data-row"><span class="dl">${l.name} <span class="inst-tag">${l.institution}</span></span><span class="dv neg">${fmtFull(l.balance)}</span></div>`).join('')}
-          <div class="data-row total"><span class="dl">Total Debt</span><span class="dv neg">${fmtFull(d.debt.totalDebt)}</span></div>
-        ` : debtEntries.length ? `
-          ${debtEntries.map(([k, v]) => `<div class="data-row"><span class="dl">${k}</span><span class="dv neg">${fmtFull(v)}</span></div>`).join('')}
-          <div class="data-row total"><span class="dl">Total Debt</span><span class="dv neg">${fmtFull(d.debt.totalDebt)}</span></div>
-        ` : ''}
-        <div class="data-row total"><span class="dl">Net Position</span><span class="dv ${valClass(d.subtotal)}">${fmtFull(d.subtotal)}</span></div>
       </div>
 
     </div>
@@ -523,8 +598,38 @@ function renderSalaries(el) {
   const totalSavings = DATA.years[latestYear]?.summary.total || 0;
   const savingsPct = totalGross ? (totalSavings / totalGross * 100) : 0;
   const savingsAfterTaxPct = totalNet ? (totalSavings / totalNet * 100) : 0;
+  const avgTaxRate = totalGross ? (totalTax / totalGross * 100) : 0;
 
   el.innerHTML = `
+    <div class="yr-card total-card summary-card-spacing salary-summary-card">
+      <h3>Summary — Salaries</h3>
+      <div class="totals-grid">
+        <div class="total-stat">
+          <span class="total-stat-label">Lifetime Earnings</span>
+          <span class="total-stat-value blue">${fmtFull(totalGross)}</span>
+        </div>
+        <div class="total-stat">
+          <span class="total-stat-label">Lifetime Tax</span>
+          <span class="total-stat-value neg">${fmtFull(totalTax)}</span>
+        </div>
+        <div class="total-stat">
+          <span class="total-stat-label">Total Savings</span>
+          <span class="total-stat-value blue">${fmtFull(totalSavings)}</span>
+        </div>
+        <div class="total-stat">
+          <span class="total-stat-label">Savings %</span>
+          <span class="total-stat-value">${fmtPct(savingsAfterTaxPct)}</span>
+        </div>
+        <div class="total-stat">
+          <span class="total-stat-label">Avg Tax Rate</span>
+          <span class="total-stat-value ${valClass(-avgTaxRate)}">${avgTaxRate.toFixed(1)}%</span>
+        </div>
+        <div class="total-stat total-stat-emphasis">
+          <span class="total-stat-label">Lifetime Net</span>
+          <span class="total-stat-value orange">${fmtFull(totalNet)}</span>
+        </div>
+      </div>
+    </div>
     <div class="overview-grid">
       <div class="ov-card full">
         <h3>Salary History</h3>

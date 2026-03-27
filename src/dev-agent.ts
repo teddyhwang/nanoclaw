@@ -26,14 +26,20 @@ const LEGACY_STATE_FILE = path.join(LOG_DIR, 'dev-agent-state.json');
 const RPC_TRACE_LOG = path.join(LOG_DIR, 'dev-agent.rpc.jsonl');
 const POLL_MS = 500;
 const PROJECT_DIR = process.cwd();
-const PRIMARY_MODEL = {
-  provider: 'openai-codex',
-  modelId: 'gpt-5.4',
+type ModelConfig = {
+  provider: string;
+  modelId: string;
 };
-const FALLBACK_MODEL = {
+
+const PRIMARY_MODEL: ModelConfig = {
   provider: 'anthropic',
   modelId: 'claude-opus-4-6',
 };
+const FALLBACK_MODEL: ModelConfig = {
+  provider: 'openai-codex',
+  modelId: 'gpt-5.4',
+};
+const KNOWN_MODELS: ModelConfig[] = [PRIMARY_MODEL, FALLBACK_MODEL];
 
 // Track state
 let piProcess: ChildProcess | null = null;
@@ -41,6 +47,7 @@ let isStreaming = false;
 let currentChatJid: string | null = null;
 let responseBuffer = '';
 let currentRouteModel = PRIMARY_MODEL;
+let preferredModel = PRIMARY_MODEL;
 let activePrompt: {
   id: string;
   sourceFile?: string;
@@ -113,9 +120,14 @@ function loadState() {
     const state = JSON.parse(fs.readFileSync(statePath, 'utf-8')) as {
       forceFallbackUntil?: string | null;
       openAICooldownUntil?: string | null;
+      preferredModel?: ModelConfig | null;
     };
     forceFallbackUntil = state.forceFallbackUntil || null;
     openAICooldownUntil = state.openAICooldownUntil || null;
+    preferredModel =
+      state.preferredModel && isKnownModel(state.preferredModel)
+        ? state.preferredModel
+        : PRIMARY_MODEL;
 
     if (statePath === LEGACY_STATE_FILE) {
       saveState();
@@ -128,6 +140,7 @@ function loadState() {
   } catch {
     forceFallbackUntil = null;
     openAICooldownUntil = null;
+    preferredModel = PRIMARY_MODEL;
   }
 }
 
@@ -135,7 +148,11 @@ function saveState() {
   try {
     fs.writeFileSync(
       STATE_FILE,
-      JSON.stringify({ forceFallbackUntil, openAICooldownUntil }, null, 2),
+      JSON.stringify(
+        { forceFallbackUntil, openAICooldownUntil, preferredModel },
+        null,
+        2,
+      ),
     );
   } catch {
     // ignore state write failures
@@ -178,6 +195,18 @@ function clearForceFallbackIfExpired() {
   if (changed) saveState();
 }
 
+function sameModel(a: ModelConfig, b: ModelConfig) {
+  return a.provider === b.provider && a.modelId === b.modelId;
+}
+
+function isKnownModel(model: ModelConfig) {
+  return KNOWN_MODELS.some((candidate) => sameModel(candidate, model));
+}
+
+function formatModel(model: ModelConfig) {
+  return `${model.provider}/${model.modelId}`;
+}
+
 function isModelCoolingDown(model: { provider: string; modelId: string }) {
   if (model.provider === 'anthropic') return isForceFallbackActive();
   if (model.provider === 'openai-codex') return isOpenAICooldownActive();
@@ -185,20 +214,20 @@ function isModelCoolingDown(model: { provider: string; modelId: string }) {
 }
 
 function isCurrentModel(model: { provider: string; modelId: string }) {
-  return (
-    currentRouteModel.provider === model.provider &&
-    currentRouteModel.modelId === model.modelId
-  );
+  return sameModel(currentRouteModel, model);
 }
 
-function getAlternateModel() {
-  return isCurrentModel(PRIMARY_MODEL) ? FALLBACK_MODEL : PRIMARY_MODEL;
+function getAlternateModel(baseModel = currentRouteModel) {
+  return sameModel(baseModel, PRIMARY_MODEL) ? FALLBACK_MODEL : PRIMARY_MODEL;
 }
 
 function chooseBestAvailableModel() {
-  if (!isModelCoolingDown(PRIMARY_MODEL)) return PRIMARY_MODEL;
-  if (!isModelCoolingDown(FALLBACK_MODEL)) return FALLBACK_MODEL;
-  return PRIMARY_MODEL;
+  if (!isModelCoolingDown(preferredModel)) return preferredModel;
+
+  const alternateModel = getAlternateModel(preferredModel);
+  if (!isModelCoolingDown(alternateModel)) return alternateModel;
+
+  return preferredModel;
 }
 
 function applyCooldownForModel(model: { provider: string; modelId: string }) {
@@ -240,11 +269,74 @@ function describeActiveCooldowns() {
   return parts.join('; ');
 }
 
+function resolveModelAlias(text: string): ModelConfig | null {
+  const normalized = text
+    .toLowerCase()
+    .replace(/[_\s]+/g, ' ')
+    .trim();
+
+  const anthropicAliases = [
+    'opus 4-6',
+    'opus 4 6',
+    'claude opus 4-6',
+    'claude opus 4 6',
+    'claude opus',
+    'opus',
+    'anthropic',
+    'claude',
+  ];
+  if (anthropicAliases.some((alias) => normalized.includes(alias))) {
+    return PRIMARY_MODEL;
+  }
+
+  const openAIAliases = [
+    'gpt-5.4',
+    'gpt 5.4',
+    'gpt 5 4',
+    'gpt',
+    'codex',
+    'openai',
+    'openai codex',
+  ];
+  if (openAIAliases.some((alias) => normalized.includes(alias))) {
+    return FALLBACK_MODEL;
+  }
+
+  return null;
+}
+
+function parseModelControlMessage(content: string) {
+  const normalized = content.toLowerCase().trim();
+  const switchIntent =
+    /\b(?:switch|set|change|use|swap|move|pick|select)\b/.test(normalized) &&
+    /\bmodel\b/.test(normalized);
+  const shorthandSwitchIntent =
+    /^(?:use|switch to|set to|change to)\b/.test(normalized) ||
+    /^go back to\b/.test(normalized);
+  const statusIntent =
+    /\b(?:what|which)\b.*\bmodel\b/.test(normalized) ||
+    /\bcurrent model\b/.test(normalized) ||
+    /^model\??$/.test(normalized);
+
+  if (statusIntent) {
+    return { action: 'status' as const, model: null };
+  }
+
+  if (!switchIntent && !shorthandSwitchIntent) {
+    return { action: 'none' as const, model: null };
+  }
+
+  return {
+    action: 'switch' as const,
+    model: resolveModelAlias(normalized),
+  };
+}
+
 function startPi(): ChildProcess {
   clearForceFallbackIfExpired();
   const initialModel = chooseBestAvailableModel();
   log(
-    `Starting pi in RPC mode (session: ${SESSION_DIR}, model: ${initialModel.provider}/${initialModel.modelId})`,
+    `Starting pi in RPC mode (session: ${SESSION_DIR}, model: ${formatModel(initialModel)}, preferred: ${formatModel(preferredModel)})`,
   );
 
   currentRouteModel = initialModel;
@@ -354,9 +446,7 @@ function handlePiEvent(event: Record<string, unknown>) {
         provider: (data.provider as string) || currentRouteModel.provider,
         modelId: (data.id as string) || currentRouteModel.modelId,
       };
-      log(
-        `Active model: ${currentRouteModel.provider}/${currentRouteModel.modelId}`,
-      );
+      log(`Active model: ${formatModel(currentRouteModel)}`);
       if (pendingRetryAfterModelSwitch && activePrompt) {
         pendingRetryAfterModelSwitch = false;
         fallbackSwitchInProgress = false;
@@ -491,13 +581,12 @@ function handlePiEvent(event: Record<string, unknown>) {
     if (
       activePrompt &&
       !activePrompt.retriedWithFallback &&
-      !fallbackSwitchInProgress &&
-      isThrottleError(errorMessage)
+      !fallbackSwitchInProgress
     ) {
       activePrompt.retriedWithFallback = true;
       fallbackSwitchInProgress = true;
       sendToPi({ type: 'abort_retry' });
-      switchModelsAndRetry();
+      switchModelsAndRetry(errorMessage, isThrottleError(errorMessage));
     }
     return;
   }
@@ -517,13 +606,9 @@ function handlePiEvent(event: Record<string, unknown>) {
       return;
     }
 
-    if (
-      activePrompt &&
-      !activePrompt.retriedWithFallback &&
-      isThrottleError(finalError)
-    ) {
+    if (activePrompt && !activePrompt.retriedWithFallback) {
       activePrompt.retriedWithFallback = true;
-      switchModelsAndRetry();
+      switchModelsAndRetry(finalError, isThrottleError(finalError));
       return;
     }
 
@@ -705,33 +790,35 @@ print(candidate.isoformat())
   }
 }
 
-function maybeSwitchBackToPrimary() {
+function maybeSwitchBackToPreferredModel() {
   clearForceFallbackIfExpired();
   if (
-    !isModelCoolingDown(PRIMARY_MODEL) &&
-    !isCurrentModel(PRIMARY_MODEL) &&
+    !isModelCoolingDown(preferredModel) &&
+    !isCurrentModel(preferredModel) &&
     !fallbackSwitchInProgress &&
     !isStreaming
   ) {
     log(
-      `Cooldown window ended; switching back to ${PRIMARY_MODEL.provider}/${PRIMARY_MODEL.modelId}`,
+      `Cooldown window ended; switching back to ${formatModel(preferredModel)}`,
     );
     sendToPi({
       type: 'set_model',
-      provider: PRIMARY_MODEL.provider,
-      modelId: PRIMARY_MODEL.modelId,
+      provider: preferredModel.provider,
+      modelId: preferredModel.modelId,
     });
   }
 }
 
-function switchModelsAndRetry() {
+function switchModelsAndRetry(errorMessage = '', applyCooldown = false) {
   if (!activePrompt) return;
 
-  const throttledModel = { ...currentRouteModel };
-  const targetModel = getAlternateModel();
-  const cooldownUntil = applyCooldownForModel(throttledModel);
+  const failedModel = { ...currentRouteModel };
+  const targetModel = getAlternateModel(failedModel);
+  const cooldownUntil = applyCooldown
+    ? applyCooldownForModel(failedModel)
+    : null;
 
-  if (isModelCoolingDown(targetModel)) {
+  if (applyCooldown && isModelCoolingDown(targetModel)) {
     const cooldownSummary =
       describeActiveCooldowns() || 'no reset time available';
     writeOutbox(
@@ -748,13 +835,15 @@ function switchModelsAndRetry() {
   }
 
   log(
-    `Switching models after throttling: ${throttledModel.provider}/${throttledModel.modelId} -> ${targetModel.provider}/${targetModel.modelId}`,
+    `Switching models after error: ${formatModel(failedModel)} -> ${formatModel(targetModel)} | error=${summarize(errorMessage || 'unknown error', 200)}`,
   );
   writeOutbox(
     activePrompt.chatJid || 'dc:1485414819614949377',
-    cooldownUntil
-      ? `⚙️ ${throttledModel.modelId} is throttling right now — switching dev session to ${targetModel.modelId} until ${cooldownUntil} and retrying.`
-      : `⚙️ ${throttledModel.modelId} is throttling right now — switching dev session to ${targetModel.modelId} and retrying.`,
+    applyCooldown
+      ? cooldownUntil
+        ? `⚙️ ${failedModel.modelId} is throttling right now — switching dev session to ${targetModel.modelId} until ${cooldownUntil} and retrying.`
+        : `⚙️ ${failedModel.modelId} is throttling right now — switching dev session to ${targetModel.modelId} and retrying.`
+      : `⚙️ ${failedModel.modelId} hit an error — switching dev session to ${targetModel.modelId} and retrying.`,
   );
   isStreaming = false;
   responseBuffer = '';
@@ -772,7 +861,7 @@ let currentQueuePollMs = POLL_MS;
 
 function drainQueue() {
   try {
-    maybeSwitchBackToPrimary();
+    maybeSwitchBackToPreferredModel();
     const files = fs
       .readdirSync(QUEUE_DIR)
       .filter((f) => f.endsWith('.json'))
@@ -791,20 +880,20 @@ function drainQueue() {
       });
     }
 
-    const preferredModel = chooseBestAvailableModel();
+    const bestAvailableModel = chooseBestAvailableModel();
     if (
       files.length > 0 &&
       isModelCoolingDown(currentRouteModel) &&
-      !isCurrentModel(preferredModel) &&
+      !isCurrentModel(bestAvailableModel) &&
       !isStreaming
     ) {
       log(
-        `Current model is cooling down; switching to ${preferredModel.provider}/${preferredModel.modelId} before processing queue`,
+        `Current model is cooling down; switching to ${formatModel(bestAvailableModel)} before processing queue`,
       );
       sendToPi({
         type: 'set_model',
-        provider: preferredModel.provider,
-        modelId: preferredModel.modelId,
+        provider: bestAvailableModel.provider,
+        modelId: bestAvailableModel.modelId,
       });
       return;
     }
@@ -830,6 +919,58 @@ function drainQueue() {
           : undefined;
 
         if (!content) continue;
+
+        const modelControl = parseModelControlMessage(content);
+        if (modelControl.action === 'status') {
+          const cooldownSummary = describeActiveCooldowns();
+          writeOutbox(
+            currentChatJid || 'dc:1485414819614949377',
+            cooldownSummary
+              ? `⚙️ Dev model: ${formatModel(currentRouteModel)}. Preferred: ${formatModel(preferredModel)}. Cooldowns: ${cooldownSummary}`
+              : `⚙️ Dev model: ${formatModel(currentRouteModel)}. Preferred: ${formatModel(preferredModel)}.`,
+          );
+          continue;
+        }
+
+        if (modelControl.action === 'switch') {
+          if (!modelControl.model) {
+            writeOutbox(
+              currentChatJid || 'dc:1485414819614949377',
+              '⚙️ I can switch the dev session model to claude-opus-4-6 or gpt-5.4. Say something like “switch to opus” or “use gpt-5.4”.',
+            );
+            continue;
+          }
+
+          preferredModel = modelControl.model;
+          saveState();
+
+          if (isModelCoolingDown(preferredModel)) {
+            const cooldownSummary = describeActiveCooldowns();
+            writeOutbox(
+              currentChatJid || 'dc:1485414819614949377',
+              cooldownSummary
+                ? `⚙️ Preferred dev model set to ${formatModel(preferredModel)}, but it's currently cooling down. I'll stay on ${formatModel(currentRouteModel)} until it becomes available. Cooldowns: ${cooldownSummary}`
+                : `⚙️ Preferred dev model set to ${formatModel(preferredModel)}, but it's currently cooling down. I'll switch when it becomes available.`,
+            );
+            continue;
+          }
+
+          if (!isCurrentModel(preferredModel) && !isStreaming) {
+            sendToPi({
+              type: 'set_model',
+              provider: preferredModel.provider,
+              modelId: preferredModel.modelId,
+            });
+          }
+
+          writeOutbox(
+            currentChatJid || 'dc:1485414819614949377',
+            sameModel(currentRouteModel, preferredModel)
+              ? `⚙️ Dev model already set to ${formatModel(preferredModel)}.`
+              : `⚙️ Switching dev model to ${formatModel(preferredModel)}.`,
+          );
+          continue;
+        }
 
         const prompt = `[Discord /dev from ${sender}]: ${content}`;
         const promptId = crypto.randomUUID().slice(0, 8);

@@ -61,13 +61,14 @@ const ACCOUNT_MAP: [RegExp, AccountMapping][] = [
     /Wealthsimple.*Non-registered/i,
     { type: 'nonreg', provider: 'Wealthsimple', person: 'teddy' },
   ],
+  [/TD.*Non-registered/i, { type: 'nonreg', provider: 'TD', person: 'joint' }],
   [
     /Wealthsimple.*Crypto/i,
     { type: 'crypto', provider: 'Wealthsimple', person: 'teddy' },
   ],
-  // Cash / Savings (TD investment accounts that are cash-like)
-  [/TD.*CANADIAN CASH/i, { type: 'cash', provider: 'TD', person: 'joint' }],
-  [/TD.*US CASH/i, { type: 'cash', provider: 'TD', person: 'joint' }],
+  // Legacy TD cash/savings names (kept for backward compatibility)
+  [/TD.*CANADIAN CASH/i, { type: 'nonreg', provider: 'TD', person: 'joint' }],
+  [/TD.*US CASH/i, { type: 'nonreg', provider: 'TD', person: 'joint' }],
   // Debt / Loans
   [
     /Beecroft/i,
@@ -151,7 +152,7 @@ export async function getLiveCurrentYear(): Promise<YearData | null> {
         name: shortName,
         balance: bal,
         currency: acct.currency,
-        type: mapping.type,
+        type: mapping.type === 'cash' ? 'nonreg' : mapping.type,
         category: mapping.provider,
         institution: inst,
       });
@@ -182,13 +183,15 @@ export async function getLiveCurrentYear(): Promise<YearData | null> {
         break;
       case 'nonreg':
         nonRegistered += bal;
-        wsTotal += bal;
+        if (mapping.provider === 'TD') tdTotal += bal;
+        else wsTotal += bal;
         break;
       case 'crypto':
         crypto += bal;
         wsTotal += bal;
         break;
       case 'cash':
+        nonRegistered += bal;
         tdTotal += bal;
         break;
       case 'debt':

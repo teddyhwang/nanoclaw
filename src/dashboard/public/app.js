@@ -17,19 +17,28 @@ Chart.defaults.font.size = 12;
 
 let DATA, categoryMap = {}, debitsNeg = false, currency = 'CAD';
 let txPage = 0, filteredTx = [], allTx = [];
-let txSort = { col: 'date', dir: -1 };
+const FINANCE_UI_STATE_KEY = 'finance-ui-state';
+function loadFinanceUiState() {
+  try {
+    return JSON.parse(localStorage.getItem(FINANCE_UI_STATE_KEY) || '{}');
+  } catch {
+    return {};
+  }
+}
+const savedUiState = loadFinanceUiState();
+let txSort = savedUiState.txSort?.col ? savedUiState.txSort : { col: 'date', dir: -1 };
 const TX_PP = 30;
 
 // ── Filter state (all chart clicks + controls feed into this) ──
 const filters = {
-  day: null,        // '2026-03-15'
-  weekStart: null,  // '2026-03-10' (Mon of that week)
-  weekEnd: null,    // '2026-03-16' (Sun)
-  category: null,   // category name string
-  merchant: null,   // payee string
-  search: '',
-  catId: '',
-  dateRange: '90days',
+  day: savedUiState.filters?.day || null,        // '2026-03-15'
+  weekStart: savedUiState.filters?.weekStart || null,  // '2026-03-10' (Mon of that week)
+  weekEnd: savedUiState.filters?.weekEnd || null,    // '2026-03-16' (Sun)
+  category: savedUiState.filters?.category || null,   // category name string
+  merchant: savedUiState.filters?.merchant || null,   // payee string
+  search: savedUiState.filters?.search || '',
+  catId: savedUiState.filters?.catId || '',
+  dateRange: savedUiState.filters?.dateRange || '90days',
 };
 
 // Chart-stored data for highlight updates
@@ -39,6 +48,21 @@ let dailyDates = [], weeklyKeys = [];
 
 const $ = s => document.getElementById(s);
 let privacyMode = localStorage.getItem('privacy') === '1';
+function saveFinanceUiState() {
+  localStorage.setItem(FINANCE_UI_STATE_KEY, JSON.stringify({
+    filters: {
+      day: filters.day,
+      weekStart: filters.weekStart,
+      weekEnd: filters.weekEnd,
+      category: filters.category,
+      merchant: filters.merchant,
+      search: filters.search,
+      catId: filters.catId,
+      dateRange: filters.dateRange,
+    },
+    txSort,
+  }));
+}
 
 function _fmt(n, cur, dec) {
   cur = (cur || currency).toUpperCase();
@@ -135,8 +159,7 @@ function render(data) {
   const ca = data.cachedAt;
   $('cache-info').textContent = [ca.balances && `bal ${relTime(ca.balances)}`, ca.transactions && `tx ${relTime(ca.transactions)}`].filter(Boolean).join(' · ');
 
-  renderNetWorth(data.accounts, data.properties || []);
-  renderIncome(data.transactions);
+  renderFinanceSummary(data.accounts, data.properties || [], data.transactions);
   renderAccounts(data.accounts);
   renderProperties(data.properties || [], data.accounts);
   renderDonut(data.transactions);
@@ -201,26 +224,26 @@ function renderProperties(properties, accounts) {
 
     let loanTotal = 0;
     for (const l of sortedLoans) {
-      const bal = l.to_base != null ? l.to_base : parseFloat(l.balance);
+      const bal = Math.abs(l.to_base != null ? l.to_base : parseFloat(l.balance));
       loanTotal += bal;
       let name = l.display_name || '';
       if (l.institution_name && name.startsWith(l.institution_name)) name = name.slice(l.institution_name.length).replace(/^\s+/, '');
       name = name.replace(/^LINE OF CREDIT\s*-\s*/i, '');
       const row = document.createElement('div');
       row.className = 'prop-row';
-      row.innerHTML = `<span class="prop-name">${name}</span><span class="prop-val" style="color:var(--red)">${fmtFull(-Math.abs(bal))}</span>`;
+      row.innerHTML = `<span class="prop-name">${name}</span><span class="prop-val" style="color:var(--red)">${fmtFull(-bal)}</span>`;
       list.appendChild(row);
     }
 
     const loanTotalRow = document.createElement('div');
     loanTotalRow.className = 'prop-total';
-    loanTotalRow.innerHTML = `<span class="prop-name">${loans.length} loans</span><span class="prop-val" style="color:var(--red)">${fmt(loanTotal)}</span>`;
+    loanTotalRow.innerHTML = `<span class="prop-name">${loans.length} loans</span><span class="prop-val" style="color:var(--red)">${fmt(-loanTotal)}</span>`;
     list.appendChild(loanTotalRow);
 
     // Net equity
     const netRow = document.createElement('div');
     netRow.className = 'prop-total';
-    netRow.innerHTML = `<span class="prop-name">Net Equity</span><span class="prop-val" style="color:var(--green)">${fmt(propTotal + loanTotal)}</span>`;
+    netRow.innerHTML = `<span class="prop-name">Net Equity</span><span class="prop-val" style="color:var(--green)">${fmt(propTotal - loanTotal)}</span>`;
     list.appendChild(netRow);
   }
 }
@@ -244,46 +267,59 @@ window.saveProperty = saveProperty;
 
 // ── Net Worth ───────────────────────────────────────────────
 
-function renderNetWorth(accounts, properties) {
-  const g = {};
+function renderFinanceSummary(accounts, properties, transactions) {
+  const totals = { cash: 0, investment: 0, credit: 0, property: 0, loan: 0, other: 0 };
+  let loanTotal = 0;
   for (const a of accounts) {
-    const t = normType(a.type); if (!g[t]) g[t] = 0;
+    const t = normType(a.type);
     const b = a.to_base != null ? a.to_base : parseFloat(a.balance);
-    if (t === 'credit') g[t] += b;
-    else if (t === 'loan') g[t] -= Math.abs(b);
-    else g[t] += b;
+    if (t === 'credit') totals.credit -= b;
+    else if (t === 'loan') loanTotal += Math.abs(b);
+    else totals[t] = (totals[t] || 0) + b;
   }
-  const propTotal = (properties || []).reduce((s, p) => s + p.value, 0);
-  if (propTotal) g['property'] = propTotal;
-  $('net-worth').textContent = fmt(Object.values(g).reduce((s,v) => s+v, 0));
+  const propValuation = (properties || []).reduce((s, p) => s + p.value, 0);
+  totals.property = propValuation - loanTotal;
+  const netWorth = Object.values(totals).reduce((s, v) => s + v, 0);
 
-  const bd = $('nw-breakdown'); bd.innerHTML = '';
-  for (const [k,lbl] of [['cash','Cash'],['investment','Invest'],['property','Property'],['credit','Credit']]) {
-    if (g[k] === undefined) continue;
-    const v = g[k], pill = document.createElement('div');
-    pill.className = 'nw-pill';
-    pill.innerHTML = `<span class="nw-pill-label">${lbl}</span><span class="nw-pill-val ${v>=0?'pos':'neg'}">${fmt(v)}</span>`;
-    bd.appendChild(pill);
-  }
-}
-
-// ── Income vs Spending (this month) ─────────────────────────
-
-function renderIncome(transactions) {
   const { from: ms, to: me } = getDateRange();
-  let inc = 0, spend = 0;
+  let income = 0, spent = 0;
   for (const tx of transactions) {
     if (tx.date < ms || tx.date > me) continue;
     const amt = spendAmt(tx);
-    if (isIncome(tx)) inc += Math.abs(amt);
-    else if (isSpend(tx)) spend += amt;
+    if (isIncome(tx)) income += Math.abs(amt);
+    else if (isSpend(tx)) spent += amt;
   }
-  const net = inc - spend;
-  const el = $('income-spend');
+  const net = income - spent;
+
+  const el = $('finance-summary');
+  el.classList.remove('hidden');
   el.innerHTML = `
-    <div class="is-item"><span class="is-label">Income</span><span class="is-val income">${fmt(inc)}</span></div>
-    <div class="is-item"><span class="is-label">Spent</span><span class="is-val spend">${fmt(spend)}</span></div>
-    <div class="is-item"><span class="is-label">Net</span><span class="is-val ${net>=0?'net-pos':'net-neg'}">${fmt(net)}</span></div>
+    <div class="finance-summary-grid">
+      <div class="finance-stat finance-stat-emphasis">
+        <span class="finance-stat-label">Net Worth</span>
+        <span class="finance-stat-value orange">${fmt(netWorth)}</span>
+      </div>
+      <div class="finance-stat">
+        <span class="finance-stat-label">Investments</span>
+        <span class="finance-stat-value pos">${fmt(totals.investment || 0)}</span>
+      </div>
+      <div class="finance-stat">
+        <span class="finance-stat-label">Property</span>
+        <span class="finance-stat-value ${totals.property >= 0 ? 'pos' : 'neg'}">${fmt(totals.property || 0)}</span>
+      </div>
+      <div class="finance-stat">
+        <span class="finance-stat-label">Income</span>
+        <span class="finance-stat-value pos">${fmt(income)}</span>
+      </div>
+      <div class="finance-stat">
+        <span class="finance-stat-label">Spent</span>
+        <span class="finance-stat-value orange">${fmt(spent)}</span>
+      </div>
+      <div class="finance-stat finance-stat-${net >= 0 ? 'pos' : 'neg'} finance-stat-emphasis">
+        <span class="finance-stat-label">Net</span>
+        <span class="finance-stat-value ${net >= 0 ? 'pos' : 'neg'}">${fmt(net)}</span>
+      </div>
+    </div>
   `;
 }
 
@@ -367,18 +403,24 @@ function renderDonut(transactions) {
 let dailyChart;
 function renderDaily(transactions) {
   const { from, to } = getDateRange();
-  const byDay = {};
+  const byDaySpend = {};
+  const byDayIncome = {};
   for (const tx of transactions) {
-    if (tx.date >= from && tx.date <= to && isSpend(tx)) {
-      byDay[tx.date] = (byDay[tx.date]||0) + spendAmt(tx);
-    }
+    if (tx.date < from || tx.date > to) continue;
+    const amt = spendAmt(tx);
+    if (isSpend(tx)) byDaySpend[tx.date] = (byDaySpend[tx.date] || 0) + amt;
+    else if (isIncome(tx)) byDayIncome[tx.date] = (byDayIncome[tx.date] || 0) + Math.abs(amt);
   }
-  dailyDates = Object.keys(byDay).sort();
-  const vals = dailyDates.map(d => byDay[d]);
-  const cum = []; let s = 0; for (const v of vals) { s+=v; cum.push(s); }
+  dailyDates = [...new Set([...Object.keys(byDaySpend), ...Object.keys(byDayIncome)])].sort();
+  const spendVals = dailyDates.map(d => byDaySpend[d] || 0);
+  const incomeVals = dailyDates.map(d => byDayIncome[d] || 0);
+  const netVals = dailyDates.map((d, i) => incomeVals[i] - spendVals[i]);
+  const cum = []; let s = 0; for (const v of netVals) { s += v; cum.push(s); }
 
-  function barColors() { return dailyDates.map(d => d === filters.day ? C.accent : C.blue+'70'); }
-  function barBorders() { return dailyDates.map(d => d === filters.day ? C.accent : 'transparent'); }
+  function spendBarColors() { return dailyDates.map(d => d === filters.day ? C.accent : C.blue+'70'); }
+  function spendBarBorders() { return dailyDates.map(d => d === filters.day ? C.accent : 'transparent'); }
+  function incomeBarColors() { return dailyDates.map(d => d === filters.day ? C.green : C.green+'70'); }
+  function incomeBarBorders() { return dailyDates.map(d => d === filters.day ? C.green : 'transparent'); }
 
   if (dailyChart) dailyChart.destroy();
   dailyChart = new Chart($('chart-daily-spending'), {
@@ -386,8 +428,9 @@ function renderDaily(transactions) {
     data: {
       labels: dailyDates.map(d => { const dt = new Date(d+'T00:00:00'); return dt.toLocaleDateString('en-CA', { month:'short', day:'numeric' }); }),
       datasets: [
-        { label:'Daily', data:vals, backgroundColor:barColors(), borderColor:barBorders(), borderWidth:2, borderRadius:2, order:2 },
-        { label:'Cumulative', data:cum, type:'line', borderColor:C.cyan, backgroundColor:'transparent', pointRadius:0, borderWidth:1.5, tension:.3, yAxisID:'y1', order:1 },
+        { label:'Spent', data:spendVals, backgroundColor:spendBarColors(), borderColor:spendBarBorders(), borderWidth:2, borderRadius:2, order:2, grouped:false, barPercentage:0.9, categoryPercentage:0.9 },
+        { label:'Income', data:incomeVals, backgroundColor:incomeBarColors(), borderColor:incomeBarBorders(), borderWidth:2, borderRadius:2, order:3, grouped:false, barPercentage:0.55, categoryPercentage:0.9 },
+        { label:'Net Cumulative', data:cum, type:'line', borderColor:C.cyan, backgroundColor:'transparent', pointRadius:0, borderWidth:1.5, tension:.3, yAxisID:'y1', order:1 },
       ],
     },
     options: {
@@ -403,7 +446,7 @@ function renderDaily(transactions) {
         y: { beginAtZero:true, ticks:{ callback:v=>fmt(v), font:{size:11} } },
         y1: { position:'right', beginAtZero:true, grid:{display:false}, ticks:{ callback:v=>fmt(v), font:{size:11} } },
       },
-      plugins: { legend:{display:false}, tooltip:{ callbacks:{ label:ctx=>` ${ctx.dataset.label}: ${fmtFull(ctx.raw)}` } } },
+      plugins: { tooltip:{ callbacks:{ label:ctx=>` ${ctx.dataset.label}: ${fmtFull(ctx.raw)}` } } },
     },
   });
 }
@@ -452,7 +495,6 @@ function renderWeekly(transactions) {
         if (filters.weekStart === key) {
           setFilter('week', null);
         } else {
-          const wr = weekRange(key);
           // weekRange returns Mon-Sun but key is already Mon
           const end = new Date(key + 'T00:00:00');
           end.setDate(end.getDate() + 6);
@@ -460,6 +502,7 @@ function renderWeekly(transactions) {
           filters.weekEnd = toISO(end);
           // Clear day filter when selecting a week
           filters.day = null;
+          saveFinanceUiState();
           updateChartHighlights();
           applyFilters();
           renderFilterPills();
@@ -540,6 +583,7 @@ function setFilter(type, value) {
       filters.merchant = value;
       break;
   }
+  saveFinanceUiState();
   updateChartHighlights();
   applyFilters();
   renderFilterPills();
@@ -551,8 +595,8 @@ function clearAllFilters() {
   filters.search = ''; filters.catId = '';
   $('tx-search').value = '';
   $('tx-category-filter').value = '';
-  filters.dateRange = '90days';
-  $('tx-date-range').value = '90days';
+  $('tx-date-range').value = filters.dateRange;
+  saveFinanceUiState();
   updateChartHighlights();
   applyFilters();
   renderFilterPills();
@@ -573,10 +617,10 @@ function renderFilterPills() {
   }
   if (filters.category) pills.push({ label: `Cat: ${filters.category}`, clear: () => setFilter('category', null) });
   if (filters.merchant) pills.push({ label: filters.merchant, clear: () => setFilter('merchant', null) });
-  if (filters.search) pills.push({ label: `"${filters.search}"`, clear: () => { filters.search = ''; $('tx-search').value = ''; applyFilters(); renderFilterPills(); } });
+  if (filters.search) pills.push({ label: `"${filters.search}"`, clear: () => { filters.search = ''; $('tx-search').value = ''; saveFinanceUiState(); applyFilters(); renderFilterPills(); } });
   if (filters.catId) {
     const cn = Object.values(categoryMap).find(c => c.id == filters.catId)?.name;
-    pills.push({ label: `Cat: ${cn || filters.catId}`, clear: () => { filters.catId = ''; $('tx-category-filter').value = ''; applyFilters(); renderFilterPills(); } });
+    pills.push({ label: `Cat: ${cn || filters.catId}`, clear: () => { filters.catId = ''; $('tx-category-filter').value = ''; saveFinanceUiState(); applyFilters(); renderFilterPills(); } });
   }
 
   for (const p of pills) {
@@ -631,18 +675,55 @@ function updateChartHighlights() {
 
 function getDateRange() {
   const now = new Date();
+  const day = now.getDay();
+  const mondayOffset = day === 0 ? -6 : 1 - day;
   switch (filters.dateRange) {
-    case 'thisMonth': return { from: toISO(monthStart(now)), to: toISO(now) };
+    case 'thisWeek': {
+      const start = new Date(now);
+      start.setDate(now.getDate() + mondayOffset);
+      return { from: toISO(start), to: toISO(now) };
+    }
+    case 'lastWeek': {
+      const thisWeekStart = new Date(now);
+      thisWeekStart.setDate(now.getDate() + mondayOffset);
+      const start = new Date(thisWeekStart);
+      start.setDate(thisWeekStart.getDate() - 7);
+      const end = new Date(thisWeekStart);
+      end.setDate(thisWeekStart.getDate() - 1);
+      return { from: toISO(start), to: toISO(end) };
+    }
+    case '30days': {
+      const d = new Date(now);
+      d.setDate(d.getDate() - 30);
+      return { from: toISO(d), to: toISO(now) };
+    }
+    case 'thisMonth':
+      return { from: toISO(monthStart(now)), to: toISO(now) };
     case 'lastMonth': {
       const lm = new Date(now.getFullYear(), now.getMonth()-1, 1);
       const lme = new Date(now.getFullYear(), now.getMonth(), 0);
       return { from: toISO(lm), to: toISO(lme) };
     }
-    case '90days': {
-      const d = new Date(now); d.setDate(d.getDate()-90);
+    case 'ytd': {
+      const start = new Date(now.getFullYear(), 0, 1);
+      return { from: toISO(start), to: toISO(now) };
+    }
+    case '6months': {
+      const d = new Date(now);
+      d.setMonth(d.getMonth() - 6);
       return { from: toISO(d), to: toISO(now) };
     }
-    default: return { from: '2000-01-01', to: '2099-12-31' };
+    case '90days': {
+      const d = new Date(now);
+      d.setDate(d.getDate() - 90);
+      return { from: toISO(d), to: toISO(now) };
+    }
+    case 'lastYear': {
+      const y = now.getFullYear() - 1;
+      return { from: `${y}-01-01`, to: `${y}-12-31` };
+    }
+    default:
+      return { from: '2000-01-01', to: '2099-12-31' };
   }
 }
 
@@ -660,7 +741,6 @@ function setupTx(transactions) {
   }
 
   allTx = [...transactions];
-  txSort = { col: 'date', dir: -1 };
   txPage = 0;
 
   // Wire up controls — remove old listeners by replacing elements
@@ -668,12 +748,14 @@ function setupTx(transactions) {
   const newSearch = searchEl.cloneNode(true);
   searchEl.replaceWith(newSearch);
   newSearch.id = 'tx-search';
-  newSearch.addEventListener('input', () => { filters.search = newSearch.value.toLowerCase(); applyFilters(); renderFilterPills(); });
+  newSearch.value = filters.search;
+  newSearch.addEventListener('input', () => { filters.search = newSearch.value.toLowerCase(); saveFinanceUiState(); applyFilters(); renderFilterPills(); });
 
   const newCf = cf.cloneNode(true);
   cf.replaceWith(newCf);
   newCf.id = 'tx-category-filter';
-  newCf.addEventListener('change', () => { filters.catId = newCf.value; applyFilters(); renderFilterPills(); });
+  newCf.value = filters.catId;
+  newCf.addEventListener('change', () => { filters.catId = newCf.value; saveFinanceUiState(); applyFilters(); renderFilterPills(); });
 
   // Date range is in the header now — listener set up in init
 
@@ -692,6 +774,7 @@ function setupTx(transactions) {
       const col = newTh.dataset.sort;
       if (txSort.col === col) txSort.dir *= -1;
       else { txSort.col = col; txSort.dir = col === 'amount' ? -1 : 1; }
+      saveFinanceUiState();
       updateSortArrows();
       applyFilters();
     });
@@ -793,13 +876,16 @@ function renderPage() {
 // ── Init ────────────────────────────────────────────────────
 
 (async () => {
+  $('tx-date-range').value = filters.dateRange;
+
   try { render(await fetchDash()); lucide.createIcons(); }
   catch (err) { $('loading').innerHTML = `<span style="color:${C.red}">Error: ${err.message}</span>`; }
 
-  // Date range — re-render charts + income + transactions
+  // Date range — re-render summary + charts + transactions
   $('tx-date-range').addEventListener('change', () => {
     filters.dateRange = $('tx-date-range').value;
-    renderIncome(DATA.transactions);
+    saveFinanceUiState();
+    renderFinanceSummary(DATA.accounts, DATA.properties || [], DATA.transactions);
     renderDonut(DATA.transactions);
     renderDaily(DATA.transactions);
     renderWeekly(DATA.transactions);

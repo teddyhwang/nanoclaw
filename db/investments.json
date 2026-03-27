@@ -1700,51 +1700,214 @@
       "accounts": {
         "rrsp": {
           "Wealthsimple": {
-            "teddy": 262745.18,
-            "nicole": 99213.27
+            "teddy": 262558.99,
+            "nicole": 98906.25
           },
           "TD": {
             "teddy": 458460.56,
-            "nicole": 221593.68
+            "nicole": 223879.11000000002
           }
         },
         "totalRrsp": {
-          "teddy": 721205.74,
-          "nicole": 320806.95,
-          "total": 1042012.69
+          "teddy": 721019.55,
+          "nicole": 322785.36,
+          "total": 1043804.91
         },
         "tfsa": {
-          "Wealthsimple": {
-            "teddy": 45105.05,
-            "nicole": 45133.51
-          },
           "TD": {
             "teddy": 89566.97,
-            "nicole": 95228.46
+            "nicole": 96178.93
+          },
+          "Wealthsimple": {
+            "teddy": 44981.71,
+            "nicole": 45308.11
           }
         },
         "totalTfsa": {
-          "teddy": 134672.02000000002,
-          "nicole": 140361.97,
-          "total": 275033.99
+          "teddy": 134548.68,
+          "nicole": 141487.03999999998,
+          "total": 276035.72
         },
-        "privateInvesting": 4740.64,
-        "nonRegistered": 4740.64,
-        "crypto": 527.96,
-        "resp": 30180.08
+        "privateInvesting": 410345.16000000003,
+        "nonRegistered": 410345.16000000003,
+        "crypto": 522.31,
+        "resp": 30180.08,
+        "allAccounts": [
+          {
+            "name": "SDRSP (Teddy)",
+            "balance": 458460.56,
+            "currency": "cad",
+            "type": "rrsp",
+            "category": "TD",
+            "institution": "TD Canada Trust"
+          },
+          {
+            "name": "Non-registered (US)",
+            "balance": 232985.2,
+            "currency": "usd",
+            "type": "nonreg",
+            "category": "TD",
+            "institution": "TD Canada Trust"
+          },
+          {
+            "name": "Non-registered",
+            "balance": 172619.32,
+            "currency": "cad",
+            "type": "nonreg",
+            "category": "TD",
+            "institution": "TD Canada Trust"
+          },
+          {
+            "name": "SDRSP (Nicole)",
+            "balance": 167727.85,
+            "currency": "cad",
+            "type": "rrsp",
+            "category": "TD",
+            "institution": "TD Canada Trust"
+          },
+          {
+            "name": "RRSP (Teddy)",
+            "balance": 125350.83,
+            "currency": "cad",
+            "type": "rrsp",
+            "category": "Wealthsimple",
+            "institution": "Wealthsimple (Canada)"
+          },
+          {
+            "name": "RRSP (Nicole)",
+            "balance": 98906.25,
+            "currency": "cad",
+            "type": "rrsp",
+            "category": "Wealthsimple",
+            "institution": "Wealthsimple (Canada)"
+          },
+          {
+            "name": "TFSA (Nicole)",
+            "balance": 96178.93,
+            "currency": "cad",
+            "type": "tfsa",
+            "category": "TD",
+            "institution": "TD Canada Trust"
+          },
+          {
+            "name": "TFSA (Teddy)",
+            "balance": 89566.97,
+            "currency": "cad",
+            "type": "tfsa",
+            "category": "TD",
+            "institution": "TD Canada Trust"
+          },
+          {
+            "name": "RRSP Private Equity (Teddy)",
+            "balance": 67198.82,
+            "currency": "cad",
+            "type": "rrsp",
+            "category": "Wealthsimple",
+            "institution": "Wealthsimple (Canada)"
+          },
+          {
+            "name": "RRSP Private Credit (Teddy)",
+            "balance": 52382.42,
+            "currency": "cad",
+            "type": "rrsp",
+            "category": "Wealthsimple",
+            "institution": "Wealthsimple (Canada)"
+          },
+          {
+            "name": "TFSA (Nicole)",
+            "balance": 45308.11,
+            "currency": "cad",
+            "type": "tfsa",
+            "category": "Wealthsimple",
+            "institution": "Wealthsimple (Canada)"
+          },
+          {
+            "name": "TFSA (Teddy)",
+            "balance": 44981.71,
+            "currency": "cad",
+            "type": "tfsa",
+            "category": "Wealthsimple",
+            "institution": "Wealthsimple (Canada)"
+          },
+          {
+            "name": "SDRSP (Nicole)",
+            "balance": 34114.9,
+            "currency": "cad",
+            "type": "rrsp",
+            "category": "TD",
+            "institution": "TD Canada Trust"
+          },
+          {
+            "name": "RESP ACCOUNT (Cody and Riley)",
+            "balance": 30180.08,
+            "currency": "cad",
+            "type": "resp",
+            "category": "TD",
+            "institution": "TD Canada Trust"
+          },
+          {
+            "name": "SDRSP (Nicole)",
+            "balance": 22036.36,
+            "currency": "cad",
+            "type": "rrsp",
+            "category": "TD",
+            "institution": "TD Canada Trust"
+          },
+          {
+            "name": "Group RRSP (Teddy)",
+            "balance": 17626.92,
+            "currency": "cad",
+            "type": "rrsp",
+            "category": "Wealthsimple",
+            "institution": "Wealthsimple (Canada)"
+          },
+          {
+            "name": "Non-registered (Teddy)",
+            "balance": 4740.64,
+            "currency": "cad",
+            "type": "nonreg",
+            "category": "Wealthsimple",
+            "institution": "Wealthsimple (Canada)"
+          },
+          {
+            "name": "Crypto (Teddy)",
+            "balance": 522.31,
+            "currency": "cad",
+            "type": "crypto",
+            "category": "Wealthsimple",
+            "institution": "Wealthsimple (Canada)"
+          }
+        ],
+        "allLoans": [
+          {
+            "name": "LINE OF CREDIT - 509 Beecroft",
+            "balance": -478765.86,
+            "institution": "TD Canada Trust"
+          },
+          {
+            "name": "LINE OF CREDIT - 5162 Yonge Street",
+            "balance": -333702.63,
+            "institution": "TD Canada Trust"
+          },
+          {
+            "name": "LINE OF CREDIT - 1 Valhalla Inn",
+            "balance": -435509,
+            "institution": "TD Canada Trust"
+          }
+        ]
       },
       "summary": {
-        "tdSavings": 1300634.27,
-        "wealthsimple": 457465.61000000004,
+        "tdSavings": 1303870.17,
+        "wealthsimple": 457018.01,
         "shopifyRsu": 0,
-        "total": 1758099.8800000001
+        "total": 1760888.18
       },
       "returns": {
         "td": {
           "startingBalance": 1314183.53,
-          "currentBalance": 1300634.27,
-          "returnAmount": -13549.26000000001,
-          "returnPct": -1.03100211581559
+          "currentBalance": 1303870.17,
+          "returnAmount": -10313.360000000102,
+          "returnPct": -0.7847731891754953
         },
         "wealthsimple": {
           "teddyStart": 326222.76,
@@ -1752,26 +1915,26 @@
           "teddyCurrent": 319219.18,
           "nicoleCurrent": 153036.81,
           "totalStart": 479889.5,
-          "totalCurrent": 457465.61000000004,
-          "returnAmount": -22423.889999999956,
-          "returnPct": -4.672719448956469
+          "totalCurrent": 457018.01,
+          "returnAmount": -22871.48999999999,
+          "returnPct": -4.765990920826564
         },
         "total": {
-          "returnAmount": -35973.149999999965,
-          "returnPct": -2.0051106838164756
+          "returnAmount": -33184.85000000009,
+          "returnPct": -1.8496933761943957
         },
         "goal": 179407.303,
         "totalGoal": 1973480.333,
-        "currentVsGoal": -215380.45299999998,
-        "pctDifference": -10.913736985287706
+        "currentVsGoal": -212592.15300000017,
+        "pctDifference": -10.77244852381309
       },
       "debt": {
-        "Valhalla Road Mortgage": -435509,
         "Beecroft Mortgage": -478765.86,
         "Gibson Square Mortgage": -333702.63,
+        "Valhalla Road Mortgage": -435509,
         "totalDebt": -1247977.49
       },
-      "subtotal": 510122.39000000013,
+      "subtotal": 512910.68999999994,
       "taxBrackets": [
         {
           "upTo": 53891,
@@ -2340,7 +2503,7 @@
       }
     ]
   },
-  "lastUpdated": "2026-03-27T04:38:38.225Z",
+  "lastUpdated": "2026-03-27T13:14:56.702Z",
   "properties": [
     {
       "name": "31 Pettit Drive",
