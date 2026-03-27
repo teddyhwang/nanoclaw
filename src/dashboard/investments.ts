@@ -46,6 +46,15 @@ export interface YearData {
     nonRegistered?: number;
     crypto?: number;
     resp: number;
+    allAccounts?: {
+      name: string;
+      balance: number;
+      currency: string;
+      type: string;
+      category: string;
+      institution: string;
+    }[];
+    allLoans?: { name: string; balance: number; institution: string }[];
   };
   summary: {
     tdSavings: number;

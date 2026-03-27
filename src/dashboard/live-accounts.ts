@@ -40,7 +40,7 @@ const ACCOUNT_MAP: [RegExp, AccountMapping][] = [
     { type: 'rrsp', provider: 'Wealthsimple', person: 'teddy' },
   ],
   [
-    /Wealthsimple.*RRSP$/,
+    /Wealthsimple.*RRSP.*Nicole/i,
     { type: 'rrsp', provider: 'Wealthsimple', person: 'nicole' },
   ],
   // TFSA
@@ -113,14 +113,49 @@ export async function getLiveCurrentYear(): Promise<YearData | null> {
   let tdTotal = 0;
   let wsTotal = 0;
 
+  const allAccounts: {
+    name: string;
+    balance: number;
+    currency: string;
+    type: string;
+    category: string;
+    institution: string;
+  }[] = [];
+  const allLoans: { name: string; balance: number; institution: string }[] = [];
+
   for (const acct of balances.accounts) {
     if (acct.type !== 'investment' && acct.type !== 'loan') continue;
 
     const mapping = mapAccount(acct);
     if (!mapping) continue;
 
-    // Use to_base for currency-normalized value (USD→CAD)
+    // Shorten display name
+    let shortName = acct.display_name;
+    if (acct.institution_name && shortName.startsWith(acct.institution_name)) {
+      shortName = shortName
+        .slice(acct.institution_name.length)
+        .replace(/^\s+/, '');
+    }
+
     const bal = acct.to_base ?? parseFloat(acct.balance);
+
+    const inst = acct.institution_name || mapping.provider;
+    if (acct.type === 'loan') {
+      allLoans.push({
+        name: shortName,
+        balance: -Math.abs(bal),
+        institution: inst,
+      });
+    } else {
+      allAccounts.push({
+        name: shortName,
+        balance: bal,
+        currency: acct.currency,
+        type: mapping.type,
+        category: mapping.provider,
+        institution: inst,
+      });
+    }
 
     switch (mapping.type) {
       case 'rrsp': {
@@ -212,6 +247,8 @@ export async function getLiveCurrentYear(): Promise<YearData | null> {
       nonRegistered,
       crypto,
       resp,
+      allAccounts: allAccounts.sort((a, b) => b.balance - a.balance),
+      allLoans,
     },
     summary: {
       tdSavings: tdTotal,
