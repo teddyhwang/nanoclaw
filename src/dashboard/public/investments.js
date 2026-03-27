@@ -461,12 +461,12 @@ function renderYear(el, year) {
         <div class="person-grid">
           <span></span><span class="pg-header">Start</span><span class="pg-header">Current</span><span class="pg-header">Return</span>
           ${d.returns.td.startingBalance ? `
-            <span class="pg-label">TD</span><span class="pg-val">${fmt(d.returns.td.startingBalance)}</span><span class="pg-val ${valClass(d.returns.td.returnAmount)}">${fmt(d.returns.td.currentBalance)}</span><span class="pg-val ${valClass(d.returns.td.returnAmount)}">${fmtPct(d.returns.td.returnPct)}</span>
+            <span class="pg-label">TD</span>${editableField(year, ['returns','td','startingBalance'], d.returns.td.startingBalance)}<span class="pg-val ${valClass(d.returns.td.returnAmount)}">${fmt(d.returns.td.currentBalance)}</span><span class="pg-val ${valClass(d.returns.td.returnAmount)}">${fmtPct(d.returns.td.returnPct)}</span>
           ` : ''}
           ${d.returns.wealthsimple.totalStart ? `
-            <span class="pg-label">Wealthsimple</span><span class="pg-val">${fmt(d.returns.wealthsimple.totalStart)}</span><span class="pg-val ${valClass(d.returns.wealthsimple.returnAmount)}">${fmt(d.returns.wealthsimple.totalCurrent)}</span><span class="pg-val ${valClass(d.returns.wealthsimple.returnAmount)}">${fmtPct(d.returns.wealthsimple.returnPct)}</span>
+            <span class="pg-label">Wealthsimple</span>${editableField(year, ['returns','wealthsimple','totalStart'], d.returns.wealthsimple.totalStart)}<span class="pg-val ${valClass(d.returns.wealthsimple.returnAmount)}">${fmt(d.returns.wealthsimple.totalCurrent)}</span><span class="pg-val ${valClass(d.returns.wealthsimple.returnAmount)}">${fmtPct(d.returns.wealthsimple.returnPct)}</span>
           ` : ''}
-          <span class="pg-label pg-total">Total</span><span class="pg-val pg-total">${fmt((d.returns.td.startingBalance||0) + (d.returns.wealthsimple.totalStart||0))}</span><span class="pg-val pg-total ${valClass(d.returns.total.returnAmount)}">${fmt(d.summary.total)}</span><span class="pg-val pg-total ${valClass(d.returns.total.returnAmount)}">${fmtFull(d.returns.total.returnAmount)} (${fmtPct(d.returns.total.returnPct)})</span>
+          <span class="pg-label pg-total">Total</span><span class="pg-val pg-total">${fmtFull((d.returns.td.startingBalance||0) + (d.returns.wealthsimple.totalStart||0))}</span><span class="pg-val pg-total ${valClass(d.returns.total.returnAmount)}">${fmtFull(d.summary.total)}</span><span class="pg-val pg-total ${valClass(d.returns.total.returnAmount)}">${fmtFull(d.returns.total.returnAmount)} (${fmtPct(d.returns.total.returnPct)})</span>
         </div>
         ${d.returns.goal ? `
           <div class="data-row" style="margin-top:8px"><span class="dl">10% Goal</span><span class="dv">${fmtFull(d.returns.goal)}</span></div>
