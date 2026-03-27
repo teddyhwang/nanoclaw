@@ -174,6 +174,18 @@ function buildVolumeMounts(
       containerPath: '/workspace/group',
       readonly: false,
     });
+
+    // Read-only investment data snapshot for container skills/analysis.
+    // Mounted separately so agents can access it via a stable path without
+    // requiring broad write access to the host project.
+    const investmentsFile = path.join(projectRoot, 'db', 'investments.json');
+    if (fs.existsSync(investmentsFile)) {
+      mounts.push({
+        hostPath: investmentsFile,
+        containerPath: '/workspace/extra/investments-data/investments.json',
+        readonly: true,
+      });
+    }
   } else {
     // Other groups only get their own folder
     mounts.push({

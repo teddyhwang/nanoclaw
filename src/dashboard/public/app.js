@@ -210,7 +210,7 @@ function renderProperties(properties, accounts) {
   if (loans.length) {
     const loanLabel = document.createElement('div');
     loanLabel.className = 'prop-section-label';
-    loanLabel.textContent = 'Mortgages & Loans';
+    loanLabel.textContent = 'Mortgages';
     list.appendChild(loanLabel);
 
     // Sort loans to match property order by keyword matching

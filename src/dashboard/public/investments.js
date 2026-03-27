@@ -177,36 +177,33 @@ function renderSummaryCard(year, d, liveBadge = '') {
     d.contributions.respContributions;
 
   return `
-    <div class="yr-card total-card summary-card-spacing">
-      <h3>Summary — ${year}${liveBadge}</h3>
-      <div class="totals-grid">
-        <div class="total-stat total-stat-emphasis total-stat-${valClass(d.returns.total.returnAmount) || 'neutral'}">
-          <span class="total-stat-label">Total Return</span>
-          <div class="total-stat-value-row">
-            <span class="total-stat-value ${valClass(d.returns.total.returnAmount)}">${fmtFull(d.returns.total.returnAmount)}</span>
-            <span class="total-stat-sub ${valClass(d.returns.total.returnAmount)}">${fmtPct(d.returns.total.returnPct)}</span>
-          </div>
+    <div class="finance-summary-grid investment-summary-grid">
+      <div class="finance-stat finance-stat-emphasis finance-stat-${valClass(d.returns.total.returnAmount) || 'neutral'}">
+        <span class="finance-stat-label">Total Return${liveBadge ? ` ${liveBadge}` : ''}</span>
+        <div class="finance-stat-value-row">
+          <span class="finance-stat-value ${valClass(d.returns.total.returnAmount)}">${fmtFull(d.returns.total.returnAmount)}</span>
+          <span class="finance-stat-sub ${valClass(d.returns.total.returnAmount)}">${fmtPct(d.returns.total.returnPct)}</span>
         </div>
-        <div class="total-stat total-stat-emphasis">
-          <span class="total-stat-label">Net Position</span>
-          <span class="total-stat-value ${valClass(d.subtotal)}">${fmtFull(d.subtotal)}</span>
-        </div>
-        <div class="total-stat">
-          <span class="total-stat-label">Total Investments</span>
-          <span class="total-stat-value blue">${fmtFull(d.summary.total)}</span>
-        </div>
-        <div class="total-stat">
-          <span class="total-stat-label">Total Debt</span>
-          <span class="total-stat-value neg">${fmtFull(d.debt.totalDebt)}</span>
-        </div>
-        <div class="total-stat">
-          <span class="total-stat-label">Net Income</span>
-          <span class="total-stat-value orange">${fmtFull(totalNet)}</span>
-        </div>
-        <div class="total-stat">
-          <span class="total-stat-label">Net Contributions</span>
-          <span class="total-stat-value ${valClass(totalContributions)}">${fmtFull(totalContributions)}</span>
-        </div>
+      </div>
+      <div class="finance-stat finance-stat-emphasis">
+        <span class="finance-stat-label">Net Position</span>
+        <span class="finance-stat-value ${valClass(d.subtotal)}">${fmtFull(d.subtotal)}</span>
+      </div>
+      <div class="finance-stat">
+        <span class="finance-stat-label">Total Investments</span>
+        <span class="finance-stat-value pos">${fmtFull(d.summary.total)}</span>
+      </div>
+      <div class="finance-stat">
+        <span class="finance-stat-label">Total Debt</span>
+        <span class="finance-stat-value neg">${fmtFull(d.debt.totalDebt)}</span>
+      </div>
+      <div class="finance-stat">
+        <span class="finance-stat-label">Net Income</span>
+        <span class="finance-stat-value orange">${fmtFull(totalNet)}</span>
+      </div>
+      <div class="finance-stat">
+        <span class="finance-stat-label">Net Contributions</span>
+        <span class="finance-stat-value ${valClass(totalContributions)}">${fmtFull(totalContributions)}</span>
       </div>
     </div>
   `;
@@ -601,33 +598,30 @@ function renderSalaries(el) {
   const avgTaxRate = totalGross ? (totalTax / totalGross * 100) : 0;
 
   el.innerHTML = `
-    <div class="yr-card total-card summary-card-spacing salary-summary-card">
-      <h3>Summary — Salaries</h3>
-      <div class="totals-grid">
-        <div class="total-stat">
-          <span class="total-stat-label">Lifetime Earnings</span>
-          <span class="total-stat-value blue">${fmtFull(totalGross)}</span>
-        </div>
-        <div class="total-stat">
-          <span class="total-stat-label">Lifetime Tax</span>
-          <span class="total-stat-value neg">${fmtFull(totalTax)}</span>
-        </div>
-        <div class="total-stat">
-          <span class="total-stat-label">Total Savings</span>
-          <span class="total-stat-value blue">${fmtFull(totalSavings)}</span>
-        </div>
-        <div class="total-stat">
-          <span class="total-stat-label">Savings %</span>
-          <span class="total-stat-value">${fmtPct(savingsAfterTaxPct)}</span>
-        </div>
-        <div class="total-stat">
-          <span class="total-stat-label">Avg Tax Rate</span>
-          <span class="total-stat-value ${valClass(-avgTaxRate)}">${avgTaxRate.toFixed(1)}%</span>
-        </div>
-        <div class="total-stat total-stat-emphasis">
-          <span class="total-stat-label">Lifetime Net</span>
-          <span class="total-stat-value orange">${fmtFull(totalNet)}</span>
-        </div>
+    <div class="finance-summary-grid investment-summary-grid salary-summary-card">
+      <div class="finance-stat">
+        <span class="finance-stat-label">Lifetime Earnings</span>
+        <span class="finance-stat-value pos">${fmtFull(totalGross)}</span>
+      </div>
+      <div class="finance-stat">
+        <span class="finance-stat-label">Lifetime Tax</span>
+        <span class="finance-stat-value neg">${fmtFull(totalTax)}</span>
+      </div>
+      <div class="finance-stat">
+        <span class="finance-stat-label">Total Savings</span>
+        <span class="finance-stat-value pos">${fmtFull(totalSavings)}</span>
+      </div>
+      <div class="finance-stat">
+        <span class="finance-stat-label">Savings %</span>
+        <span class="finance-stat-value">${fmtPct(savingsAfterTaxPct)}</span>
+      </div>
+      <div class="finance-stat">
+        <span class="finance-stat-label">Avg Tax Rate</span>
+        <span class="finance-stat-value ${valClass(-avgTaxRate)}">${avgTaxRate.toFixed(1)}%</span>
+      </div>
+      <div class="finance-stat finance-stat-emphasis">
+        <span class="finance-stat-label">Lifetime Net</span>
+        <span class="finance-stat-value orange">${fmtFull(totalNet)}</span>
       </div>
     </div>
     <div class="overview-grid">

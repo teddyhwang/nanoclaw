@@ -97,6 +97,37 @@
 .stat-value.neutral { color: var(--text-max); }
 .stat-value.highlight { color: var(--orange); text-shadow: 0 0 14px rgba(255,143,64,0.25); }
 
+/* Investment summary stats */
+.investment-summary-grid {
+  margin-bottom: 10px;
+  width: 100%;
+  align-self: stretch;
+  flex-shrink: 0;
+}
+.finance-stat-sub {
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.finance-stat-sub.pos { color: var(--green); text-shadow: 0 0 10px rgba(170,217,76,0.15); }
+.finance-stat-sub.neg { color: var(--red); text-shadow: 0 0 10px rgba(240,113,120,0.15); }
+.finance-stat-value-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+.finance-stat-value-row .finance-stat-value,
+.finance-stat-value-row .finance-stat-sub {
+  white-space: nowrap;
+}
+.finance-stat-value-row .finance-stat-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* ── Year detail ───────────────────────────────────────────── */
 .year-grid {
   display: grid;

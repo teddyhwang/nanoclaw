@@ -195,5 +195,5 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`💰 Financial Dashboard running at http://${HOST}:${PORT}`);
+  console.log(`💰 Tico Dashboard running at http://${HOST}:${PORT}`);
 });
