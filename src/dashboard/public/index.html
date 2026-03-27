@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NanoClaw Finance</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+</head>
+<body>
+  <div id="loading" class="loading">
+    <div class="spinner"></div>
+    <span>Loading financial data…</span>
+  </div>
+
+  <div id="app" class="hidden">
+    <header>
+      <div class="header-left">
+        <i data-lucide="wallet" class="logo-icon"></i>
+        <nav class="top-nav">
+          <a href="/" class="nav-link active">Finance</a>
+          <a href="/investments" class="nav-link">Investments</a>
+        </nav>
+        <div class="nw-inline">
+          <span class="nw-value" id="net-worth">—</span>
+          <span class="nw-label">net worth</span>
+        </div>
+        <div class="nw-pills" id="nw-breakdown"></div>
+      </div>
+      <div class="header-right">
+        <div class="income-spend" id="income-spend"></div>
+        <span class="cache-info" id="cache-info"></span>
+        <button id="privacy-btn" class="btn-privacy" title="Toggle privacy mode"><i data-lucide="eye"></i></button>
+        <button id="refresh-btn" class="btn-icon" title="Refresh balances"><i data-lucide="refresh-cw"></i></button>
+      </div>
+    </header>
+
+    <div class="dash-grid">
+      <!-- Left: Accounts -->
+      <div class="panel accounts-panel">
+        <div class="panel-head">Accounts</div>
+        <div class="accounts-scroll" id="account-list"></div>
+      </div>
+
+      <!-- Center-top: Category donut -->
+      <div class="panel chart-panel">
+        <div class="panel-head">Spending by Category</div>
+        <div class="chart-wrap"><canvas id="chart-category-donut"></canvas></div>
+      </div>
+
+      <!-- Right-top: Daily spending -->
+      <div class="panel chart-panel">
+        <div class="panel-head">Daily Spending</div>
+        <div class="chart-wrap"><canvas id="chart-daily-spending"></canvas></div>
+      </div>
+
+      <!-- Center-bottom: Weekly trend -->
+      <div class="panel chart-panel">
+        <div class="panel-head">Weekly Trend <span class="panel-sub" id="weekly-avg"></span></div>
+        <div class="chart-wrap"><canvas id="chart-weekly-trend"></canvas></div>
+      </div>
+
+      <!-- Right-bottom: Top merchants -->
+      <div class="panel chart-panel">
+        <div class="panel-head">Top Merchants</div>
+        <div class="chart-wrap"><canvas id="chart-top-merchants"></canvas></div>
+      </div>
+
+      <!-- Bottom: Transactions -->
+      <div class="panel tx-panel">
+        <div class="tx-head">
+          <div class="tx-head-left">
+            <span class="panel-head-text">Transactions</span>
+            <div class="filter-pills" id="filter-pills"></div>
+          </div>
+          <div class="tx-controls">
+            <select id="tx-date-range" class="select-sm">
+              <option value="thisMonth">This Month</option>
+              <option value="lastMonth">Last Month</option>
+              <option value="90days" selected>Last 90 Days</option>
+              <option value="all">All Time</option>
+            </select>
+            <input type="text" id="tx-search" placeholder="Search…" class="input-sm">
+            <select id="tx-category-filter" class="select-sm">
+              <option value="">All Categories</option>
+            </select>
+          </div>
+        </div>
+        <div class="tx-scroll">
+          <table class="tx-table" id="tx-table">
+            <thead>
+              <tr>
+                <th class="sortable" data-sort="date">Date <span class="sort-arrow">↓</span></th>
+                <th class="sortable" data-sort="payee">Payee <span class="sort-arrow"></span></th>
+                <th class="sortable" data-sort="category">Category <span class="sort-arrow"></span></th>
+                <th class="sortable r" data-sort="amount">Amount <span class="sort-arrow"></span></th>
+              </tr>
+            </thead>
+            <tbody id="tx-body"></tbody>
+          </table>
+        </div>
+        <div class="tx-foot">
+          <button id="tx-prev" class="btn-sm" disabled>←</button>
+          <span id="tx-page-info" class="tx-info"></span>
+          <button id="tx-next" class="btn-sm">→</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

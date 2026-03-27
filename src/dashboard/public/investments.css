@@ -1,0 +1,158 @@
+/* ── Investment Dashboard Styles ────────────────────────────── */
+
+/* Top nav links */
+.top-nav { display: flex; gap: 4px; }
+.nav-link {
+  color: var(--muted); text-decoration: none; font-size: 13px; font-weight: 500;
+  padding: 4px 12px; border-radius: var(--r); transition: all .15s;
+}
+.nav-link:hover { color: var(--text-hi); background: var(--bg-card); }
+.nav-link.active { color: var(--accent); background: rgba(67,165,213,0.1); }
+
+/* Sub nav */
+.sub-nav {
+  display: flex; gap: 2px; padding: 6px 12px; background: var(--bg-panel);
+  border-bottom: 1px solid var(--border); overflow-x: auto; flex-shrink: 0;
+}
+.sub-nav::-webkit-scrollbar { height: 3px; }
+.sub-nav::-webkit-scrollbar-thumb { background: var(--border-lit); border-radius: 2px; }
+.sub-tab {
+  background: none; border: 1px solid transparent; color: var(--muted);
+  padding: 4px 14px; border-radius: var(--r); cursor: pointer;
+  font-family: inherit; font-size: 12px; font-weight: 500; white-space: nowrap;
+  transition: all .15s; text-decoration: none;
+}
+.sub-tab:hover { color: var(--text-hi); border-color: var(--border); }
+.sub-tab.active { color: var(--accent); background: rgba(67,165,213,0.1); border-color: rgba(67,165,213,0.3); }
+.sub-sep { width: 1px; background: var(--border); margin: 2px 6px; flex-shrink: 0; }
+
+/* View container */
+.view-container { flex: 1; overflow-y: auto; padding: var(--g); display: flex; flex-direction: column; min-height: 0; }
+
+/* ── Overview 2×2 grid ─────────────────────────────────────── */
+.ov-grid-2x2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: var(--g);
+  flex: 1;
+  min-height: 0;
+}
+.ov-cell {
+  background: var(--bg-panel); border: 1px solid var(--border);
+  border-radius: var(--r); padding: 12px; display: flex; flex-direction: column;
+  min-height: 0; overflow: hidden;
+}
+.ov-cell h3 {
+  font-size: 12px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 1px; color: var(--accent); margin-bottom: 8px; flex-shrink: 0;
+}
+.ov-chart-area { flex: 1; min-height: 0; position: relative; }
+.ov-chart-area canvas { width: 100% !important; height: 100% !important; }
+
+/* ── Legacy cards (salaries, etc.) ─────────────────────────── */
+.overview-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--g);
+}
+.ov-card {
+  background: var(--bg-panel); border: 1px solid var(--border);
+  border-radius: var(--r); padding: 16px; display: flex; flex-direction: column;
+}
+.ov-card.full { grid-column: 1 / -1; }
+.ov-card h3 {
+  font-size: 12px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 1px; color: var(--accent); margin-bottom: 12px;
+}
+.ov-card .chart-area { min-height: 180px; max-height: 300px; position: relative; }
+.ov-card .chart-area canvas { width: 100% !important; height: 100% !important; }
+.ov-card.full .chart-area { max-height: 320px; }
+
+/* Stats row */
+.stats-row { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 12px; }
+.stat-item { display: flex; flex-direction: column; gap: 2px; }
+.stat-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); }
+.stat-value { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.stat-value.positive { color: var(--green); }
+.stat-value.negative { color: var(--red); }
+.stat-value.neutral { color: var(--text-max); }
+
+/* ── Year detail ───────────────────────────────────────────── */
+.year-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--g);
+}
+.yr-card {
+  background: var(--bg-panel); border: 1px solid var(--border);
+  border-radius: var(--r); padding: 14px;
+}
+.yr-card.full { grid-column: 1 / -1; }
+.yr-card h3 {
+  font-size: 11px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 1px; color: var(--accent); margin-bottom: 10px;
+}
+
+/* Data rows */
+.data-row {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 4px 0; border-bottom: 1px solid rgba(42,58,64,0.3);
+}
+.data-row:last-child { border-bottom: none; }
+.data-row.total { border-top: 1px solid var(--border-lit); font-weight: 600; margin-top: 4px; padding-top: 6px; }
+.data-row .dl { color: var(--text); font-size: 12px; }
+.data-row .dv { font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums; color: var(--text-hi); }
+.data-row .dv.pos { color: var(--green); }
+.data-row .dv.neg { color: var(--red); }
+.data-row .dv.blue { color: var(--blue); }
+
+/* Editable field */
+.editable {
+  background: none; border: 1px dashed transparent; color: var(--text-hi);
+  font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums;
+  font-family: inherit; text-align: right; padding: 2px 6px;
+  border-radius: 3px; width: 130px; transition: all .15s;
+}
+.editable:hover { border-color: var(--border-lit); background: rgba(67,165,213,0.05); }
+.editable:focus { outline: none; border-color: var(--accent); border-style: solid; background: var(--bg-card); }
+
+/* Editable in data-row context */
+.data-row .editable { width: 150px; }
+
+/* Person columns */
+.person-grid { display: grid; grid-template-columns: 1fr auto auto auto; gap: 0 12px; align-items: center; }
+.person-grid .pg-label { font-size: 12px; color: var(--text); padding: 5px 0; border-bottom: 1px solid rgba(42,58,64,0.3); }
+.person-grid .pg-header { font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); text-align: right; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+.person-grid .pg-val { font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums; text-align: right; color: var(--text-hi); padding: 5px 0; border-bottom: 1px solid rgba(42,58,64,0.3); }
+.person-grid .pg-total { font-weight: 600; border-bottom: none; border-top: 1px solid var(--border-lit); padding-top: 6px; margin-top: 2px; }
+.person-grid .editable { border-bottom: 1px solid rgba(42,58,64,0.3); padding: 3px 6px; }
+
+/* ── Salary table ──────────────────────────────────────────── */
+.salary-table {
+  width: 100%; border-collapse: collapse; font-size: 12px;
+}
+.salary-table th {
+  text-align: right; padding: 6px 10px; font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted);
+  border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--bg-panel);
+}
+.salary-table th:first-child { text-align: left; }
+.salary-table td { padding: 5px 10px; text-align: right; border-bottom: 1px solid rgba(42,58,64,0.3); color: var(--text-hi); font-variant-numeric: tabular-nums; }
+.salary-table td:first-child { text-align: left; color: var(--text); }
+.salary-table tbody tr:hover { background: var(--bg-hover); }
+.salary-table .yoy-pos { color: var(--green); }
+.salary-table .yoy-neg { color: var(--red); }
+
+/* ── Responsive ────────────────────────────────────────────── */
+@media (max-width: 1024px) {
+  .ov-grid-2x2 { grid-template-columns: 1fr; grid-template-rows: auto; }
+  .ov-cell { min-height: 250px; }
+  .overview-grid { grid-template-columns: 1fr; }
+  .year-grid { grid-template-columns: 1fr; }
+  .yr-card.full { grid-column: 1; }
+}
+@media (max-width: 640px) {
+  .year-grid { grid-template-columns: 1fr; }
+  .sub-nav { padding: 4px 8px; }
+}
