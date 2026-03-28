@@ -1,13 +1,13 @@
 {
   "totalReturn": {
-    "previous": -39294.53999999998,
+    "previous": -39520.03000000003,
     "current": -39520.03000000003,
-    "direction": "down"
+    "direction": "flat"
   },
   "totalInvestments": {
-    "previous": 1754778.49,
+    "previous": 1754553,
     "current": 1754553,
-    "direction": "down"
+    "direction": "flat"
   },
-  "updatedAt": "2026-03-28T04:23:02.583Z"
+  "updatedAt": "2026-03-28T04:31:32.427Z"
 }

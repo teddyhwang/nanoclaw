@@ -124,6 +124,21 @@ export function FinancePage({ initialData }: Props) {
     [setFilters],
   );
 
+  const handleCategoryClick = useCallback(
+    (cat: string | null) => setFilter('category', cat),
+    [setFilter],
+  );
+
+  const handleDayClick = useCallback(
+    (day: string | null) => setFilter('day', day),
+    [setFilter],
+  );
+
+  const handleMerchantClick = useCallback(
+    (merchant: string | null) => setFilter('merchant', merchant),
+    [setFilter],
+  );
+
   const handleWeekClick = useCallback(
     (weekStart: string | null, weekEnd: string | null) => {
       if (weekStart && weekEnd) {
@@ -175,7 +190,7 @@ export function FinancePage({ initialData }: Props) {
           debitsNeg={debitsNeg}
           dateRange={filters.dateRange}
           selectedCategory={filters.category}
-          onCategoryClick={(cat) => setFilter('category', cat)}
+          onCategoryClick={handleCategoryClick}
         />
         <DailyCashFlow
           transactions={data.transactions}
@@ -183,7 +198,7 @@ export function FinancePage({ initialData }: Props) {
           debitsNeg={debitsNeg}
           dateRange={filters.dateRange}
           selectedDay={filters.day}
-          onDayClick={(day) => setFilter('day', day)}
+          onDayClick={handleDayClick}
         />
         <WeeklyTrend
           transactions={data.transactions}
@@ -199,7 +214,7 @@ export function FinancePage({ initialData }: Props) {
           debitsNeg={debitsNeg}
           dateRange={filters.dateRange}
           selectedMerchant={filters.merchant}
-          onMerchantClick={(merchant) => setFilter('merchant', merchant)}
+          onMerchantClick={handleMerchantClick}
         />
         <TransactionsPanel
           transactions={data.transactions}
