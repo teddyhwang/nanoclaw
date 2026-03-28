@@ -1,4 +1,4 @@
-import { useRef, useEffect, useCallback } from 'react';
+import { memo, useRef, useEffect, useCallback } from 'react';
 import { Chart, type ChartEvent, type ActiveElement } from 'chart.js';
 import type { Transaction } from '../../types';
 import type { CategoryMap, CategoryGroupMap } from '../../utils/categories';
@@ -19,7 +19,7 @@ interface Props {
   onCategoryClick: (category: string | null) => void;
 }
 
-export function CategoryDonut({
+function CategoryDonutImpl({
   transactions,
   categoryMap,
   categoryGroupMap,
@@ -108,3 +108,5 @@ export function CategoryDonut({
     </Panel>
   );
 }
+
+export const CategoryDonut = memo(CategoryDonutImpl);

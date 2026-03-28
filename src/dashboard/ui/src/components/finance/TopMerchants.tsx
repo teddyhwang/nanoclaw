@@ -1,4 +1,4 @@
-import { useRef, useEffect, useCallback } from 'react';
+import { memo, useRef, useEffect, useCallback } from 'react';
 import { Chart, type ChartEvent, type ActiveElement } from 'chart.js';
 import type { Transaction } from '../../types';
 import type { CategoryMap } from '../../utils/categories';
@@ -20,7 +20,7 @@ interface Props {
   onMerchantClick: (merchant: string | null) => void;
 }
 
-export function TopMerchants({
+function TopMerchantsImpl({
   transactions,
   categoryMap,
   debitsNeg,
@@ -102,3 +102,5 @@ export function TopMerchants({
     </Panel>
   );
 }
+
+export const TopMerchants = memo(TopMerchantsImpl);

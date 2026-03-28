@@ -1,4 +1,4 @@
-import { useRef, useEffect, useCallback } from 'react';
+import { memo, useRef, useEffect, useCallback } from 'react';
 import { Chart, type ChartEvent, type ActiveElement } from 'chart.js';
 import type { Transaction } from '../../types';
 import type { CategoryMap } from '../../utils/categories';
@@ -18,7 +18,7 @@ interface Props {
   onDayClick: (day: string | null) => void;
 }
 
-export function DailyCashFlow({
+function DailyCashFlowImpl({
   transactions,
   categoryMap,
   debitsNeg,
@@ -134,3 +134,5 @@ export function DailyCashFlow({
     </Panel>
   );
 }
+
+export const DailyCashFlow = memo(DailyCashFlowImpl);
