@@ -2,6 +2,13 @@ import type { YearData } from '../../types';
 import { fmtFull, fmtPct, valClass } from '../../utils/format';
 import { usePrivacy } from '../../contexts/PrivacyContext';
 
+function TrendArrow({ direction }: { direction?: 'up' | 'down' | 'flat' }) {
+  if (!direction || direction === 'flat') return null;
+  const arrow = direction === 'up' ? '▲' : '▼';
+  const color = direction === 'up' ? 'var(--green)' : 'var(--red)';
+  return <span style={{ color, marginLeft: 6, fontSize: '0.75em' }}>{arrow}</span>;
+}
+
 interface Props {
   year: string;
   data: YearData;
@@ -36,6 +43,7 @@ export function SummaryStats({ data: d, liveBadge }: Props) {
         <div className="finance-stat-value-row">
           <span className={`finance-stat-value ${valClass(d.returns.total.returnAmount)}`}>
             {fmtFull(d.returns.total.returnAmount, pm)}
+            <TrendArrow direction={d.trends?.totalReturn.direction} />
           </span>
           <span className={`finance-stat-sub ${valClass(d.returns.total.returnAmount)}`}>
             {fmtPct(d.returns.total.returnPct, pm)}
@@ -50,7 +58,10 @@ export function SummaryStats({ data: d, liveBadge }: Props) {
       </div>
       <div className="finance-stat">
         <span className="finance-stat-label">Total Investments</span>
-        <span className="finance-stat-value pos">{fmtFull(d.summary.total, pm)}</span>
+        <span className="finance-stat-value pos">
+          {fmtFull(d.summary.total, pm)}
+          <TrendArrow direction={d.trends?.totalInvestments.direction} />
+        </span>
       </div>
       <div className="finance-stat">
         <span className="finance-stat-label">Total Debt</span>
