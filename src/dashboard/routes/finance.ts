@@ -89,7 +89,11 @@ export default async function financeRoutes(fastify: FastifyInstance) {
       path: string;
       value: unknown;
     };
-    const updated = updateYearField(year, fieldPath.split('.'), value as number);
+    const updated = updateYearField(
+      year,
+      fieldPath.split('.'),
+      value as number,
+    );
     if (!updated) {
       reply.code(400);
       return { error: 'Invalid update' };
