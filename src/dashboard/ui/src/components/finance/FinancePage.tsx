@@ -17,7 +17,7 @@ import {
 } from 'chart.js';
 import type { DashboardData } from '../../types';
 import { buildCategoryMap } from '../../utils/categories';
-import { relTime } from '../../utils/format';
+// relTime moved to SubNav.SyncInfo
 import { COLORS, DATE_RANGE_OPTIONS } from '../../constants';
 import { fetchDashboard, saveProperties, fetchAmazonMatches } from '../../api';
 import type { AmazonMatch } from '../../api';
@@ -136,12 +136,6 @@ export function FinancePage({ initialData }: Props) {
   );
 
   const ca = data.cachedAt;
-  const cacheInfo = [
-    ca.balances && `bal ${relTime(ca.balances)}`,
-    ca.transactions && `tx ${relTime(ca.transactions)}`,
-  ]
-    .filter(Boolean)
-    .join(' · ');
 
   return (
     <Layout refreshing={refreshing} onRefresh={handleRefresh}>
@@ -155,12 +149,7 @@ export function FinancePage({ initialData }: Props) {
             {opt.label}
           </SubNav.Tab>
         ))}
-        {cacheInfo && (
-          <>
-            <SubNav.Separator />
-            <SubNav.Info>{cacheInfo}</SubNav.Info>
-          </>
-        )}
+        <SubNav.SyncInfo timestamps={{ bal: ca.balances, tx: ca.transactions }} />
       </SubNav>
       <PageContent fill>
       <FinanceSummary
