@@ -1,7 +1,8 @@
-import { type ReactNode, useRef } from 'react';
+import { type ReactNode, useRef, useState } from 'react';
 import { NavLink } from 'react-router-dom';
-import { Wallet, Eye, EyeOff, RefreshCw, Heart, Home } from 'lucide-react';
+import { Wallet, Eye, EyeOff, RefreshCw, Heart, Home, LogOut } from 'lucide-react';
 import { usePrivacy } from '../contexts/PrivacyContext';
+import { useAuth } from '../contexts/AuthContext';
 import { useLocation } from 'react-router-dom';
 import { usePullToRefresh } from '../hooks/usePullToRefresh';
 
@@ -61,9 +62,58 @@ export function Layout({ children, headerRight, refreshing, onRefresh }: LayoutP
               <RefreshCw size={16} />
             </button>
           )}
+          <UserMenu />
         </div>
       </header>
       {children}
+    </div>
+  );
+}
+
+function UserMenu() {
+  const { user, logout } = useAuth();
+  const [open, setOpen] = useState(false);
+
+  if (!user) return null;
+
+  return (
+    <div className="user-menu" style={{ position: 'relative' }}>
+      <button
+        className="btn-icon user-avatar-btn"
+        title={user.name}
+        onClick={() => setOpen(!open)}
+      >
+        {user.picture ? (
+          <img
+            src={user.picture}
+            alt={user.name}
+            style={{ width: 24, height: 24, borderRadius: '50%' }}
+            referrerPolicy="no-referrer"
+          />
+        ) : (
+          <span style={{ fontSize: 14, fontWeight: 600 }}>
+            {user.name.charAt(0).toUpperCase()}
+          </span>
+        )}
+      </button>
+      {open && (
+        <>
+          <div
+            className="user-menu-backdrop"
+            onClick={() => setOpen(false)}
+          />
+          <div className="user-menu-dropdown">
+            <div className="user-menu-info">
+              <span className="user-menu-name">{user.name}</span>
+              <span className="user-menu-email">{user.email}</span>
+            </div>
+            <button className="user-menu-item" onClick={logout}>
+              <LogOut size={14} />
+              Sign out
+            </button>
+          </div>
+        </>
+      )}
     </div>
   );
 }

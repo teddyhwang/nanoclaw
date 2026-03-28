@@ -11,6 +11,7 @@ SERVICES=(
   com.nanoclaw
   com.nanoclaw.dev-agent
   com.nanoclaw.dashboard
+  com.nanoclaw.caddy
 )
 
 GREEN='\033[0;32m'
@@ -39,12 +40,14 @@ for svc in "${SERVICES[@]}"; do
   fi
 done
 
-# Wait for ports to free up (dashboard binds to a port)
-if lsof -ti:"$DASHBOARD_PORT" &>/dev/null; then
-  warn "Waiting for port $DASHBOARD_PORT to free..."
-  lsof -ti:"$DASHBOARD_PORT" | xargs kill -9 2>/dev/null || true
-  sleep 1
-fi
+# Wait for ports to free up (dashboard and caddy)
+for port in "$DASHBOARD_PORT" 80; do
+  if lsof -ti:"$port" &>/dev/null; then
+    warn "Waiting for port $port to free..."
+    lsof -ti:"$port" | xargs kill -9 2>/dev/null || true
+    sleep 1
+  fi
+done
 
 # Start all services
 info "Starting services..."

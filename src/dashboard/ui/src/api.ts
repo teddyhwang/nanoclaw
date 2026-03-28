@@ -1,5 +1,18 @@
 import type { DashboardData, InvestmentData, HealthData } from './types';
 
+export interface AuthUser {
+  email: string;
+  name: string;
+  picture: string;
+}
+
+export async function fetchAuthUser(): Promise<AuthUser | null> {
+  const r = await fetch('/auth/me');
+  if (r.status === 401) return null;
+  if (!r.ok) return null;
+  return r.json();
+}
+
 export async function fetchDashboard(
   forceRefresh = false,
 ): Promise<DashboardData> {

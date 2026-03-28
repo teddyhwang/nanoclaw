@@ -522,4 +522,51 @@ header::after {
   .nav-link { padding: 3px 6px; }
 }
 
+/* ── Error pages (404, etc.) ────────────────────────────────── */
+.error-page {
+  display: flex; align-items: center; justify-content: center;
+  height: 100vh; text-align: center; background: var(--bg);
+}
+.error-page-content { max-width: 420px; padding: 40px 24px; }
+.error-code {
+  font-size: 72px; font-weight: 700; color: var(--accent); line-height: 1;
+  margin-bottom: 8px; text-shadow: 0 0 40px rgba(89,194,255,0.2);
+}
+.error-title { font-size: 22px; font-weight: 600; color: var(--text-hi); margin-bottom: 12px; }
+.error-divider {
+  width: 48px; height: 2px; background: var(--border-lit);
+  border-radius: 1px; margin: 20px auto;
+}
+.error-message { font-size: 15px; color: var(--muted); line-height: 1.6; margin-bottom: 20px; }
+.error-link {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 10px 20px; background: rgba(89,194,255,0.1);
+  border: 1px solid rgba(89,194,255,0.25); border-radius: 8px;
+  color: var(--accent); text-decoration: none; font-size: 14px; font-weight: 500;
+  transition: all 0.2s;
+}
+.error-link:hover { background: rgba(89,194,255,0.18); border-color: rgba(89,194,255,0.4); }
 
+/* User menu */
+.user-menu { position: relative; }
+.user-avatar-btn { display: flex; align-items: center; justify-content: center; padding: 0; overflow: hidden; }
+.user-avatar-btn img { display: block; }
+.user-menu-backdrop { position: fixed; inset: 0; z-index: 99; }
+.user-menu-dropdown {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 100;
+  background: var(--bg-panel-solid); border: 1px solid var(--border); border-radius: 8px;
+  min-width: 180px; box-shadow: 0 4px 16px rgba(0,0,0,.4);
+  overflow: hidden;
+}
+.user-menu-info {
+  padding: 10px 12px; border-bottom: 1px solid var(--border);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.user-menu-name { font-size: 13px; font-weight: 600; color: var(--text); }
+.user-menu-email { font-size: 11px; color: var(--text-dim); }
+.user-menu-item {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; padding: 8px 12px; border: none; background: none;
+  color: var(--text-dim); font-size: 13px; cursor: pointer; text-align: left;
+}
+.user-menu-item:hover { background: var(--hover); color: var(--text); }

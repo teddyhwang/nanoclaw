@@ -1,39 +1,27 @@
 /**
- * Financial Dashboard Server
+ * Tico Dashboard Server
  *
- * Standalone HTTP server serving a financial dashboard UI and
+ * Fastify HTTP server serving a financial dashboard UI and
  * proxying data from the Lunch Money API with local caching.
  *
  * Run as: npx tsx src/dashboard/server.ts
  * Or via launchd for persistent operation.
  */
-import { createServer, IncomingMessage, ServerResponse } from 'http';
+import Fastify from 'fastify';
+import fastifyStatic from '@fastify/static';
+import closeWithGrace from 'close-with-grace';
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
 
-import {
-  getDashboardData,
-  getBalances,
-  getBalancesCachedAt,
-  getMeta,
-  getSummary,
-  getTransactions,
-} from './lunchmoney.js';
-import {
-  loadInvestmentData,
-  saveInvestmentData,
-  updateYearField,
-} from './investments.js';
-import { getLiveCurrentYear } from './live-accounts.js';
-import { matchTransactions, hasAmazonData } from './amazon-matcher.js';
-import { getHealthData } from './health.js';
+import authPlugin, { render404Page } from './plugins/auth.js';
+import financeRoutes from './routes/finance.js';
+import homeRoutes from './routes/home.js';
+import healthRoutes from './routes/health.js';
 
 const PORT = parseInt(process.env.DASHBOARD_PORT || '3002', 10);
 const HOST = process.env.DASHBOARD_HOST || '0.0.0.0';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-// Serve from the React build output (Vite dist), falling back to legacy public dir
+// Resolve static file directory (React build output)
 const REACT_DIST = path.resolve(
   process.cwd(),
   'src',
@@ -41,553 +29,75 @@ const REACT_DIST = path.resolve(
   'ui',
   'dist',
 );
-const LEGACY_PUBLIC = path.join(__dirname, 'public');
-const LEGACY_SRC = path.resolve(process.cwd(), 'src', 'dashboard', 'public');
+const LEGACY_PUBLIC = path.resolve(process.cwd(), 'src', 'dashboard', 'public');
 const STATIC_DIR = fs.existsSync(REACT_DIST)
   ? REACT_DIST
   : fs.existsSync(LEGACY_PUBLIC)
     ? LEGACY_PUBLIC
-    : LEGACY_SRC;
+    : LEGACY_PUBLIC;
 
-const MIME_TYPES: Record<string, string> = {
-  '.html': 'text/html',
-  '.css': 'text/css',
-  '.js': 'application/javascript',
-  '.json': 'application/json',
-  '.png': 'image/png',
-  '.svg': 'image/svg+xml',
-  '.ico': 'image/x-icon',
-};
+const app = Fastify({
+  logger: {
+    level: process.env.LOG_LEVEL || 'info',
+    transport: {
+      target: 'pino-pretty',
+      options: { translateTime: 'HH:MM:ss', ignore: 'pid,hostname' },
+    },
+  },
+  trustProxy: true,
+  requestTimeout: 30000,
+  bodyLimit: 1048576, // 1MB
+});
 
-// --- Itsyhome smart home API helpers ---
+// --- Plugins ---
 
-const ITSYHOME_BASE = 'http://localhost:8423';
+// Auth (registers /auth/* routes and onRequest guard)
+await app.register(authPlugin);
 
-async function fetchItsyhome(endpoint: string): Promise<unknown> {
-  const resp = await fetch(`${ITSYHOME_BASE}${endpoint}`);
-  const text = await resp.text();
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
-}
+// --- API Routes ---
 
-// Service type UUIDs (first 8 chars) to human-readable names
-const SERVICE_TYPES: Record<string, string> = {
-  '00000043': 'Lightbulb',
-  '00000049': 'Switch',
-  '00000045': 'LockMechanism',
-  '00000041': 'GarageDoorOpener',
-  '00000080': 'ContactSensor',
-  '00000085': 'MotionSensor',
-  '0000008A': 'TemperatureSensor',
-  '00000082': 'HumiditySensor',
-  '0000004A': 'Thermostat',
-  '0000007E': 'SecuritySystem',
-  '00000086': 'OccupancySensor',
-  '00000083': 'LeakSensor',
-  '0000008C': 'WindowCovering',
-  '00000047': 'Outlet',
-  '00000040': 'Fan',
-  '000000D8': 'NowPlayingService',
-};
+await app.register(financeRoutes);
+await app.register(homeRoutes);
+await app.register(healthRoutes);
 
-// Services to skip entirely
-const SKIP_SERVICES = new Set([
-  '0000003E',
-  '000000D9',
-  '00000204',
-  '0000021A',
-  '00000112',
-  '0000022A',
-  '00000239',
-  '00000236',
-  '00000113',
-]);
+// --- Static files (React SPA) ---
 
-// Custom Starling/Apple TV characteristic UUIDs for Now Playing
-const CUSTOM_CHAR_TYPES: Record<string, string> = {
-  '2A64B222': 'NowPlaying',
-  '301323DC': 'PlaybackState',
-  '3FDFF90C': 'MediaType',
-  ABFC7776: 'Duration',
-  '3E195A75': 'ElapsedTime',
-  '000000E8': 'Active',
-  '000000E3': 'ConfiguredName',
-};
+await app.register(fastifyStatic, {
+  root: STATIC_DIR,
+  wildcard: false, // We handle SPA fallback ourselves
+});
 
-// Characteristic type UUIDs (first 8 chars) to names
-const CHAR_TYPES: Record<string, string> = {
-  '00000025': 'On',
-  '00000008': 'Brightness',
-  '00000013': 'Hue',
-  '0000002F': 'Saturation',
-  '000000CE': 'ColorTemperature',
-  '00000011': 'CurrentTemperature',
-  '00000010': 'CurrentRelativeHumidity',
-  '0000006A': 'ContactSensorState',
-  '00000022': 'MotionDetected',
-  '0000001D': 'LockCurrentState',
-  '0000001E': 'LockTargetState',
-  '00000066': 'SecuritySystemCurrentState',
-  '00000067': 'SecuritySystemTargetState',
-  '00000075': 'StatusActive',
-  '00000079': 'StatusLowBattery',
-  '00000068': 'BatteryLevel',
-  '0000006F': 'OccupancyDetected',
-  '00000070': 'LeakDetected',
-  '0000006D': 'CurrentPosition',
-  '0000007C': 'TargetPosition',
-  '0000000D': 'CurrentHeatingCoolingState',
-  '0000000F': 'TargetHeatingCoolingState',
-  '00000012': 'TargetTemperature',
-  '0000000E': 'CurrentDoorState',
-  '00000032': 'TargetDoorState',
-  '00000024': 'ObstructionDetected',
-};
-
-interface ParsedDevice {
-  name: string;
-  reachable: boolean;
-  services: { type: string; characteristics: Record<string, unknown> }[];
-}
-
-function parseHomeDevices(raw: unknown): {
-  rooms: Record<string, { devices: ParsedDevice[] }>;
-} {
-  const rooms: Record<string, { devices: ParsedDevice[] }> = {};
-  const accessories =
-    raw && typeof raw === 'object' && 'accessories' in raw
-      ? (raw as { accessories: unknown[] }).accessories
-      : raw;
-  if (!Array.isArray(accessories)) return { rooms };
-
-  for (const accessory of accessories) {
-    const room = accessory.room || 'Default Room';
-    const name = accessory.name || 'Unknown';
-    const reachable = accessory.reachable !== false;
-
-    const services: {
-      type: string;
-      characteristics: Record<string, unknown>;
-    }[] = [];
-
-    if (Array.isArray(accessory.services)) {
-      for (const svc of accessory.services) {
-        const svcTypeKey = (svc.type || '').substring(0, 8).toUpperCase();
-        if (SKIP_SERVICES.has(svcTypeKey)) continue;
-        const svcName = SERVICE_TYPES[svcTypeKey];
-        if (!svcName) continue;
-
-        const characteristics: Record<string, unknown> = {};
-        if (Array.isArray(svc.characteristics)) {
-          for (const ch of svc.characteristics) {
-            const charTypeKey = (ch.type || '').substring(0, 8).toUpperCase();
-            const charName =
-              CHAR_TYPES[charTypeKey] || CUSTOM_CHAR_TYPES[charTypeKey];
-            if (charName) {
-              characteristics[charName] = ch.value;
-            }
-          }
-        }
-
-        if (Object.keys(characteristics).length > 0) {
-          services.push({ type: svcName, characteristics });
-        }
-      }
-    }
-
-    if (services.length > 0) {
-      if (!rooms[room]) rooms[room] = { devices: [] };
-      rooms[room].devices.push({ name, reachable, services });
-    }
+// SPA fallback — serve index.html for all non-API, non-file routes
+app.setNotFoundHandler(async (request, reply) => {
+  // API 404s return JSON
+  if (request.url.startsWith('/api/')) {
+    reply.code(404);
+    return { error: 'Not found' };
   }
 
-  return { rooms };
-}
-
-const SECURITY_STATES: Record<number, string> = {
-  0: 'Stay Armed',
-  1: 'Away Armed',
-  2: 'Night Armed',
-  3: 'Disarmed',
-  4: 'Alarm Triggered',
-};
-
-function parseSecurityState(raw: unknown): {
-  currentState: number;
-  targetState: number;
-  stateName: string;
-} {
-  const fallback = { currentState: 3, targetState: 3, stateName: 'Disarmed' };
-  const accessories =
-    raw && typeof raw === 'object' && 'accessories' in raw
-      ? (raw as { accessories: unknown[] }).accessories
-      : raw;
-  if (!Array.isArray(accessories)) return fallback;
-
-  for (const accessory of accessories) {
-    if (!Array.isArray(accessory.services)) continue;
-    for (const svc of accessory.services) {
-      const svcTypeKey = (svc.type || '').substring(0, 8).toUpperCase();
-      if (svcTypeKey !== '0000007E') continue;
-
-      let currentState = 3;
-      let targetState = 3;
-      if (Array.isArray(svc.characteristics)) {
-        for (const ch of svc.characteristics) {
-          const charKey = (ch.type || '').substring(0, 8).toUpperCase();
-          if (charKey === '00000066') currentState = ch.value ?? 3;
-          if (charKey === '00000067') targetState = ch.value ?? 3;
-        }
-      }
-      return {
-        currentState,
-        targetState,
-        stateName: SECURITY_STATES[currentState] || 'Unknown',
-      };
-    }
+  // Non-file routes get the SPA index.html (React Router handles routing)
+  const indexPath = path.join(STATIC_DIR, 'index.html');
+  if (fs.existsSync(indexPath)) {
+    return reply.type('text/html').send(fs.readFileSync(indexPath));
   }
 
-  return fallback;
-}
+  // If no index.html, return styled 404
+  reply.code(404).type('text/html');
+  return render404Page();
+});
 
-function sendJson(res: ServerResponse, data: unknown, status = 200): void {
-  res.writeHead(status, {
-    'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
-  });
-  res.end(JSON.stringify(data));
-}
+// --- Graceful shutdown ---
 
-function sendError(res: ServerResponse, status: number, message: string): void {
-  sendJson(res, { error: message }, status);
-}
-
-async function handleApi(
-  req: IncomingMessage,
-  res: ServerResponse,
-  pathname: string,
-): Promise<void> {
-  try {
-    if (pathname === '/api/dashboard') {
-      const url = new URL(req.url!, `http://${req.headers.host}`);
-      const forceRefresh =
-        url.searchParams.get('refresh') === 'true' ||
-        url.searchParams.get('refreshBalances') === 'true';
-      const data = await getDashboardData(forceRefresh);
-      sendJson(res, data);
-    } else if (pathname === '/api/balances') {
-      const data = await getBalances(true);
-      sendJson(res, data);
-    } else if (pathname === '/api/transactions') {
-      const url = new URL(req.url!, `http://${req.headers.host}`);
-      const force = url.searchParams.get('force') === 'true';
-      const data = await getTransactions(force);
-      sendJson(res, data);
-    } else if (pathname === '/api/properties') {
-      const data = loadInvestmentData();
-      sendJson(res, data?.properties || []);
-    } else if (pathname === '/api/properties/save' && req.method === 'POST') {
-      const chunks: Buffer[] = [];
-      req.on('data', (c: Buffer) => chunks.push(c));
-      await new Promise<void>((resolve) => req.on('end', resolve));
-      const props = JSON.parse(Buffer.concat(chunks).toString());
-      const data = loadInvestmentData();
-      if (data) {
-        data.properties = props;
-        saveInvestmentData(data);
-      }
-      sendJson(res, { ok: true });
-    } else if (pathname === '/api/investments') {
-      const url = new URL(req.url!, `http://${req.headers.host}`);
-      const forceRefresh = url.searchParams.get('refresh') === 'true';
-      const data = loadInvestmentData();
-      if (!data) {
-        sendError(
-          res,
-          404,
-          'No investment data. Run import-spreadsheet first.',
-        );
-        return;
-      }
-      // Merge live LM data for current year
-      try {
-        const liveYear = await getLiveCurrentYear(forceRefresh);
-        if (liveYear) {
-          data.years[String(new Date().getFullYear())] = liveYear;
-        }
-      } catch (err) {
-        console.error('Failed to get live account data:', err);
-      }
-      // Include balance cache timestamp so UI can show sync age
-      const balCachedAt = getBalancesCachedAt();
-      sendJson(res, { ...data, cachedAt: { balances: balCachedAt } });
-    } else if (
-      pathname === '/api/investments/update' &&
-      req.method === 'POST'
-    ) {
-      const chunks: Buffer[] = [];
-      req.on('data', (c: Buffer) => chunks.push(c));
-      await new Promise<void>((resolve) => req.on('end', resolve));
-      const body = JSON.parse(Buffer.concat(chunks).toString());
-      const { year, path: fieldPath, value } = body;
-      const updated = updateYearField(year, fieldPath, value);
-      if (!updated) {
-        sendError(res, 400, 'Invalid update');
-        return;
-      }
-      sendJson(res, { ok: true });
-    } else if (pathname === '/api/amazon-matches') {
-      const txResp = await getTransactions();
-      if (!hasAmazonData()) {
-        sendJson(res, {});
-        return;
-      }
-      const matches = matchTransactions(txResp.transactions);
-      sendJson(res, matches);
-    } else if (pathname === '/api/finance/meta') {
-      // User info, categories, tags — everything needed to interpret transactions
-      const meta = await getMeta();
-      sendJson(res, meta);
-    } else if (pathname === '/api/finance/accounts') {
-      // Active accounts with balances
-      const data = await getBalances();
-      sendJson(res, data);
-    } else if (pathname === '/api/finance/transactions') {
-      // Filtered transactions query
-      const url = new URL(req.url!, `http://${req.headers.host}`);
-      const start = url.searchParams.get('start');
-      const end = url.searchParams.get('end');
-      const category = url.searchParams.get('category');
-      const status = url.searchParams.get('status');
-      const payee = url.searchParams.get('payee');
-      const accountId = url.searchParams.get('account_id');
-      const limit = parseInt(url.searchParams.get('limit') || '0', 10);
-
-      const txData = await getTransactions();
-      let filtered = txData.transactions;
-
-      if (start) filtered = filtered.filter((t) => t.date >= start);
-      if (end) filtered = filtered.filter((t) => t.date <= end);
-      if (status) filtered = filtered.filter((t) => t.status === status);
-      if (accountId) {
-        const aid = parseInt(accountId, 10);
-        filtered = filtered.filter((t) => t.plaid_account_id === aid);
-      }
-      if (category) {
-        // Resolve category name to ID(s)
-        const meta = await getMeta();
-        const lowerCat = category.toLowerCase();
-        const matchIds = new Set<number>();
-        for (const cat of meta.categories) {
-          if (cat.name.toLowerCase().includes(lowerCat)) matchIds.add(cat.id);
-          if (cat.children) {
-            for (const child of cat.children) {
-              if (child.name.toLowerCase().includes(lowerCat))
-                matchIds.add(child.id);
-            }
-          }
-        }
-        filtered = filtered.filter(
-          (t) => t.category_id !== null && matchIds.has(t.category_id),
-        );
-      }
-      if (payee) {
-        const lowerPayee = payee.toLowerCase();
-        filtered = filtered.filter(
-          (t) =>
-            t.payee.toLowerCase().includes(lowerPayee) ||
-            t.original_name.toLowerCase().includes(lowerPayee),
-        );
-      }
-
-      // Sort by date descending (newest first)
-      filtered.sort((a, b) => b.date.localeCompare(a.date));
-
-      if (limit > 0) filtered = filtered.slice(0, limit);
-
-      // Hydrate category names
-      const meta = await getMeta();
-      const catMap = new Map<number, string>();
-      for (const cat of meta.categories) {
-        catMap.set(cat.id, cat.name);
-        if (cat.children) {
-          for (const child of cat.children) catMap.set(child.id, child.name);
-        }
-      }
-      const acctMap = new Map<number, string>();
-      const balances = await getBalances();
-      for (const a of balances.accounts) acctMap.set(a.id, a.display_name);
-
-      const hydrated = filtered.map((t) => ({
-        ...t,
-        category_name: t.category_id
-          ? (catMap.get(t.category_id) ?? null)
-          : null,
-        account_name: t.plaid_account_id
-          ? (acctMap.get(t.plaid_account_id) ?? null)
-          : null,
-      }));
-
-      sendJson(res, {
-        transactions: hydrated,
-        count: hydrated.length,
-        totalCount: txData.transactions.length,
-        dateRange: { start: txData.startDate, end: txData.endDate },
-      });
-    } else if (pathname === '/api/finance/summary') {
-      // Spending summary by category for a date range
-      const url = new URL(req.url!, `http://${req.headers.host}`);
-      const start = url.searchParams.get('start');
-      const end = url.searchParams.get('end');
-      if (!start || !end) {
-        sendError(res, 400, 'start and end query params required');
-        return;
-      }
-      const summary = await getSummary(start, end);
-      sendJson(res, summary);
-    } else if (pathname === '/api/health') {
-      const url = new URL(req.url!, `http://${req.headers.host}`);
-      const sinceParam = url.searchParams.get('since');
-      const untilParam = url.searchParams.get('until');
-      const daysParam = url.searchParams.get('days');
-      const opts: { since?: string; until?: string; days?: number } = sinceParam
-        ? { since: sinceParam }
-        : {
-            days: Math.min(Math.max(parseInt(daysParam || '90', 10), 1), 5500),
-          };
-      if (untilParam) opts.until = untilParam;
-      const data = getHealthData(opts);
-      sendJson(res, data);
-    } else if (pathname === '/api/investments/save' && req.method === 'POST') {
-      const chunks: Buffer[] = [];
-      req.on('data', (c: Buffer) => chunks.push(c));
-      await new Promise<void>((resolve) => req.on('end', resolve));
-      const data = JSON.parse(Buffer.concat(chunks).toString());
-      saveInvestmentData(data);
-      sendJson(res, { ok: true });
-    } else if (pathname === '/api/home/devices') {
-      const raw = await fetchItsyhome('/debug/raw');
-      const parsed = parseHomeDevices(raw);
-      sendJson(res, parsed);
-    } else if (pathname === '/api/home/control' && req.method === 'POST') {
-      const chunks: Buffer[] = [];
-      req.on('data', (c: Buffer) => chunks.push(c));
-      await new Promise<void>((resolve) => req.on('end', resolve));
-      const body = JSON.parse(Buffer.concat(chunks).toString());
-      const { room, device, action } = body;
-      if (!room || !device || !['on', 'off', 'toggle'].includes(action)) {
-        sendError(res, 400, 'Required: room, device, action (on|off|toggle)');
-        return;
-      }
-      const encodedRoom = encodeURIComponent(room);
-      const encodedDevice = encodeURIComponent(device);
-      const result = await fetchItsyhome(
-        `/${action}/${encodedRoom}/${encodedDevice}`,
-      );
-      sendJson(res, result);
-    } else if (pathname === '/api/home/security') {
-      const raw = await fetchItsyhome('/debug/raw');
-      const security = parseSecurityState(raw);
-      sendJson(res, security);
-    } else if (pathname === '/api/home/security/set' && req.method === 'POST') {
-      const chunks: Buffer[] = [];
-      req.on('data', (c: Buffer) => chunks.push(c));
-      await new Promise<void>((resolve) => req.on('end', resolve));
-      const body = JSON.parse(Buffer.concat(chunks).toString());
-      const { mode } = body; // 'stay', 'away', 'night', 'disarm'
-      const serviceId = '53D95070-5CA7-502A-AC46-7C67DFB6ED4B';
-      if (mode === 'stay' || mode === 'away') {
-        const result = await fetchItsyhome(`/arm/${mode}/${serviceId}`);
-        sendJson(res, result);
-      } else if (mode === 'night') {
-        const result = await fetchItsyhome(`/arm/night/${serviceId}`);
-        sendJson(res, result);
-      } else if (mode === 'disarm') {
-        const result = await fetchItsyhome(`/disarm/${serviceId}`);
-        sendJson(res, result);
-      } else {
-        sendError(res, 400, 'mode must be stay, away, night, or disarm');
-      }
-    } else if (pathname === '/api/home/lock' && req.method === 'POST') {
-      const chunks: Buffer[] = [];
-      req.on('data', (c: Buffer) => chunks.push(c));
-      await new Promise<void>((resolve) => req.on('end', resolve));
-      const body = JSON.parse(Buffer.concat(chunks).toString());
-      const { action } = body; // 'lock' or 'unlock'
-      if (action === 'lock') {
-        const result = await fetchItsyhome(`/on/Security/Aqara%20Smart%20Lock`);
-        sendJson(res, result);
-      } else if (action === 'unlock') {
-        const result = await fetchItsyhome(
-          `/off/Security/Aqara%20Smart%20Lock`,
-        );
-        sendJson(res, result);
-      } else {
-        sendError(res, 400, 'action must be lock or unlock');
-      }
-    } else {
-      sendError(res, 404, 'Not found');
-    }
-  } catch (err) {
-    console.error('API error:', err);
-    sendError(
-      res,
-      500,
-      err instanceof Error ? err.message : 'Internal server error',
-    );
-  }
-}
-
-function serveStatic(res: ServerResponse, pathname: string): void {
-  let filePath = path.join(
-    STATIC_DIR,
-    pathname === '/' ? 'index.html' : pathname,
-  );
-
-  // Prevent directory traversal
-  if (!filePath.startsWith(STATIC_DIR)) {
-    sendError(res, 403, 'Forbidden');
-    return;
-  }
-
-  if (!fs.existsSync(filePath)) {
-    if (!path.extname(pathname)) {
-      // SPA fallback — serve index.html for all non-file routes
-      filePath = path.join(STATIC_DIR, 'index.html');
-    } else {
-      sendError(res, 404, 'Not found');
-      return;
-    }
-  }
-
-  const ext = path.extname(filePath);
-  const contentType = MIME_TYPES[ext] || 'application/octet-stream';
-
-  try {
-    const content = fs.readFileSync(filePath);
-    res.writeHead(200, { 'Content-Type': contentType });
-    res.end(content);
-  } catch {
-    sendError(res, 404, 'Not found');
-  }
-}
-
-const server = createServer(async (req, res) => {
-  const url = new URL(req.url || '/', `http://${req.headers.host}`);
-  const pathname = url.pathname;
-
-  if (pathname.startsWith('/api/')) {
-    await handleApi(req, res, pathname);
+closeWithGrace({ delay: 5000 }, async ({ signal, err }) => {
+  if (err) {
+    app.log.error({ err }, 'Server closing due to error');
   } else {
-    serveStatic(res, pathname);
+    app.log.info({ signal }, 'Server closing due to signal');
   }
+  await app.close();
 });
 
-server.listen(PORT, HOST, () => {
-  console.log(
-    `💰 Tico Dashboard running at http://${HOST}:${PORT} (serving from ${STATIC_DIR})`,
-  );
-});
+// --- Start ---
+
+await app.listen({ port: PORT, host: HOST });
+app.log.info(`💰 Tico Dashboard serving from ${STATIC_DIR}`);

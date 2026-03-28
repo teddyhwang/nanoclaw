@@ -20,6 +20,9 @@ Single Node.js process with skill-based channel system. Channels (WhatsApp, Tele
 | `src/db.ts` | SQLite operations |
 | `groups/{name}/CLAUDE.md` | Per-group memory (isolated) |
 | `container/skills/` | Skills loaded inside agent containers (browser, status, formatting) |
+| `src/dashboard/plugins/auth.ts` | Dashboard Google OAuth plugin (Fastify) |
+| `src/dashboard/routes/` | API route handlers (finance, home, health) |
+| `/opt/homebrew/etc/Caddyfile` | Caddy reverse proxy config for dashboard |
 
 ## Secrets / Credentials / Proxy (OneCLI)
 
@@ -75,12 +78,22 @@ systemctl --user stop nanoclaw
 systemctl --user restart nanoclaw
 ```
 
+All launchd services:
+| Service | Plist | Purpose |
+|---|---|---|
+| `com.nanoclaw` | `~/Library/LaunchAgents/com.nanoclaw.plist` | Core message loop + agent |
+| `com.nanoclaw.dev-agent` | `~/Library/LaunchAgents/com.nanoclaw.dev-agent.plist` | Pi dev session (RPC) |
+| `com.nanoclaw.dashboard` | `~/Library/LaunchAgents/com.nanoclaw.dashboard.plist` | Node dashboard server (localhost:3002) |
+| `com.nanoclaw.caddy` | `~/Library/LaunchAgents/com.nanoclaw.caddy.plist` | Caddy reverse proxy (port 80) |
+
 ### When to restart vs just build
 
 | What changed | Action needed |
 |---|---|
 | Dashboard UI only (components, styles) | `npm run build` — Vite output is served as static files, no restart |
-| Dashboard server (`src/dashboard/server.ts`) | `npm run build` + restart dashboard |
+| Dashboard server (`src/dashboard/server.ts`) | Restart dashboard |
+| Dashboard auth/routes (`src/dashboard/plugins/`, `src/dashboard/routes/`) | Restart dashboard |
+| Caddy config (`/opt/homebrew/etc/Caddyfile`) | Restart caddy (`launchctl unload/load` the caddy plist) |
 | Core nanoclaw (`src/*.ts`, not dashboard) | `npm run build` + restart nanoclaw |
 | Container skills (`container/skills/`) | Nothing — skills are copied into containers at launch |
 | `groups/*/CLAUDE.md` | Nothing — mounted into containers, read on each session |
@@ -88,7 +101,26 @@ systemctl --user restart nanoclaw
 
 **Use `./scripts/restart.sh`** when services need restarting. It handles all three services, avoids the port-in-use race that `launchctl kickstart` can hit, and verifies everything is running. For **UI-only changes**, just `npm run build` is enough — no restart needed.
 
+## Dashboard
+
+The Tico Dashboard runs behind Caddy as a reverse proxy:
+
+```
+Internet → Cloudflare (HTTPS) → port 80 → Caddy → localhost:3002 (Node)
+   LAN   → teddys-mac-mini.local:80     → Caddy → localhost:3002 (Node)
+```
+
+- **Public URL:** `https://dashboard.teddyhwang.com` (Cloudflare DNS, CNAME → `teddyhwang.hopto.org`)
+- **LAN URL:** `http://teddys-mac-mini.local` (port 80)
+- **Auth:** Google OAuth 2.0, restricted to `DASHBOARD_ALLOWED_EMAIL`
+- **Caddy config:** `/opt/homebrew/etc/Caddyfile` — security headers, compression, reverse proxy
+- **Node binds to `127.0.0.1:3002`** — not directly accessible from network
+- **Cloudflare SSL mode:** Flexible (TLS terminated at edge, HTTP to origin)
+- **Port forward:** router 80 → 192.168.1.221:80
+
 ## Troubleshooting
+
+**Dashboard assets returning `text/html` after auth/config changes:** Cloudflare may have cached redirect responses for asset URLs. Purge the cache: Cloudflare dashboard → teddyhwang.com → Caching → Configuration → Purge Everything. Normal Vite rebuilds don't need this (hashed filenames are unique per build).
 
 **WhatsApp not connecting after upgrade:** WhatsApp is now a separate skill, not bundled in core. Run `/add-whatsapp` (or `npx tsx scripts/apply-skill.ts .claude/skills/add-whatsapp && npm run build`) to install it. Existing auth credentials and groups are preserved.
 
