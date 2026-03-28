@@ -449,7 +449,7 @@ async function main() {
   console.log(`✓ (${data.predictionModel.years.length} rows)`);
 
   saveInvestmentData(data);
-  console.log(`\n✅ Saved to db/investments.json`);
+  console.log(`\n✅ Saved to nanoclaw.db (investments table)`);
 }
 
 main().catch(console.error);

@@ -38,5 +38,5 @@ groups/global/*
 agents-sdk-docs
 
 
-# Database (stored in iCloud)
-db/
+# Database (stored in iCloud via symlinks)
+# store/ already ignored above via "Local data & auth"

@@ -2,9 +2,9 @@
  * Lunch Money API client with local file-based caching.
  *
  * Cache strategy:
- *   - Transactions: cached in db/lm-transactions.json, refreshed at most once/day
- *   - Balances (plaid + manual accounts): cached in db/lm-balances.json, refreshed every hour
- *   - Categories/Tags/User: cached in db/lm-meta.json, refreshed daily
+ *   - Transactions: cached in store (nanoclaw.db), refreshed at most once/day
+ *   - Balances (plaid + manual accounts): cached in store (nanoclaw.db), refreshed every hour
+ *   - Categories/Tags/User: cached in store (nanoclaw.db), refreshed daily
  */
 import fs from 'fs';
 import path from 'path';

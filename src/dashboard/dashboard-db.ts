@@ -10,7 +10,7 @@ import path from 'path';
 
 import type { InvestmentData } from './investments.js';
 
-const DB_DIR = path.resolve(process.cwd(), 'db');
+const DB_DIR = path.resolve(process.cwd(), 'store');
 const DB_PATH = path.join(DB_DIR, 'nanoclaw.db');
 
 let db: Database.Database;

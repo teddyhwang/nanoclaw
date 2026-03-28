@@ -1,7 +1,7 @@
 /**
  * Investment data model and persistence.
  *
- * Stores yearly investment tracking data in db/investments.json.
+ * Stores yearly investment tracking data in store (nanoclaw.db).
  * Data is imported from the Google Sheets spreadsheet and can be
  * edited via the dashboard UI.
  */
