@@ -157,8 +157,9 @@ export function FinancePage({ initialData }: Props) {
         properties={data.properties}
         transactions={data.transactions}
         categoryMap={categoryMap}
+        categoryGroupMap={categoryGroupMap}
         debitsNeg={debitsNeg}
-        dateRange={filters.dateRange}
+        filters={filters}
       />
       <div className="dash-grid">
         <AccountsPanel accounts={data.accounts} />

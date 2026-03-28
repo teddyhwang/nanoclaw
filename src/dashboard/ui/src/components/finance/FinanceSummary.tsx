@@ -1,18 +1,21 @@
-import type { Account, Property, Transaction } from '../../types';
-import type { CategoryMap } from '../../utils/categories';
+import type { Account, Property, Transaction, FilterState } from '../../types';
+import type { CategoryMap, CategoryGroupMap } from '../../utils/categories';
 import { normType } from '../../utils/accounts';
-import { spendAmt, isSpend, isIncome } from '../../utils/categories';
+import { spendAmt, isSpend, isIncome, getCategoryGroup } from '../../utils/categories';
 import { fmt } from '../../utils/format';
 import { usePrivacy } from '../../contexts/PrivacyContext';
 import { getDateRange } from '../../utils/dates';
+import { EXCLUDED_CATS } from '../../constants';
+import { useMemo } from 'react';
 
 interface Props {
   accounts: Account[];
   properties: Property[];
   transactions: Transaction[];
   categoryMap: CategoryMap;
+  categoryGroupMap: CategoryGroupMap;
   debitsNeg: boolean;
-  dateRange: string;
+  filters: FilterState;
 }
 
 export function FinanceSummary({
@@ -20,8 +23,9 @@ export function FinanceSummary({
   properties,
   transactions,
   categoryMap,
+  categoryGroupMap,
   debitsNeg,
-  dateRange,
+  filters,
 }: Props) {
   const { privacyMode } = usePrivacy();
 
@@ -38,16 +42,43 @@ export function FinanceSummary({
   totals.property = propValuation - loanTotal;
   const netWorth = Object.values(totals).reduce((s, v) => s + v, 0);
 
-  const { from: ms, to: me } = getDateRange(dateRange);
-  let income = 0;
-  let spent = 0;
-  for (const tx of transactions) {
-    if (tx.date < ms || tx.date > me) continue;
-    const amt = spendAmt(tx, debitsNeg);
-    if (isIncome(tx, categoryMap)) income += Math.abs(amt);
-    else if (isSpend(tx, categoryMap, debitsNeg)) spent += amt;
-  }
-  const net = income - spent;
+  const { income, spent, net } = useMemo(() => {
+    const { from: ms, to: me } = getDateRange(filters.dateRange);
+    const hasChartFilter =
+      !!filters.day || !!filters.weekStart || !!filters.category || !!filters.merchant;
+
+    let inc = 0;
+    let sp = 0;
+    for (const tx of transactions) {
+      if (tx.date < ms || tx.date > me) continue;
+      if (hasChartFilter) {
+        const c = categoryMap[tx.category_id];
+        if (c && EXCLUDED_CATS.includes(c.name.toLowerCase())) continue;
+      }
+      if (filters.day && tx.date !== filters.day) continue;
+      if (filters.weekStart && (tx.date < filters.weekStart || tx.date > (filters.weekEnd || '')))
+        continue;
+      if (filters.category) {
+        const cn = getCategoryGroup(tx.category_id, categoryMap, categoryGroupMap);
+        if (cn !== filters.category) continue;
+      }
+      if (filters.merchant) {
+        const p = tx.payee || tx.original_name || '';
+        if (p !== filters.merchant) continue;
+      }
+      if (
+        filters.search &&
+        !(tx.payee || '').toLowerCase().includes(filters.search) &&
+        !(tx.original_name || '').toLowerCase().includes(filters.search)
+      ) continue;
+      if (filters.catId && tx.category_id !== Number(filters.catId)) continue;
+
+      const amt = spendAmt(tx, debitsNeg);
+      if (isIncome(tx, categoryMap)) inc += Math.abs(amt);
+      else if (isSpend(tx, categoryMap, debitsNeg)) sp += amt;
+    }
+    return { income: inc, spent: sp, net: inc - sp };
+  }, [transactions, filters, categoryMap, categoryGroupMap, debitsNeg]);
 
   return (
     <div className="finance-summary">

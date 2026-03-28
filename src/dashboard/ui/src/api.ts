@@ -3,9 +3,7 @@ import type { DashboardData, InvestmentData, HealthData } from './types';
 export async function fetchDashboard(
   forceRefresh = false,
 ): Promise<DashboardData> {
-  const url = forceRefresh
-    ? '/api/dashboard?refresh=true'
-    : '/api/dashboard';
+  const url = forceRefresh ? '/api/dashboard?refresh=true' : '/api/dashboard';
   const r = await fetch(url);
   if (!r.ok) throw new Error(await r.text());
   return r.json();
