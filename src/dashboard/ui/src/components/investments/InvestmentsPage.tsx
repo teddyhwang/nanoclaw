@@ -18,6 +18,7 @@ import {
 import type { InvestmentData } from '../../types';
 import { fetchInvestments, updateInvestmentField, saveInvestmentData } from '../../api';
 import { COLORS } from '../../constants';
+import { relTime } from '../../utils/format';
 import { SubNav, PageContent } from '@/components/shared';
 import subNavStyles from '@/components/shared/SubNav.module.css';
 import { Layout } from '../Layout';
@@ -54,6 +55,13 @@ export function InvestmentsPage({ initialData }: Props) {
     () => Object.keys(data.years).sort((a, b) => Number(b) - Number(a)),
     [data.years],
   );
+
+  const syncInfo = useMemo(() => {
+    const currentYear = String(new Date().getFullYear());
+    const updatedAt = data.years[currentYear]?.trends?.updatedAt;
+    if (!updatedAt) return null;
+    return `synced ${relTime(updatedAt)}`;
+  }, [data]);
 
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -122,6 +130,12 @@ export function InvestmentsPage({ initialData }: Props) {
             {y}
           </NavLink>
         ))}
+        {syncInfo && (
+          <>
+            <SubNav.Separator />
+            <SubNav.Info>{syncInfo}</SubNav.Info>
+          </>
+        )}
       </SubNav>
 
       <PageContent style={{ padding: 'var(--g)', display: 'flex', flexDirection: 'column' }}>
