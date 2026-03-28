@@ -149,7 +149,6 @@ export function TransactionsPanel({
         if (prev.col === col) return { col, dir: (prev.dir * -1) as 1 | -1 };
         return { col, dir: col === 'amount' ? -1 : 1 };
       });
-      setPage(0);
     },
     [onSetTxSort],
   );

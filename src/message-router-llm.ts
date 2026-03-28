@@ -11,7 +11,10 @@
 import http from 'http';
 import { spawn } from 'child_process';
 import { logger } from './logger.js';
-import { CREDENTIAL_PROXY_PORT } from './config.js';
+const CREDENTIAL_PROXY_PORT = parseInt(
+  process.env.CREDENTIAL_PROXY_PORT || '3001',
+  10,
+);
 
 export type RouteDecision = 'dev' | 'assistant';
 
