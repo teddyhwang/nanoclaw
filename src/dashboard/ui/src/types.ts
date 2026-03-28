@@ -202,6 +202,19 @@ export interface YearData {
   debt: Record<string, number> & { totalDebt: number };
   subtotal: number;
   taxBrackets: TaxBracket[];
+  trends?: {
+    totalReturn: {
+      previous: number;
+      current: number;
+      direction: 'up' | 'down' | 'flat';
+    };
+    totalInvestments: {
+      previous: number;
+      current: number;
+      direction: 'up' | 'down' | 'flat';
+    };
+    updatedAt: string;
+  };
 }
 
 export interface PredictionYear {
