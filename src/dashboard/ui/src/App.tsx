@@ -7,6 +7,7 @@ import { Loading } from './components/Loading';
 import { FinancePage } from './components/finance/FinancePage';
 import { InvestmentsPage } from './components/investments/InvestmentsPage';
 import { HealthPage } from './components/health/HealthPage';
+import { HomePage } from './components/home/HomePage';
 
 export function App() {
   const [financeData, setFinanceData] = useState<DashboardData | null>(null);
@@ -38,8 +39,9 @@ export function App() {
     <PrivacyProvider>
       <BrowserRouter>
         <Routes>
+          <Route path="/" element={<HomePage />} />
           <Route
-            path="/"
+            path="/finance"
             element={
               financeData ? (
                 <FinancePage initialData={financeData} />

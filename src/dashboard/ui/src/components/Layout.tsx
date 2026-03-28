@@ -1,6 +1,6 @@
 import { type ReactNode } from 'react';
 import { NavLink } from 'react-router-dom';
-import { Wallet, Eye, EyeOff, RefreshCw, Heart } from 'lucide-react';
+import { Wallet, Eye, EyeOff, RefreshCw, Heart, Home } from 'lucide-react';
 import { usePrivacy } from '../contexts/PrivacyContext';
 import { useLocation } from 'react-router-dom';
 
@@ -14,8 +14,9 @@ interface LayoutProps {
 export function Layout({ children, headerRight, refreshing, onRefresh }: LayoutProps) {
   const { privacyMode, togglePrivacy } = usePrivacy();
   const location = useLocation();
+  const isHome = location.pathname === '/';
   const isHealth = location.pathname.startsWith('/health');
-  const LogoIcon = isHealth ? Heart : Wallet;
+  const LogoIcon = isHome ? Home : isHealth ? Heart : Wallet;
 
   return (
     <div id="app">
@@ -24,6 +25,9 @@ export function Layout({ children, headerRight, refreshing, onRefresh }: LayoutP
           <LogoIcon className="logo-icon" size={20} />
           <nav className="top-nav">
             <NavLink to="/" end className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}>
+              Home
+            </NavLink>
+            <NavLink to="/finance" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}>
               Finance
             </NavLink>
             <NavLink to="/investments" className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`}>

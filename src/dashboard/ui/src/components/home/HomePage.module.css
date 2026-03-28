@@ -1,0 +1,319 @@
+/* ── Home page — smart home dashboard ──────────────────────── */
+
+/* ── Security section (inside Security room panel) ─────────── */
+.securitySection {
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.securityStatus {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.securityIcon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.securityState {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  flex: 1;
+}
+
+.statusDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.statusDot.armed {
+  background: var(--green);
+  box-shadow: 0 0 8px rgba(170, 217, 76, 0.5);
+}
+
+.statusDot.disarmed {
+  background: var(--yellow);
+  box-shadow: 0 0 8px rgba(255, 180, 84, 0.4);
+}
+
+.statusDot.triggered {
+  background: var(--red);
+  box-shadow: 0 0 12px rgba(240, 113, 120, 0.6);
+  animation: pulse 1s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
+/* ── Security mode buttons ─────────────────────────────────── */
+.securityModes {
+  display: flex;
+  gap: 6px;
+}
+
+.modeBtn {
+  flex: 1;
+  padding: 6px 10px;
+  border-radius: var(--r);
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+
+.modeBtn:hover:not(:disabled) {
+  border-color: var(--border-lit);
+  background: var(--bg-hover);
+  color: var(--text-hi);
+}
+
+.modeBtn:disabled {
+  cursor: default;
+}
+
+.modeActive {
+  background: rgba(170, 217, 76, 0.12);
+  border-color: rgba(170, 217, 76, 0.4);
+  color: var(--green);
+  box-shadow: 0 0 8px rgba(170, 217, 76, 0.1);
+}
+
+.modeSetting {
+  opacity: 0.7;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.spinning {
+  animation: spin 0.7s linear infinite;
+}
+
+/* ── Room temperature in header ────────────────────────────── */
+.roomTemp {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--cyan);
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* ── Room grid ─────────────────────────────────────────────── */
+.roomGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--g);
+}
+
+/* ── Room card ─────────────────────────────────────────────── */
+.deviceList {
+  padding: 6px 0;
+}
+
+.deviceRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 14px;
+  transition: background 0.15s;
+  min-height: 36px;
+}
+
+.deviceRow:hover {
+  background: var(--bg-hover);
+}
+
+.deviceIcon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--muted);
+}
+
+.deviceIcon.active {
+  color: var(--yellow);
+  filter: drop-shadow(0 0 4px rgba(255, 180, 84, 0.4));
+}
+
+.deviceIcon.open {
+  color: var(--orange);
+}
+
+.deviceIcon.locked {
+  color: var(--green);
+}
+
+.deviceIcon.unlocked {
+  color: var(--red);
+}
+
+.deviceIcon.leak {
+  color: var(--red);
+  filter: drop-shadow(0 0 4px rgba(240, 113, 120, 0.4));
+  animation: pulse 1s ease-in-out infinite;
+}
+
+.deviceName {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text-hi);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.battery {
+  font-size: 11px;
+  color: var(--muted);
+  margin-left: 6px;
+}
+
+.deviceValue {
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.toggleBtn {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  flex-shrink: 0;
+  padding: 0;
+}
+
+.toggleBtn:hover {
+  border-color: var(--border-lit);
+  background: var(--bg-hover);
+}
+
+.toggleBtn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.toggleBtn.on {
+  background: rgba(255, 180, 84, 0.15);
+  border-color: rgba(255, 180, 84, 0.4);
+  color: var(--yellow);
+  box-shadow: 0 0 8px rgba(255, 180, 84, 0.2);
+}
+
+.toggleBtn.lockWarn {
+  border-color: rgba(240, 113, 120, 0.3);
+  color: var(--red);
+}
+
+.toggleBtn.lockWarn:hover {
+  border-color: rgba(240, 113, 120, 0.5);
+  background: rgba(240, 113, 120, 0.1);
+}
+
+.unreachable {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+/* ── Page sections ─────────────────────────────────────────── */
+.sections {
+  display: flex;
+  flex-direction: column;
+  gap: var(--g);
+  padding: var(--g);
+  max-width: 1400px;
+  margin: 0 auto;
+  width: 100%;
+}
+
+/* ── Now Playing ───────────────────────────────────────────── */
+.nowPlaying {
+  padding-bottom: 4px;
+}
+
+.playbackIcon {
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.mediaInfo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 14px 4px 40px;
+}
+
+.mediaTitle {
+  font-size: 12px;
+  color: var(--cyan);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+
+.mediaTime {
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* ── Responsive ────────────────────────────────────────────── */
+@media (max-width: 640px) {
+  .roomGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .securityState {
+    font-size: 13px;
+  }
+
+  .securityModes {
+    flex-wrap: wrap;
+  }
+
+  .modeBtn {
+    min-width: calc(50% - 3px);
+  }
+}

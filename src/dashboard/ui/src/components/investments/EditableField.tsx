@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useRef, useEffect } from 'react';
 import { fmtFull } from '../../utils/format';
 import { usePrivacy } from '../../contexts/PrivacyContext';
 
@@ -11,6 +11,13 @@ interface Props {
 export function EditableField({ value, onSave, className = 'editable' }: Props) {
   const { privacyMode } = usePrivacy();
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Sync displayed value when the prop changes (e.g. switching years)
+  useEffect(() => {
+    if (inputRef.current && document.activeElement !== inputRef.current) {
+      inputRef.current.value = fmtFull(value, privacyMode);
+    }
+  }, [value, privacyMode]);
 
   return (
     <input

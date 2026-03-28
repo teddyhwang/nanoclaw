@@ -25,9 +25,9 @@ export function SummaryStats({ data: d, liveBadge }: Props) {
   const nicoleTax = d.salary.nicole.actualTax;
   const totalNet = teddyGross + nicoleGross - teddyTax - nicoleTax;
   const teddyNetContrib =
-    d.contributions.rrsp.teddy + d.contributions.tfsa.teddy - d.contributions.tfsaWithdrawals.teddy;
+    d.contributions.rrsp.teddy + d.contributions.tfsa.teddy + d.contributions.tfsaWithdrawals.teddy;
   const nicoleNetContrib =
-    d.contributions.rrsp.nicole + d.contributions.tfsa.nicole - d.contributions.tfsaWithdrawals.nicole;
+    d.contributions.rrsp.nicole + d.contributions.tfsa.nicole + d.contributions.tfsaWithdrawals.nicole;
   const totalContrib = teddyNetContrib + nicoleNetContrib + d.contributions.respContributions;
 
   const badge = liveBadge ? <span className="live-badge">LIVE</span> : null;

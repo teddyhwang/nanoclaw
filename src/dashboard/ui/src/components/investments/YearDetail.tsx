@@ -40,8 +40,8 @@ export function YearDetail({ year, data, onUpdateField }: Props) {
   const totalTax = teddyTax + nicoleTax;
   const totalNet = totalGross - totalTax;
   const totalRefund = teddyRefund + nicoleRefund;
-  const teddyNetContrib = d.contributions.rrsp.teddy + d.contributions.tfsa.teddy - d.contributions.tfsaWithdrawals.teddy;
-  const nicoleNetContrib = d.contributions.rrsp.nicole + d.contributions.tfsa.nicole - d.contributions.tfsaWithdrawals.nicole;
+  const teddyNetContrib = d.contributions.rrsp.teddy + d.contributions.tfsa.teddy + d.contributions.tfsaWithdrawals.teddy;
+  const nicoleNetContrib = d.contributions.rrsp.nicole + d.contributions.tfsa.nicole + d.contributions.tfsaWithdrawals.nicole;
   const totalContrib = teddyNetContrib + nicoleNetContrib + d.contributions.respContributions;
 
   const debtEntries = Object.entries(d.debt).filter(([k]) => k !== 'totalDebt' && d.debt[k] !== 0);
