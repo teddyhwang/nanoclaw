@@ -5,15 +5,11 @@
  * the current year's account data is computed from live balances instead
  * of the static import.
  */
-import fs from 'fs';
-import path from 'path';
 import { getBalances, LMAccount } from './lunchmoney.js';
 import { loadInvestmentData, YearData } from './investments.js';
+import { getTrends, saveTrends as saveTrendsDb } from './dashboard-db.js';
 
 // ── Trend tracking ──────────────────────────────────────────
-
-const DB_DIR = path.resolve(process.cwd(), 'db');
-const TRENDS_FILE = path.join(DB_DIR, 'investment-trends.json');
 
 export interface TrendData {
   totalReturn: {
@@ -33,16 +29,15 @@ function loadTrends(): {
   totalReturn: number;
   totalInvestments: number;
 } | null {
-  try {
-    if (!fs.existsSync(TRENDS_FILE)) return null;
-    const data = JSON.parse(fs.readFileSync(TRENDS_FILE, 'utf-8'));
-    return {
-      totalReturn: data.totalReturn?.current ?? null,
-      totalInvestments: data.totalInvestments?.current ?? null,
-    };
-  } catch {
-    return null;
-  }
+  const data = getTrends<{
+    totalReturn: { current: number };
+    totalInvestments: { current: number };
+  }>();
+  if (!data) return null;
+  return {
+    totalReturn: data.totalReturn?.current ?? null,
+    totalInvestments: data.totalInvestments?.current ?? null,
+  };
 }
 
 function saveTrends(totalReturn: number, totalInvestments: number): TrendData {
@@ -71,8 +66,7 @@ function saveTrends(totalReturn: number, totalInvestments: number): TrendData {
     updatedAt: new Date().toISOString(),
   };
 
-  fs.mkdirSync(DB_DIR, { recursive: true });
-  fs.writeFileSync(TRENDS_FILE, JSON.stringify(trends, null, 2));
+  saveTrendsDb(trends);
   return trends;
 }
 

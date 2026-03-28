@@ -150,6 +150,15 @@ A personal Claude assistant accessible via messaging, with minimal custom code.
 - Screenshots, PDFs, video recording
 - Authentication state persistence
 
+### Data Storage
+- Three SQLite databases, each with a distinct purpose:
+  - `store/messages.db` — Core messaging: chats, messages, registered groups, scheduled tasks, sessions, router state
+  - `db/nanoclaw.db` — Dashboard + dev-agent: API caches (LunchMoney transactions/balances/meta), investment tracking, investment trends, Amazon order matching, dev-agent state/status
+  - `db/health.db` — Health data (Apple Health imports, large dataset)
+- All dashboard and dev-agent data consolidated into `db/nanoclaw.db` via `src/dashboard/dashboard-db.ts`
+- No JSON file stores — all persistent data uses SQLite
+- Both dashboard server and dev-agent process open their own connections to `db/nanoclaw.db`
+
 ---
 
 ## Setup & Customization

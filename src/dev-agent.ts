@@ -15,16 +15,20 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
+import {
+  initDashboardDb,
+  getDevAgentState,
+  setDevAgentState,
+  getAllDevAgentState,
+  setDevAgentStatus,
+} from './dashboard/dashboard-db.js';
 
 const QUEUE_DIR = path.join(os.homedir(), '.config', 'nanoclaw', 'pi-queue');
 const OUTBOX_DIR = path.join(os.homedir(), '.config', 'nanoclaw', 'pi-outbox');
 const SESSION_DIR = path.join(process.cwd(), '.pi', 'dev-session');
 const LOG_DIR = path.join(process.cwd(), 'logs');
-const DB_DIR = path.join(process.cwd(), 'db');
-const STATE_FILE = path.join(DB_DIR, 'dev-agent-state.json');
 const LEGACY_STATE_FILE = path.join(LOG_DIR, 'dev-agent-state.json');
 const RPC_TRACE_LOG = path.join(LOG_DIR, 'dev-agent.rpc.jsonl');
-const STATUS_FILE = path.join(DB_DIR, 'dev-agent-status.json');
 const POLL_MS = 500;
 const PROJECT_DIR = process.cwd();
 type ModelConfig = {
@@ -111,7 +115,7 @@ function writeStatus() {
     }
     const cooldowns = describeActiveCooldowns();
     if (cooldowns) status.cooldowns = cooldowns;
-    fs.writeFileSync(STATUS_FILE, JSON.stringify(status, null, 2));
+    setDevAgentStatus(status);
   } catch {
     // ignore status write failures
   }
@@ -142,35 +146,51 @@ function ensureDirs() {
   fs.mkdirSync(OUTBOX_DIR, { recursive: true });
   fs.mkdirSync(SESSION_DIR, { recursive: true });
   fs.mkdirSync(LOG_DIR, { recursive: true });
-  fs.mkdirSync(DB_DIR, { recursive: true });
 }
 
 function loadState() {
   try {
-    const statePath = fs.existsSync(STATE_FILE)
-      ? STATE_FILE
-      : fs.existsSync(LEGACY_STATE_FILE)
-        ? LEGACY_STATE_FILE
-        : STATE_FILE;
-    const state = JSON.parse(fs.readFileSync(statePath, 'utf-8')) as {
-      forceFallbackUntil?: string | null;
-      openAICooldownUntil?: string | null;
-      preferredModel?: ModelConfig | null;
-    };
-    forceFallbackUntil = state.forceFallbackUntil || null;
-    openAICooldownUntil = state.openAICooldownUntil || null;
-    preferredModel =
-      state.preferredModel && isKnownModel(state.preferredModel)
-        ? state.preferredModel
-        : PRIMARY_MODEL;
+    // Check for legacy file migration first
+    if (fs.existsSync(LEGACY_STATE_FILE)) {
+      const legacyState = JSON.parse(
+        fs.readFileSync(LEGACY_STATE_FILE, 'utf-8'),
+      ) as {
+        forceFallbackUntil?: string | null;
+        openAICooldownUntil?: string | null;
+        preferredModel?: ModelConfig | null;
+      };
+      forceFallbackUntil = legacyState.forceFallbackUntil || null;
+      openAICooldownUntil = legacyState.openAICooldownUntil || null;
+      preferredModel =
+        legacyState.preferredModel && isKnownModel(legacyState.preferredModel)
+          ? legacyState.preferredModel
+          : PRIMARY_MODEL;
 
-    if (statePath === LEGACY_STATE_FILE) {
+      // Save to SQLite and delete legacy file
       saveState();
       try {
         fs.unlinkSync(LEGACY_STATE_FILE);
       } catch {
         // ignore cleanup failures
       }
+      return;
+    }
+
+    // Load from SQLite
+    const state = getAllDevAgentState();
+    forceFallbackUntil = state.forceFallbackUntil || null;
+    openAICooldownUntil = state.openAICooldownUntil || null;
+
+    // Parse preferredModel from JSON string
+    if (state.preferredModel) {
+      try {
+        const parsed = JSON.parse(state.preferredModel) as ModelConfig;
+        preferredModel = isKnownModel(parsed) ? parsed : PRIMARY_MODEL;
+      } catch {
+        preferredModel = PRIMARY_MODEL;
+      }
+    } else {
+      preferredModel = PRIMARY_MODEL;
     }
   } catch {
     forceFallbackUntil = null;
@@ -181,14 +201,9 @@ function loadState() {
 
 function saveState() {
   try {
-    fs.writeFileSync(
-      STATE_FILE,
-      JSON.stringify(
-        { forceFallbackUntil, openAICooldownUntil, preferredModel },
-        null,
-        2,
-      ),
-    );
+    setDevAgentState('forceFallbackUntil', forceFallbackUntil);
+    setDevAgentState('openAICooldownUntil', openAICooldownUntil);
+    setDevAgentState('preferredModel', JSON.stringify(preferredModel));
   } catch {
     // ignore state write failures
   }
@@ -1086,6 +1101,7 @@ function scheduleQueuePoll(delayMs: number) {
 
 // Main
 ensureDirs();
+initDashboardDb();
 loadState();
 piProcess = startPi();
 writeStatus();

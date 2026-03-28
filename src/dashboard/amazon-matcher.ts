@@ -5,11 +5,7 @@
  * using date proximity and amount matching. Tries single items first,
  * then full orders, then pair/triple subset sums.
  */
-import fs from 'fs';
-import path from 'path';
-
-const DB_DIR = path.join(process.cwd(), 'db');
-const AMAZON_FILE = path.join(DB_DIR, 'amazon-orders.json');
+import { getAmazonOrders, hasAmazonOrders } from './dashboard-db.js';
 
 interface AmazonItem {
   date: string;
@@ -47,19 +43,8 @@ export interface AmazonMatch {
   match_type: 'item' | 'order' | 'pair' | 'triple' | 'refund';
 }
 
-let cachedData: AmazonData | null = null;
-let cachedMtime = 0;
-
 function loadAmazonData(): AmazonData | null {
-  try {
-    const stat = fs.statSync(AMAZON_FILE);
-    if (cachedData && stat.mtimeMs === cachedMtime) return cachedData;
-    cachedData = JSON.parse(fs.readFileSync(AMAZON_FILE, 'utf-8'));
-    cachedMtime = stat.mtimeMs;
-    return cachedData;
-  } catch {
-    return null;
-  }
+  return getAmazonOrders<AmazonData>();
 }
 
 function daysDiff(a: string, b: string): number {
@@ -192,5 +177,5 @@ export function matchTransactions(
 }
 
 export function hasAmazonData(): boolean {
-  return fs.existsSync(AMAZON_FILE);
+  return hasAmazonOrders();
 }

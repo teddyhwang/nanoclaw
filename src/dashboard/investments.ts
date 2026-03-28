@@ -5,11 +5,7 @@
  * Data is imported from the Google Sheets spreadsheet and can be
  * edited via the dashboard UI.
  */
-import fs from 'fs';
-import path from 'path';
-
-const DB_DIR = path.resolve(process.cwd(), 'db');
-const DATA_FILE = path.join(DB_DIR, 'investments.json');
+import { getInvestments, saveInvestments } from './dashboard-db.js';
 
 // ── Data model ──────────────────────────────────────────────
 
@@ -154,18 +150,12 @@ export interface InvestmentData {
 // ── Persistence ─────────────────────────────────────────────
 
 export function loadInvestmentData(): InvestmentData | null {
-  if (!fs.existsSync(DATA_FILE)) return null;
-  try {
-    return JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8'));
-  } catch {
-    return null;
-  }
+  return getInvestments();
 }
 
 export function saveInvestmentData(data: InvestmentData): void {
-  fs.mkdirSync(DB_DIR, { recursive: true });
   data.lastUpdated = new Date().toISOString();
-  fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
+  saveInvestments(data);
 }
 
 // ── Partial updates (for form edits) ────────────────────────

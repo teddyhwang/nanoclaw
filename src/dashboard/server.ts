@@ -17,6 +17,7 @@ import authPlugin, { render404Page } from './plugins/auth.js';
 import financeRoutes from './routes/finance.js';
 import homeRoutes from './routes/home.js';
 import healthRoutes from './routes/health.js';
+import { initDashboardDb } from './dashboard-db.js';
 
 const PORT = parseInt(process.env.DASHBOARD_PORT || '3002', 10);
 const HOST = process.env.DASHBOARD_HOST || '0.0.0.0';
@@ -35,6 +36,9 @@ const STATIC_DIR = fs.existsSync(REACT_DIST)
   : fs.existsSync(LEGACY_PUBLIC)
     ? LEGACY_PUBLIC
     : LEGACY_PUBLIC;
+
+// Initialize database
+initDashboardDb();
 
 const app = Fastify({
   logger: {

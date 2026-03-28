@@ -17,7 +17,8 @@ Single Node.js process with skill-based channel system. Channels (WhatsApp, Tele
 | `src/config.ts` | Trigger pattern, paths, intervals |
 | `src/container-runner.ts` | Spawns agent containers with mounts |
 | `src/task-scheduler.ts` | Runs scheduled tasks |
-| `src/db.ts` | SQLite operations |
+| `src/db.ts` | SQLite operations (core messaging) |
+| `src/dashboard/dashboard-db.ts` | SQLite operations (dashboard + dev-agent) |
 | `groups/{name}/CLAUDE.md` | Per-group memory (isolated) |
 | `container/skills/` | Skills loaded inside agent containers (browser, status, formatting) |
 | `src/dashboard/plugins/auth.ts` | Dashboard Google OAuth plugin (Fastify) |

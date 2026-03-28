@@ -8,8 +8,14 @@
  */
 import fs from 'fs';
 import path from 'path';
+import {
+  getCache,
+  setCache,
+  isCacheValid,
+  getCacheFetchedAt,
+  getInvestments,
+} from './dashboard-db.js';
 
-const DB_DIR = path.resolve(process.cwd(), 'db');
 const TOKEN_PATH = path.join(
   process.env.HOME || '',
   '.config',
@@ -22,11 +28,6 @@ const API_BASE = 'https://api.lunchmoney.dev/v2';
 const TX_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
 const BALANCE_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
 const META_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
-
-interface CacheFile<T> {
-  fetchedAt: string;
-  data: T;
-}
 
 function getToken(): string {
   return fs.readFileSync(TOKEN_PATH, 'utf-8').trim();
@@ -51,29 +52,6 @@ async function apiFetch<T>(
     );
   }
   return res.json() as Promise<T>;
-}
-
-function readCache<T>(filename: string): CacheFile<T> | null {
-  const filepath = path.join(DB_DIR, filename);
-  if (!fs.existsSync(filepath)) return null;
-  try {
-    return JSON.parse(fs.readFileSync(filepath, 'utf-8'));
-  } catch {
-    return null;
-  }
-}
-
-function writeCache<T>(filename: string, data: T): void {
-  fs.mkdirSync(DB_DIR, { recursive: true });
-  const cache: CacheFile<T> = { fetchedAt: new Date().toISOString(), data };
-  fs.writeFileSync(path.join(DB_DIR, filename), JSON.stringify(cache, null, 2));
-}
-
-function isCacheValid(filename: string, ttlMs: number): boolean {
-  const cache = readCache(filename);
-  if (!cache) return false;
-  const age = Date.now() - new Date(cache.fetchedAt).getTime();
-  return age < ttlMs;
 }
 
 // ── User / Meta ───────────────────────────────────────────────
@@ -104,9 +82,9 @@ export interface LMMeta {
 }
 
 export async function getMeta(forceRefresh = false): Promise<LMMeta> {
-  const CACHE_FILE = 'lm-meta.json';
-  if (!forceRefresh && isCacheValid(CACHE_FILE, META_CACHE_TTL)) {
-    return readCache<LMMeta>(CACHE_FILE)!.data;
+  const CACHE_KEY = 'lm-meta';
+  if (!forceRefresh && isCacheValid(CACHE_KEY, META_CACHE_TTL)) {
+    return getCache<LMMeta>(CACHE_KEY)!.data;
   }
 
   const [user, catRes, tagRes] = await Promise.all([
@@ -120,7 +98,7 @@ export async function getMeta(forceRefresh = false): Promise<LMMeta> {
     categories: catRes.categories,
     tags: tagRes.tags,
   };
-  writeCache(CACHE_FILE, meta);
+  setCache(CACHE_KEY, meta);
   return meta;
 }
 
@@ -145,14 +123,13 @@ export interface LMBalances {
 }
 
 export function getBalancesCachedAt(): string | null {
-  const cache = readCache<LMBalances>('lm-balances.json');
-  return cache?.fetchedAt ?? null;
+  return getCacheFetchedAt('lm-balances');
 }
 
 export async function getBalances(forceRefresh = false): Promise<LMBalances> {
-  const CACHE_FILE = 'lm-balances.json';
-  if (!forceRefresh && isCacheValid(CACHE_FILE, BALANCE_CACHE_TTL)) {
-    return readCache<LMBalances>(CACHE_FILE)!.data;
+  const CACHE_KEY = 'lm-balances';
+  if (!forceRefresh && isCacheValid(CACHE_KEY, BALANCE_CACHE_TTL)) {
+    return getCache<LMBalances>(CACHE_KEY)!.data;
   }
 
   const [plaidRes, manualRes] = await Promise.all([
@@ -170,7 +147,7 @@ export async function getBalances(forceRefresh = false): Promise<LMBalances> {
   ].filter((a) => a.status === 'active');
 
   const balances: LMBalances = { accounts };
-  writeCache(CACHE_FILE, balances);
+  setCache(CACHE_KEY, balances);
   return balances;
 }
 
@@ -204,9 +181,9 @@ export interface LMTransactions {
 export async function getTransactions(
   forceRefresh = false,
 ): Promise<LMTransactions> {
-  const CACHE_FILE = 'lm-transactions.json';
-  if (!forceRefresh && isCacheValid(CACHE_FILE, TX_CACHE_TTL)) {
-    return readCache<LMTransactions>(CACHE_FILE)!.data;
+  const CACHE_KEY = 'lm-transactions';
+  if (!forceRefresh && isCacheValid(CACHE_KEY, TX_CACHE_TTL)) {
+    return getCache<LMTransactions>(CACHE_KEY)!.data;
   }
 
   // Fetch all transactions from LM account start
@@ -237,7 +214,7 @@ export async function getTransactions(
     startDate: fmt(startDate),
     endDate: fmt(endDate),
   };
-  writeCache(CACHE_FILE, data);
+  setCache(CACHE_KEY, data);
   return data;
 }
 
@@ -291,25 +268,10 @@ export async function getDashboardData(
 
   // Load properties from investment data
   let properties: { name: string; value: number }[] = [];
-  try {
-    const fsModule = await import('fs');
-    const pathModule = await import('path');
-    const propFile = pathModule.default.resolve(
-      process.cwd(),
-      'db',
-      'investments.json',
-    );
-    if (fsModule.default.existsSync(propFile)) {
-      const data = JSON.parse(fsModule.default.readFileSync(propFile, 'utf-8'));
-      properties = data.properties || [];
-    }
-  } catch {
-    /* ignore */
+  const investData = getInvestments();
+  if (investData) {
+    properties = investData.properties || [];
   }
-
-  const metaCache = readCache<LMMeta>('lm-meta.json');
-  const balCache = readCache<LMBalances>('lm-balances.json');
-  const txCache = readCache<LMTransactions>('lm-transactions.json');
 
   return {
     user: meta.user,
@@ -319,9 +281,9 @@ export async function getDashboardData(
     properties,
     txDateRange: { start: txData.startDate, end: txData.endDate },
     cachedAt: {
-      meta: metaCache?.fetchedAt ?? null,
-      balances: balCache?.fetchedAt ?? null,
-      transactions: txCache?.fetchedAt ?? null,
+      meta: getCacheFetchedAt('lm-meta'),
+      balances: getCacheFetchedAt('lm-balances'),
+      transactions: getCacheFetchedAt('lm-transactions'),
     },
   };
 }
