@@ -9,6 +9,20 @@
   gap: 8px;
 }
 
+/* ── Mobile: stack header, scroll table ────────────────────── */
+@media (max-width: 768px) {
+  .controls {
+    width: 100%;
+  }
+  .searchInput {
+    flex: 1;
+    width: auto;
+  }
+  .typeFilter {
+    flex-shrink: 0;
+  }
+}
+
 .search {
   position: relative;
   display: flex;

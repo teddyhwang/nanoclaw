@@ -47,3 +47,14 @@
   margin-left: auto;
   flex-shrink: 0;
 }
+
+/* ── Mobile: stack header title and controls ───────────────── */
+@media (max-width: 768px) {
+  .header {
+    flex-wrap: wrap;
+  }
+  .headerRight {
+    width: 100%;
+    margin-left: 0;
+  }
+}
