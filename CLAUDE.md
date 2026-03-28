@@ -75,7 +75,18 @@ systemctl --user stop nanoclaw
 systemctl --user restart nanoclaw
 ```
 
-**Always use `./scripts/restart.sh` after code changes.** It handles all three services (nanoclaw, dev-agent, dashboard), avoids the port-in-use race that `launchctl kickstart` can hit, and verifies everything is running. Don't use `launchctl kickstart` for the dashboard — it races with port cleanup.
+### When to restart vs just build
+
+| What changed | Action needed |
+|---|---|
+| Dashboard UI only (components, styles) | `npm run build` — Vite output is served as static files, no restart |
+| Dashboard server (`src/dashboard/server.ts`) | `npm run build` + restart dashboard |
+| Core nanoclaw (`src/*.ts`, not dashboard) | `npm run build` + restart nanoclaw |
+| Container skills (`container/skills/`) | Nothing — skills are copied into containers at launch |
+| `groups/*/CLAUDE.md` | Nothing — mounted into containers, read on each session |
+| Dev agent (`src/dev-agent.ts`) | Restart dev-agent only |
+
+**Use `./scripts/restart.sh`** when services need restarting. It handles all three services, avoids the port-in-use race that `launchctl kickstart` can hit, and verifies everything is running. For **UI-only changes**, just `npm run build` is enough — no restart needed.
 
 ## Troubleshooting
 

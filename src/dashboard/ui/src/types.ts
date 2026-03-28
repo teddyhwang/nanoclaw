@@ -243,4 +243,5 @@ export interface InvestmentData {
   salaries: SalaryRow[];
   savingsVsSalaries: SavingsVsSalary[];
   properties: Property[];
+  cachedAt?: { balances: string | null };
 }
