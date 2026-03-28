@@ -144,6 +144,11 @@ export interface LMBalances {
   accounts: LMAccount[];
 }
 
+export function getBalancesCachedAt(): string | null {
+  const cache = readCache<LMBalances>('lm-balances.json');
+  return cache?.fetchedAt ?? null;
+}
+
 export async function getBalances(forceRefresh = false): Promise<LMBalances> {
   const CACHE_FILE = 'lm-balances.json';
   if (!forceRefresh && isCacheValid(CACHE_FILE, BALANCE_CACHE_TTL)) {

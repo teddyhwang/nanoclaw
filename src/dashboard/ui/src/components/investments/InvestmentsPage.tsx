@@ -18,6 +18,7 @@ import {
 import type { InvestmentData } from '../../types';
 import { fetchInvestments, updateInvestmentField, saveInvestmentData } from '../../api';
 import { COLORS } from '../../constants';
+// relTime moved to SubNav.SyncInfo
 import { SubNav, PageContent } from '@/components/shared';
 import subNavStyles from '@/components/shared/SubNav.module.css';
 import { Layout } from '../Layout';
@@ -54,6 +55,8 @@ export function InvestmentsPage({ initialData }: Props) {
     () => Object.keys(data.years).sort((a, b) => Number(b) - Number(a)),
     [data.years],
   );
+
+  const balCachedAt = data.cachedAt?.balances ?? null;
 
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -122,6 +125,7 @@ export function InvestmentsPage({ initialData }: Props) {
             {y}
           </NavLink>
         ))}
+        <SubNav.SyncInfo timestamps={{ bal: balCachedAt }} />
       </SubNav>
 
       <PageContent style={{ padding: 'var(--g)', display: 'flex', flexDirection: 'column' }}>
