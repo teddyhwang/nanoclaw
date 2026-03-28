@@ -374,30 +374,19 @@ async function buildContainerArgs(
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
 
-  // Inject Anthropic credentials into the container.
-  // Try OneCLI gateway first; fall back to passing the token directly.
+  // OneCLI gateway handles credential injection — containers never see real secrets.
+  // The gateway intercepts HTTPS traffic and injects API keys or OAuth tokens.
   const onecliApplied = await onecli.applyContainerConfig(args, {
-    addHostMapping: false,
+    addHostMapping: false, // Nanoclaw already handles host gateway
     agent: agentIdentifier,
   });
   if (onecliApplied) {
     logger.info({ containerName }, 'OneCLI gateway config applied');
   } else {
-    // Direct credential injection — pass the host's auth token to the container.
-    const oauthToken = process.env.CLAUDE_CODE_OAUTH_TOKEN;
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (oauthToken) {
-      args.push('-e', `CLAUDE_CODE_OAUTH_TOKEN=${oauthToken}`);
-      logger.info({ containerName }, 'Injected CLAUDE_CODE_OAUTH_TOKEN');
-    } else if (apiKey) {
-      args.push('-e', `ANTHROPIC_API_KEY=${apiKey}`);
-      logger.info({ containerName }, 'Injected ANTHROPIC_API_KEY');
-    } else {
-      logger.warn(
-        { containerName },
-        'No OneCLI and no ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN — container will have no credentials',
-      );
-    }
+    logger.warn(
+      { containerName },
+      'OneCLI gateway not reachable — container will have no credentials',
+    );
   }
 
   // Runtime-specific args for host gateway resolution
