@@ -5,8 +5,76 @@
  * the current year's account data is computed from live balances instead
  * of the static import.
  */
+import fs from 'fs';
+import path from 'path';
 import { getBalances, LMAccount } from './lunchmoney.js';
 import { loadInvestmentData, YearData } from './investments.js';
+
+// ── Trend tracking ──────────────────────────────────────────
+
+const DB_DIR = path.resolve(process.cwd(), 'db');
+const TRENDS_FILE = path.join(DB_DIR, 'investment-trends.json');
+
+export interface TrendData {
+  totalReturn: {
+    previous: number;
+    current: number;
+    direction: 'up' | 'down' | 'flat';
+  };
+  totalInvestments: {
+    previous: number;
+    current: number;
+    direction: 'up' | 'down' | 'flat';
+  };
+  updatedAt: string;
+}
+
+function loadTrends(): {
+  totalReturn: number;
+  totalInvestments: number;
+} | null {
+  try {
+    if (!fs.existsSync(TRENDS_FILE)) return null;
+    const data = JSON.parse(fs.readFileSync(TRENDS_FILE, 'utf-8'));
+    return {
+      totalReturn: data.totalReturn?.current ?? null,
+      totalInvestments: data.totalInvestments?.current ?? null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveTrends(totalReturn: number, totalInvestments: number): TrendData {
+  const prev = loadTrends();
+  const direction = (
+    current: number,
+    previous: number | null,
+  ): 'up' | 'down' | 'flat' => {
+    if (previous === null) return 'flat';
+    if (current > previous) return 'up';
+    if (current < previous) return 'down';
+    return 'flat';
+  };
+
+  const trends: TrendData = {
+    totalReturn: {
+      previous: prev?.totalReturn ?? totalReturn,
+      current: totalReturn,
+      direction: direction(totalReturn, prev?.totalReturn ?? null),
+    },
+    totalInvestments: {
+      previous: prev?.totalInvestments ?? totalInvestments,
+      current: totalInvestments,
+      direction: direction(totalInvestments, prev?.totalInvestments ?? null),
+    },
+    updatedAt: new Date().toISOString(),
+  };
+
+  fs.mkdirSync(DB_DIR, { recursive: true });
+  fs.writeFileSync(TRENDS_FILE, JSON.stringify(trends, null, 2));
+  return trends;
+}
 
 // ── Account mapping ─────────────────────────────────────────
 // Each LM account maps to: type (rrsp/tfsa/other/debt), provider, person
@@ -93,7 +161,9 @@ function mapAccount(account: LMAccount): AccountMapping | null {
 
 // ── Build live year data ────────────────────────────────────
 
-export async function getLiveCurrentYear(): Promise<YearData | null> {
+export async function getLiveCurrentYear(): Promise<
+  (YearData & { trends?: TrendData }) | null
+> {
   const investData = loadInvestmentData();
   if (!investData) return null;
 
@@ -230,9 +300,13 @@ export async function getLiveCurrentYear(): Promise<YearData | null> {
   const currentVsGoal = total - totalGoal;
   const pctDifference = totalGoal ? ((total - totalGoal) / totalGoal) * 100 : 0;
 
+  // Track trends for total return and total investments
+  const trends = saveTrends(totalReturn, total);
+
   // Merge: keep static data for salary/contributions/tax, override accounts/returns/debt
   return {
     ...baseYear,
+    trends,
     accounts: {
       rrsp,
       totalRrsp: {

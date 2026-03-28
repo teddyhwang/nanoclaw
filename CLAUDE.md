@@ -60,7 +60,11 @@ npm run build        # Compile TypeScript
 
 Service management:
 ```bash
-# macOS (launchd)
+# macOS — preferred: use the restart script
+./scripts/restart.sh          # stop, free ports, start, verify
+./scripts/restart.sh --build  # build first, then restart
+
+# macOS — manual (launchd)
 launchctl load ~/Library/LaunchAgents/com.nanoclaw.plist
 launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist
 launchctl kickstart -k gui/$(id -u)/com.nanoclaw  # restart
@@ -70,6 +74,8 @@ systemctl --user start nanoclaw
 systemctl --user stop nanoclaw
 systemctl --user restart nanoclaw
 ```
+
+**Always use `./scripts/restart.sh` after code changes.** It handles all three services (nanoclaw, dev-agent, dashboard), avoids the port-in-use race that `launchctl kickstart` can hit, and verifies everything is running. Don't use `launchctl kickstart` for the dashboard — it races with port cleanup.
 
 ## Troubleshooting
 
