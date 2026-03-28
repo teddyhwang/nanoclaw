@@ -1,11 +1,12 @@
 {
   "name": "nanoclaw",
-  "version": "1.2.21",
+  "version": "1.2.41",
   "description": "Personal Claude assistant. Lightweight, secure, customizable.",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && npm run build:dashboard",
+    "build:dashboard": "cd src/dashboard/ui && npm run build",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "typecheck": "tsc --noEmit",
@@ -18,22 +19,20 @@
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "dashboard": "tsx src/dashboard/server.ts",
+    "import-investments": "tsx src/dashboard/import-spreadsheet.ts"
   },
   "dependencies": {
-    "better-sqlite3": "^11.8.1",
-    "discord.js": "^14.18.0",
-    "cron-parser": "^5.5.0",
-    "pino": "^9.6.0",
-    "pino-pretty": "^13.0.0",
-    "yaml": "^2.8.2",
-    "zod": "^4.3.6"
+    "@onecli-sh/sdk": "^0.2.0",
+    "better-sqlite3": "11.10.0",
+    "cron-parser": "5.5.0",
+    "discord.js": "^14.18.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.35.0",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.10.0",
-    "@vitest/coverage-v8": "^4.0.18",
     "eslint": "^9.35.0",
     "eslint-plugin-no-catch-all": "^1.1.0",
     "globals": "^15.12.0",

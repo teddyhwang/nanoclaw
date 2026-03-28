@@ -1,0 +1,13 @@
+/* ── ChartPanel — fixed-height chart container ─────────────── */
+.chartWrap {
+  flex: 1;
+  padding: 8px;
+  min-height: 0;
+  position: relative;
+}
+
+.chartWrap canvas {
+  width: 100% !important;
+  height: 100% !important;
+  cursor: pointer;
+}

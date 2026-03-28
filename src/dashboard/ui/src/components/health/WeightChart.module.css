@@ -1,0 +1,14 @@
+/* ── Weight chart info badge ───────────────────────────────── */
+.infoBadge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  color: var(--yellow);
+  cursor: help;
+  vertical-align: middle;
+  opacity: 0.8;
+}
+
+.infoBadge:hover {
+  opacity: 1;
+}

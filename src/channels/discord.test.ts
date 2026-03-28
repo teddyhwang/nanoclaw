@@ -692,7 +692,7 @@ describe('DiscordChannel', () => {
       await channel.connect();
 
       const mockChannel = {
-        send: vi.fn().mockResolvedValue(undefined),
+        send: vi.fn().mockResolvedValue({ id: 'msg-1' }),
         sendTyping: vi.fn(),
       };
       currentClient().channels.fetch.mockResolvedValue(mockChannel);

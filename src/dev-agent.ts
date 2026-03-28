@@ -24,16 +24,23 @@ const DB_DIR = path.join(process.cwd(), 'db');
 const STATE_FILE = path.join(DB_DIR, 'dev-agent-state.json');
 const LEGACY_STATE_FILE = path.join(LOG_DIR, 'dev-agent-state.json');
 const RPC_TRACE_LOG = path.join(LOG_DIR, 'dev-agent.rpc.jsonl');
+const STATUS_FILE = path.join(DB_DIR, 'dev-agent-status.json');
 const POLL_MS = 500;
 const PROJECT_DIR = process.cwd();
-const PRIMARY_MODEL = {
+type ModelConfig = {
+  provider: string;
+  modelId: string;
+};
+
+const PRIMARY_MODEL: ModelConfig = {
   provider: 'anthropic',
   modelId: 'claude-opus-4-6',
 };
-const FALLBACK_MODEL = {
+const FALLBACK_MODEL: ModelConfig = {
   provider: 'openai-codex',
   modelId: 'gpt-5.4',
 };
+const KNOWN_MODELS: ModelConfig[] = [PRIMARY_MODEL, FALLBACK_MODEL];
 
 // Track state
 let piProcess: ChildProcess | null = null;
@@ -41,25 +48,73 @@ let isStreaming = false;
 let currentChatJid: string | null = null;
 let responseBuffer = '';
 let currentRouteModel = PRIMARY_MODEL;
+let preferredModel = PRIMARY_MODEL;
 let activePrompt: {
   id: string;
   sourceFile?: string;
+  sourceMessageId?: string;
   chatJid: string | null;
   message: string;
   retriedWithFallback: boolean;
   startedAt: number;
   queuedAs: 'prompt' | 'follow_up';
+  forwardedToPiAt?: number;
+  discordMessageTimestamp?: string;
+  piAcceptedAt?: number;
+  firstAssistantAt?: number;
+  firstTokenAt?: number;
 } | null = null;
 let pendingRetryAfterModelSwitch = false;
 let fallbackSwitchInProgress = false;
 let forceFallbackUntil: string | null = null;
+let openAICooldownUntil: string | null = null;
 let sendDiscordUsedInCurrentRun = false;
 let stdoutBufferRemainder = '';
 let textDeltaCount = 0;
+const STREAM_UPDATE_MIN_INTERVAL_MS = 1000;
+const STREAM_INITIAL_MIN_CHARS = 80;
+const STREAM_UPDATE_MIN_CHARS = 200;
+let lastStreamFlushAt = 0;
+let lastStreamedText = '';
+let streamMessageStarted = false;
+let lastToolName = '';
 
 function log(msg: string) {
   const ts = new Date().toISOString();
   console.error(`[dev-agent ${ts}] ${msg}`);
+}
+
+function writeStatus() {
+  try {
+    const now = Date.now();
+    const status: Record<string, unknown> = {
+      updatedAt: new Date().toISOString(),
+      isStreaming,
+      currentModel: formatModel(currentRouteModel),
+      preferredModel: formatModel(preferredModel),
+      piProcessAlive: piProcess !== null && !piProcess.killed,
+    };
+    if (activePrompt) {
+      status.activePrompt = {
+        id: activePrompt.id,
+        message: activePrompt.message.slice(0, 200),
+        queuedAs: activePrompt.queuedAs,
+        startedAt: new Date(activePrompt.startedAt).toISOString(),
+        elapsedSec: Math.round((now - activePrompt.startedAt) / 1000),
+        retriedWithFallback: activePrompt.retriedWithFallback,
+        textDeltaCount,
+        responseBufferChars: responseBuffer.length,
+        currentTool: lastToolName || null,
+      };
+    } else {
+      status.activePrompt = null;
+    }
+    const cooldowns = describeActiveCooldowns();
+    if (cooldowns) status.cooldowns = cooldowns;
+    fs.writeFileSync(STATUS_FILE, JSON.stringify(status, null, 2));
+  } catch {
+    // ignore status write failures
+  }
 }
 
 function trace(kind: string, data: Record<string, unknown>) {
@@ -75,6 +130,11 @@ function trace(kind: string, data: Record<string, unknown>) {
 
 function summarize(text: string, max = 160) {
   return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+function fmtMs(ms: number | undefined) {
+  if (ms === undefined || Number.isNaN(ms)) return 'n/a';
+  return `${ms}ms`;
 }
 
 function ensureDirs() {
@@ -94,8 +154,15 @@ function loadState() {
         : STATE_FILE;
     const state = JSON.parse(fs.readFileSync(statePath, 'utf-8')) as {
       forceFallbackUntil?: string | null;
+      openAICooldownUntil?: string | null;
+      preferredModel?: ModelConfig | null;
     };
     forceFallbackUntil = state.forceFallbackUntil || null;
+    openAICooldownUntil = state.openAICooldownUntil || null;
+    preferredModel =
+      state.preferredModel && isKnownModel(state.preferredModel)
+        ? state.preferredModel
+        : PRIMARY_MODEL;
 
     if (statePath === LEGACY_STATE_FILE) {
       saveState();
@@ -107,6 +174,8 @@ function loadState() {
     }
   } catch {
     forceFallbackUntil = null;
+    openAICooldownUntil = null;
+    preferredModel = PRIMARY_MODEL;
   }
 }
 
@@ -114,37 +183,195 @@ function saveState() {
   try {
     fs.writeFileSync(
       STATE_FILE,
-      JSON.stringify({ forceFallbackUntil }, null, 2),
+      JSON.stringify(
+        { forceFallbackUntil, openAICooldownUntil, preferredModel },
+        null,
+        2,
+      ),
     );
   } catch {
     // ignore state write failures
   }
 }
 
+function isFutureIso(value: string | null) {
+  return Boolean(value && new Date(value).getTime() > Date.now());
+}
+
 function isForceFallbackActive() {
-  return Boolean(
-    forceFallbackUntil && new Date(forceFallbackUntil).getTime() > Date.now(),
-  );
+  return isFutureIso(forceFallbackUntil);
+}
+
+function isOpenAICooldownActive() {
+  return isFutureIso(openAICooldownUntil);
 }
 
 function clearForceFallbackIfExpired() {
+  let changed = false;
+
   if (
     forceFallbackUntil &&
     new Date(forceFallbackUntil).getTime() <= Date.now()
   ) {
-    log(
-      `Fallback window expired at ${forceFallbackUntil}; returning to primary model`,
-    );
+    log(`Anthropic cooldown expired at ${forceFallbackUntil}`);
     forceFallbackUntil = null;
-    saveState();
+    changed = true;
   }
+
+  if (
+    openAICooldownUntil &&
+    new Date(openAICooldownUntil).getTime() <= Date.now()
+  ) {
+    log(`OpenAI cooldown expired at ${openAICooldownUntil}`);
+    openAICooldownUntil = null;
+    changed = true;
+  }
+
+  if (changed) saveState();
+}
+
+function sameModel(a: ModelConfig, b: ModelConfig) {
+  return a.provider === b.provider && a.modelId === b.modelId;
+}
+
+function isKnownModel(model: ModelConfig) {
+  return KNOWN_MODELS.some((candidate) => sameModel(candidate, model));
+}
+
+function formatModel(model: ModelConfig) {
+  return `${model.provider}/${model.modelId}`;
+}
+
+function isModelCoolingDown(model: { provider: string; modelId: string }) {
+  if (model.provider === 'anthropic') return isForceFallbackActive();
+  if (model.provider === 'openai-codex') return isOpenAICooldownActive();
+  return false;
+}
+
+function isCurrentModel(model: { provider: string; modelId: string }) {
+  return sameModel(currentRouteModel, model);
+}
+
+function getAlternateModel(baseModel = currentRouteModel) {
+  return sameModel(baseModel, PRIMARY_MODEL) ? FALLBACK_MODEL : PRIMARY_MODEL;
+}
+
+function chooseBestAvailableModel() {
+  if (!isModelCoolingDown(preferredModel)) return preferredModel;
+
+  const alternateModel = getAlternateModel(preferredModel);
+  if (!isModelCoolingDown(alternateModel)) return alternateModel;
+
+  return preferredModel;
+}
+
+function applyCooldownForModel(model: { provider: string; modelId: string }) {
+  let until: string | null = null;
+
+  if (model.provider === 'anthropic') {
+    until = detectAnthropicResetTime();
+    if (until) {
+      forceFallbackUntil = until;
+      saveState();
+      log(
+        `Anthropic limit reset detected at ${until}; avoiding Anthropic until then`,
+      );
+      return until;
+    }
+  }
+
+  const fallbackUntil = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+  if (model.provider === 'openai-codex') {
+    openAICooldownUntil = fallbackUntil;
+  } else if (model.provider === 'anthropic') {
+    forceFallbackUntil = fallbackUntil;
+  }
+  saveState();
+  log(
+    `No explicit reset time for ${model.provider}/${model.modelId}; applying temporary cooldown until ${fallbackUntil}`,
+  );
+  return fallbackUntil;
+}
+
+function describeActiveCooldowns() {
+  const parts: string[] = [];
+  if (isForceFallbackActive() && forceFallbackUntil) {
+    parts.push(`Anthropic until ${forceFallbackUntil}`);
+  }
+  if (isOpenAICooldownActive() && openAICooldownUntil) {
+    parts.push(`OpenAI until ${openAICooldownUntil}`);
+  }
+  return parts.join('; ');
+}
+
+function resolveModelAlias(text: string): ModelConfig | null {
+  const normalized = text
+    .toLowerCase()
+    .replace(/[_\s]+/g, ' ')
+    .trim();
+
+  const anthropicAliases = [
+    'opus 4-6',
+    'opus 4 6',
+    'claude opus 4-6',
+    'claude opus 4 6',
+    'claude opus',
+    'opus',
+    'anthropic',
+    'claude',
+  ];
+  if (anthropicAliases.some((alias) => normalized.includes(alias))) {
+    return PRIMARY_MODEL;
+  }
+
+  const openAIAliases = [
+    'gpt-5.4',
+    'gpt 5.4',
+    'gpt 5 4',
+    'gpt',
+    'codex',
+    'openai',
+    'openai codex',
+  ];
+  if (openAIAliases.some((alias) => normalized.includes(alias))) {
+    return FALLBACK_MODEL;
+  }
+
+  return null;
+}
+
+function parseModelControlMessage(content: string) {
+  const normalized = content.toLowerCase().trim();
+  const switchIntent =
+    /\b(?:switch|set|change|use|swap|move|pick|select)\b/.test(normalized) &&
+    /\bmodel\b/.test(normalized);
+  const shorthandSwitchIntent =
+    /^(?:use|switch to|set to|change to)\b/.test(normalized) ||
+    /^go back to\b/.test(normalized);
+  const statusIntent =
+    /\b(?:what|which)\b.*\bmodel\b/.test(normalized) ||
+    /\bcurrent model\b/.test(normalized) ||
+    /^model\??$/.test(normalized);
+
+  if (statusIntent) {
+    return { action: 'status' as const, model: null };
+  }
+
+  if (!switchIntent && !shorthandSwitchIntent) {
+    return { action: 'none' as const, model: null };
+  }
+
+  return {
+    action: 'switch' as const,
+    model: resolveModelAlias(normalized),
+  };
 }
 
 function startPi(): ChildProcess {
   clearForceFallbackIfExpired();
-  const initialModel = isForceFallbackActive() ? FALLBACK_MODEL : PRIMARY_MODEL;
+  const initialModel = chooseBestAvailableModel();
   log(
-    `Starting pi in RPC mode (session: ${SESSION_DIR}, model: ${initialModel.provider}/${initialModel.modelId})`,
+    `Starting pi in RPC mode (session: ${SESSION_DIR}, model: ${formatModel(initialModel)}, preferred: ${formatModel(preferredModel)})`,
   );
 
   currentRouteModel = initialModel;
@@ -241,6 +468,13 @@ function handlePiEvent(event: Record<string, unknown>) {
 
     if ((cmd === 'prompt' || cmd === 'follow_up') && success) {
       isStreaming = true;
+      if (activePrompt) {
+        activePrompt.piAcceptedAt = Date.now();
+        log(
+          `prompt accepted prompt=${activePrompt.id} queueToPi=${fmtMs(activePrompt.piAcceptedAt - activePrompt.startedAt)}`,
+        );
+      }
+      writeStatus();
     }
     if (cmd === 'set_model' && success) {
       const data = (event.data || {}) as Record<string, unknown>;
@@ -248,9 +482,7 @@ function handlePiEvent(event: Record<string, unknown>) {
         provider: (data.provider as string) || currentRouteModel.provider,
         modelId: (data.id as string) || currentRouteModel.modelId,
       };
-      log(
-        `Active model: ${currentRouteModel.provider}/${currentRouteModel.modelId}`,
-      );
+      log(`Active model: ${formatModel(currentRouteModel)}`);
       if (pendingRetryAfterModelSwitch && activePrompt) {
         pendingRetryAfterModelSwitch = false;
         fallbackSwitchInProgress = false;
@@ -307,18 +539,22 @@ function handlePiEvent(event: Record<string, unknown>) {
       currentChatJid &&
       !sendDiscordUsedInCurrentRun
     ) {
+      maybeWriteStreamUpdate(true);
       writeOutbox(currentChatJid, `⚙️ ${responseBuffer.trim()}`);
       responseBuffer = '';
+      resetStreamingState();
       activePrompt = null;
       return;
     }
 
     responseBuffer = '';
+    resetStreamingState();
     sendDiscordUsedInCurrentRun = false;
 
     if (!endedWithThrottleError) {
       activePrompt = null;
     }
+    writeStatus();
     return;
   }
 
@@ -329,11 +565,18 @@ function handlePiEvent(event: Record<string, unknown>) {
     if (assistantEvent?.type === 'text_delta') {
       responseBuffer += assistantEvent.delta as string;
       textDeltaCount += 1;
+      if (textDeltaCount === 1 && activePrompt && !activePrompt.firstTokenAt) {
+        activePrompt.firstTokenAt = Date.now();
+        log(
+          `first token prompt=${activePrompt.id} fromQueue=${fmtMs(activePrompt.firstTokenAt - activePrompt.startedAt)} fromAssistantStart=${fmtMs(activePrompt.firstAssistantAt ? activePrompt.firstTokenAt - activePrompt.firstAssistantAt : undefined)}`,
+        );
+      }
       if (textDeltaCount === 1 || textDeltaCount % 25 === 0) {
         log(
           `assistant stream prompt=${activePrompt?.id || 'none'} deltas=${textDeltaCount} chars=${responseBuffer.length}`,
         );
       }
+      maybeWriteStreamUpdate();
     }
     return;
   }
@@ -343,17 +586,35 @@ function handlePiEvent(event: Record<string, unknown>) {
     if (msg?.role === 'assistant') {
       responseBuffer = '';
       textDeltaCount = 0;
-      log(`assistant message_start prompt=${activePrompt?.id || 'none'}`);
+      resetStreamingState();
+      if (activePrompt && !activePrompt.firstAssistantAt) {
+        activePrompt.firstAssistantAt = Date.now();
+        log(
+          `assistant message_start prompt=${activePrompt.id} fromQueue=${fmtMs(activePrompt.firstAssistantAt - activePrompt.startedAt)} fromAccepted=${fmtMs(activePrompt.piAcceptedAt ? activePrompt.firstAssistantAt - activePrompt.piAcceptedAt : undefined)}`,
+        );
+      } else {
+        log(`assistant message_start prompt=${activePrompt?.id || 'none'}`);
+      }
+      writeStatus();
     }
     return;
   }
 
   if (eventType === 'tool_execution_start') {
     const toolName = payload.toolName as string;
+    lastToolName = toolName || '';
     if (toolName === 'send_discord') {
       responseBuffer = '';
+      resetStreamingState();
       sendDiscordUsedInCurrentRun = true;
     }
+    writeStatus();
+    return;
+  }
+
+  if (eventType === 'tool_execution_end') {
+    lastToolName = '';
+    writeStatus();
     return;
   }
 
@@ -366,15 +627,12 @@ function handlePiEvent(event: Record<string, unknown>) {
     if (
       activePrompt &&
       !activePrompt.retriedWithFallback &&
-      !fallbackSwitchInProgress &&
-      currentRouteModel.provider === PRIMARY_MODEL.provider &&
-      currentRouteModel.modelId === PRIMARY_MODEL.modelId &&
-      isThrottleError(errorMessage)
+      !fallbackSwitchInProgress
     ) {
       activePrompt.retriedWithFallback = true;
       fallbackSwitchInProgress = true;
       sendToPi({ type: 'abort_retry' });
-      switchToFallbackAndRetry();
+      switchModelsAndRetry(errorMessage, isThrottleError(errorMessage));
     }
     return;
   }
@@ -394,19 +652,22 @@ function handlePiEvent(event: Record<string, unknown>) {
       return;
     }
 
-    if (
-      activePrompt &&
-      !activePrompt.retriedWithFallback &&
-      currentRouteModel.provider === PRIMARY_MODEL.provider &&
-      currentRouteModel.modelId === PRIMARY_MODEL.modelId &&
-      isThrottleError(finalError)
-    ) {
+    if (activePrompt && !activePrompt.retriedWithFallback) {
       activePrompt.retriedWithFallback = true;
-      switchToFallbackAndRetry();
+      switchModelsAndRetry(finalError, isThrottleError(finalError));
       return;
     }
 
-    if (activePrompt?.chatJid) {
+    if (isThrottleError(finalError)) {
+      applyCooldownForModel(currentRouteModel);
+      const cooldownSummary = describeActiveCooldowns();
+      if (activePrompt?.chatJid && cooldownSummary) {
+        writeOutbox(
+          activePrompt.chatJid,
+          `⚙️ Dev session hit provider throttling and couldn't recover automatically. Cooldowns: ${cooldownSummary}`,
+        );
+      }
+    } else if (activePrompt?.chatJid) {
       writeOutbox(
         activePrompt.chatJid,
         `⚙️ Dev session hit a provider error and couldn't recover automatically: ${finalError || 'unknown error'}`,
@@ -415,15 +676,97 @@ function handlePiEvent(event: Record<string, unknown>) {
     isStreaming = false;
     activePrompt = null;
     responseBuffer = '';
+    resetStreamingState();
     fallbackSwitchInProgress = false;
   }
 }
 
+function buildLatency(now = Date.now()) {
+  return activePrompt
+    ? {
+        promptId: activePrompt.id,
+        sourceFile: activePrompt.sourceFile,
+        sourceMessageId: activePrompt.sourceMessageId,
+        queuedAs: activePrompt.queuedAs,
+        queueToDequeueMs: activePrompt.forwardedToPiAt
+          ? activePrompt.startedAt - activePrompt.forwardedToPiAt
+          : undefined,
+        dequeueToPiAcceptMs: activePrompt.piAcceptedAt
+          ? activePrompt.piAcceptedAt - activePrompt.startedAt
+          : undefined,
+        dequeueToFirstAssistantMs: activePrompt.firstAssistantAt
+          ? activePrompt.firstAssistantAt - activePrompt.startedAt
+          : undefined,
+        dequeueToFirstTokenMs: activePrompt.firstTokenAt
+          ? activePrompt.firstTokenAt - activePrompt.startedAt
+          : undefined,
+        totalAgentMs: now - activePrompt.startedAt,
+        totalFromForwardMs: activePrompt.forwardedToPiAt
+          ? now - activePrompt.forwardedToPiAt
+          : undefined,
+        discordMessageTimestamp: activePrompt.discordMessageTimestamp,
+        forwardedToPiAt: activePrompt.forwardedToPiAt
+          ? new Date(activePrompt.forwardedToPiAt).toISOString()
+          : undefined,
+      }
+    : undefined;
+}
+
+function writeOutboxEvent(data: Record<string, unknown>) {
+  const outFile = path.join(
+    OUTBOX_DIR,
+    `${Date.now()}-${crypto.randomUUID().slice(0, 6)}-reply.json`,
+  );
+  fs.writeFileSync(outFile, JSON.stringify(data));
+  trace('outbox_write', {
+    outFile,
+    ...data,
+  });
+  return outFile;
+}
+
+function maybeWriteStreamUpdate(force = false) {
+  const chatJid = currentChatJid || activePrompt?.chatJid;
+  const trimmed = responseBuffer.trim();
+  if (!chatJid || !trimmed || sendDiscordUsedInCurrentRun) return;
+
+  const now = Date.now();
+  const newChars = trimmed.length - lastStreamedText.length;
+  const minChars = streamMessageStarted
+    ? STREAM_UPDATE_MIN_CHARS
+    : STREAM_INITIAL_MIN_CHARS;
+  const enoughChars = newChars >= minChars;
+  const enoughTime = now - lastStreamFlushAt >= STREAM_UPDATE_MIN_INTERVAL_MS;
+
+  if (!force && (!enoughChars || !enoughTime)) return;
+  if (trimmed === lastStreamedText) return;
+
+  writeOutboxEvent({
+    chatJid,
+    kind: streamMessageStarted ? 'stream_update' : 'stream_start',
+    message: `⚙️ ${trimmed}`,
+  });
+  lastStreamedText = trimmed;
+  lastStreamFlushAt = now;
+  streamMessageStarted = true;
+  log(
+    `Wrote stream update prompt=${activePrompt?.id || 'none'} started=${streamMessageStarted} chars=${trimmed.length}`,
+  );
+}
+
+function resetStreamingState() {
+  lastStreamFlushAt = 0;
+  lastStreamedText = '';
+  streamMessageStarted = false;
+}
+
 function writeOutbox(chatJid: string, message: string) {
-  const outFile = path.join(OUTBOX_DIR, `${Date.now()}-reply.json`);
-  fs.writeFileSync(outFile, JSON.stringify({ chatJid, message }));
-  log(`Wrote outbox: ${summarize(message, 100)}`);
-  trace('outbox_write', { chatJid, outFile, message: summarize(message, 300) });
+  const now = Date.now();
+  const latency = buildLatency(now);
+  writeOutboxEvent({ chatJid, message, latency, kind: 'final' });
+  log(
+    `Wrote outbox: ${summarize(message, 100)}${latency ? ` | totalAgent=${fmtMs(latency.totalAgentMs)} totalFromForward=${fmtMs(latency.totalFromForwardMs)}` : ''}`,
+  );
 }
 
 function isThrottleError(error: string): boolean {
@@ -493,60 +836,78 @@ print(candidate.isoformat())
   }
 }
 
-function maybeSwitchBackToPrimary() {
+function maybeSwitchBackToPreferredModel() {
   clearForceFallbackIfExpired();
   if (
-    !isForceFallbackActive() &&
-    currentRouteModel.provider === FALLBACK_MODEL.provider &&
-    currentRouteModel.modelId === FALLBACK_MODEL.modelId &&
+    !isModelCoolingDown(preferredModel) &&
+    !isCurrentModel(preferredModel) &&
     !fallbackSwitchInProgress &&
     !isStreaming
   ) {
     log(
-      `Fallback window ended; switching back to ${PRIMARY_MODEL.provider}/${PRIMARY_MODEL.modelId}`,
+      `Cooldown window ended; switching back to ${formatModel(preferredModel)}`,
     );
     sendToPi({
       type: 'set_model',
-      provider: PRIMARY_MODEL.provider,
-      modelId: PRIMARY_MODEL.modelId,
+      provider: preferredModel.provider,
+      modelId: preferredModel.modelId,
     });
   }
 }
 
-function switchToFallbackAndRetry() {
+function switchModelsAndRetry(errorMessage = '', applyCooldown = false) {
   if (!activePrompt) return;
 
-  const resetAt = detectAnthropicResetTime();
-  if (resetAt) {
-    forceFallbackUntil = resetAt;
-    saveState();
-    log(
-      `Anthropic limit reset detected at ${resetAt}; forcing fallback until then`,
+  const failedModel = { ...currentRouteModel };
+  const targetModel = getAlternateModel(failedModel);
+  const cooldownUntil = applyCooldown
+    ? applyCooldownForModel(failedModel)
+    : null;
+
+  if (applyCooldown && isModelCoolingDown(targetModel)) {
+    const cooldownSummary =
+      describeActiveCooldowns() || 'no reset time available';
+    writeOutbox(
+      activePrompt.chatJid || 'dc:1485414819614949377',
+      `⚙️ Both dev providers are currently rate-limited. Cooldowns: ${cooldownSummary}`,
     );
+    isStreaming = false;
+    activePrompt = null;
+    responseBuffer = '';
+    resetStreamingState();
+    pendingRetryAfterModelSwitch = false;
+    fallbackSwitchInProgress = false;
+    return;
   }
 
   log(
-    `Switching to fallback model ${FALLBACK_MODEL.provider}/${FALLBACK_MODEL.modelId} after throttling`,
+    `Switching models after error: ${formatModel(failedModel)} -> ${formatModel(targetModel)} | error=${summarize(errorMessage || 'unknown error', 200)}`,
   );
   writeOutbox(
     activePrompt.chatJid || 'dc:1485414819614949377',
-    resetAt
-      ? `⚙️ Anthropic is throttling right now — switching dev session to ${FALLBACK_MODEL.modelId} until ${resetAt} and retrying.`
-      : `⚙️ Anthropic is throttling right now — switching dev session to ${FALLBACK_MODEL.modelId} and retrying.`,
+    applyCooldown
+      ? cooldownUntil
+        ? `⚙️ ${failedModel.modelId} is throttling right now — switching dev session to ${targetModel.modelId} until ${cooldownUntil} and retrying.`
+        : `⚙️ ${failedModel.modelId} is throttling right now — switching dev session to ${targetModel.modelId} and retrying.`
+      : `⚙️ ${failedModel.modelId} hit an error — switching dev session to ${targetModel.modelId} and retrying.`,
   );
   isStreaming = false;
   responseBuffer = '';
+  resetStreamingState();
   pendingRetryAfterModelSwitch = true;
   sendToPi({
     type: 'set_model',
-    provider: FALLBACK_MODEL.provider,
-    modelId: FALLBACK_MODEL.modelId,
+    provider: targetModel.provider,
+    modelId: targetModel.modelId,
   });
 }
 
+const MAX_IDLE_POLL_MS = POLL_MS * 5;
+let currentQueuePollMs = POLL_MS;
+
 function drainQueue() {
   try {
-    maybeSwitchBackToPrimary();
+    maybeSwitchBackToPreferredModel();
     const files = fs
       .readdirSync(QUEUE_DIR)
       .filter((f) => f.endsWith('.json'))
@@ -565,22 +926,30 @@ function drainQueue() {
       });
     }
 
+    const bestAvailableModel = chooseBestAvailableModel();
     if (
       files.length > 0 &&
-      isForceFallbackActive() &&
-      currentRouteModel.provider !== FALLBACK_MODEL.provider &&
+      isModelCoolingDown(currentRouteModel) &&
+      !isCurrentModel(bestAvailableModel) &&
       !isStreaming
     ) {
       log(
-        `Force-fallback active until ${forceFallbackUntil}; switching to fallback before processing queue`,
+        `Current model is cooling down; switching to ${formatModel(bestAvailableModel)} before processing queue`,
       );
       sendToPi({
         type: 'set_model',
-        provider: FALLBACK_MODEL.provider,
-        modelId: FALLBACK_MODEL.modelId,
+        provider: bestAvailableModel.provider,
+        modelId: bestAvailableModel.modelId,
       });
       return;
     }
+
+    if (files.length === 0) {
+      currentQueuePollMs = Math.min(MAX_IDLE_POLL_MS, currentQueuePollMs * 2);
+      return;
+    }
+
+    currentQueuePollMs = POLL_MS;
 
     for (const file of files) {
       const filePath = path.join(QUEUE_DIR, file);
@@ -591,14 +960,69 @@ function drainQueue() {
         const sender = data.senderName || data.sender || 'Unknown';
         const content = data.content || '';
         currentChatJid = data.chatJid || null;
+        const forwardedToPiAt = data.forwardedToPiAt
+          ? new Date(data.forwardedToPiAt).getTime()
+          : undefined;
 
         if (!content) continue;
+
+        const modelControl = parseModelControlMessage(content);
+        if (modelControl.action === 'status') {
+          const cooldownSummary = describeActiveCooldowns();
+          writeOutbox(
+            currentChatJid || 'dc:1485414819614949377',
+            cooldownSummary
+              ? `⚙️ Dev model: ${formatModel(currentRouteModel)}. Preferred: ${formatModel(preferredModel)}. Cooldowns: ${cooldownSummary}`
+              : `⚙️ Dev model: ${formatModel(currentRouteModel)}. Preferred: ${formatModel(preferredModel)}.`,
+          );
+          continue;
+        }
+
+        if (modelControl.action === 'switch') {
+          if (!modelControl.model) {
+            writeOutbox(
+              currentChatJid || 'dc:1485414819614949377',
+              '⚙️ I can switch the dev session model to claude-opus-4-6 or gpt-5.4. Say something like “switch to opus” or “use gpt-5.4”.',
+            );
+            continue;
+          }
+
+          preferredModel = modelControl.model;
+          saveState();
+
+          if (isModelCoolingDown(preferredModel)) {
+            const cooldownSummary = describeActiveCooldowns();
+            writeOutbox(
+              currentChatJid || 'dc:1485414819614949377',
+              cooldownSummary
+                ? `⚙️ Preferred dev model set to ${formatModel(preferredModel)}, but it's currently cooling down. I'll stay on ${formatModel(currentRouteModel)} until it becomes available. Cooldowns: ${cooldownSummary}`
+                : `⚙️ Preferred dev model set to ${formatModel(preferredModel)}, but it's currently cooling down. I'll switch when it becomes available.`,
+            );
+            continue;
+          }
+
+          if (!isCurrentModel(preferredModel) && !isStreaming) {
+            sendToPi({
+              type: 'set_model',
+              provider: preferredModel.provider,
+              modelId: preferredModel.modelId,
+            });
+          }
+
+          writeOutbox(
+            currentChatJid || 'dc:1485414819614949377',
+            sameModel(currentRouteModel, preferredModel)
+              ? `⚙️ Dev model already set to ${formatModel(preferredModel)}.`
+              : `⚙️ Switching dev model to ${formatModel(preferredModel)}.`,
+          );
+          continue;
+        }
 
         const prompt = `[Discord /dev from ${sender}]: ${content}`;
         const promptId = crypto.randomUUID().slice(0, 8);
         const queuedAs = isStreaming ? 'follow_up' : 'prompt';
         log(
-          `Processing prompt=${promptId} queuedAs=${queuedAs} chat=${currentChatJid} text=${summarize(prompt, 100)}`,
+          `Processing prompt=${promptId} queuedAs=${queuedAs} chat=${currentChatJid} queueDelay=${fmtMs(forwardedToPiAt ? Date.now() - forwardedToPiAt : undefined)} text=${summarize(prompt, 100)}`,
         );
         trace('queue_dequeue', {
           promptId,
@@ -613,11 +1037,14 @@ function drainQueue() {
         activePrompt = {
           id: promptId,
           sourceFile: file,
+          sourceMessageId: data.sourceMessageId,
           chatJid: currentChatJid,
           message: prompt,
           retriedWithFallback: false,
           startedAt: Date.now(),
           queuedAs,
+          forwardedToPiAt,
+          discordMessageTimestamp: data.discordMessageTimestamp,
         };
         sendDiscordUsedInCurrentRun = false;
 
@@ -646,18 +1073,27 @@ function drainQueue() {
     }
   } catch {
     // Queue dir might not exist yet
+    currentQueuePollMs = Math.min(MAX_IDLE_POLL_MS, currentQueuePollMs * 2);
   }
+}
+
+function scheduleQueuePoll(delayMs: number) {
+  setTimeout(() => {
+    drainQueue();
+    scheduleQueuePoll(currentQueuePollMs);
+  }, delayMs);
 }
 
 // Main
 ensureDirs();
 loadState();
 piProcess = startPi();
+writeStatus();
 
 // Wait a moment for pi to initialize, then start polling
 setTimeout(() => {
   log('Starting queue poll');
-  setInterval(drainQueue, POLL_MS);
+  scheduleQueuePoll(currentQueuePollMs);
 }, 3000);
 
 // Handle shutdown
