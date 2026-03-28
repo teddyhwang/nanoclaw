@@ -1,12 +1,18 @@
 ---
 name: lunchmoney
-description: Query and manage personal finances via the Lunch Money API. View transactions, account balances, spending by category, and budgets. Use when the user asks about their spending, transactions, finances, accounts, or budget.
+description: Query personal finances via the dashboard API. View transactions, account balances, spending by category, and search by payee. Use when the user asks about their spending, transactions, finances, accounts, or budget.
 allowed-tools: Bash(curl:*)
 ---
 
 # Lunch Money — Personal Finance
 
-Query and manage personal finances via the Lunch Money v2 API.
+Query personal finance data via the dashboard API running on the host.
+
+## API Base URL
+
+```
+http://host.docker.internal:3002
+```
 
 ## ⚠️ CRITICAL: Discord Formatting Rules
 
@@ -36,195 +42,156 @@ Mar 20 — Bell Canada — $108.48
 
 **NEVER output `| Column | Column |` or `|---|---|` syntax. It will look broken.**
 
-## Authentication
-
-Credentials are injected automatically by the OneCLI gateway proxy — **do not** set `Authorization` headers manually. Just call the API directly:
-
-```bash
-curl -s "https://api.lunchmoney.dev/v2/..."
-```
-
-## API Base URL
-
-```
-https://api.lunchmoney.dev/v2
-```
-
-## Required v2 Workflow
-
-**Important:** paths like `/me`, `/transactions`, `/summary`, `/categories`, etc. in this skill refer to **Lunch Money API URL paths** under `https://api.lunchmoney.dev/v2`. They are **not agent slash commands**.
-
-Example:
-- `/me` means `GET https://api.lunchmoney.dev/v2/me`
-- `/transactions` means `GET https://api.lunchmoney.dev/v2/transactions`
-- `/summary` means `GET https://api.lunchmoney.dev/v2/summary`
-
-Lunch Money v2 has a few important rules that you must follow:
-
-1. **Fetch the Lunch Money API path `/me` first** when answering finance questions that depend on amount sign interpretation.
-2. **Do not assume positive always means spending.** Check `debits_as_negative` from the `/me` API response.
-3. **Transactions are dehydrated** in v2 — category/account/tag names are not included inline. Resolve IDs via the Lunch Money API paths `/categories`, `/plaid_accounts`, `/manual_accounts`, and `/tags` as needed.
-4. **Prefer the Lunch Money API path `/summary` for rollups** (spending by category, budget summaries) when it fits the question.
-5. **Use the Lunch Money API path `/transactions` for detailed line items** and custom filtering.
-
 ## Endpoints
 
-### Get current user
-```bash
-curl -s "https://api.lunchmoney.dev/v2/me"
+### Get user info, categories, and tags
+
+```
+GET /api/finance/meta
 ```
 
-Important fields from `/me`:
-- `primary_currency`
-- `debits_as_negative`
-- `budget_name`
-
-### List transactions
-```bash
-curl -s "https://api.lunchmoney.dev/v2/transactions?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD"
-```
-
-Query parameters:
-- `start_date` — required, format `YYYY-MM-DD`
-- `end_date` — required, format `YYYY-MM-DD`
-- `category_id` — filter by category ID
-- `plaid_account_id` — filter by account ID
-- `status` — `reviewed`, `unreviewed`, `pending`
-- `offset` — for pagination
-
-Response shape:
+Returns:
 ```json
 {
-  "transactions": [
-    {
-      "id": 123,
-      "date": "2026-03-20",
-      "amount": "24.2600",
-      "currency": "cad",
-      "to_base": 24.26,
-      "payee": "Uber Eats",
-      "original_name": "UBER EATS",
-      "category_id": 2642589,
-      "notes": null,
-      "status": "unreviewed",
-      "is_pending": false,
-      "plaid_account_id": 377995,
-      "tag_ids": [],
-      "source": "plaid"
-    }
+  "user": {
+    "primary_currency": "cad",
+    "debits_as_negative": false
+  },
+  "categories": [
+    { "id": 123, "name": "Restaurants", "is_income": false, "is_group": false, "group_id": null }
   ],
-  "has_more": false
+  "tags": [
+    { "id": 1, "name": "tag-name" }
+  ]
 }
 ```
 
-**Important v2 notes:**
-- Transaction responses are **dehydrated**. They include IDs like `category_id`, `tag_ids`, `plaid_account_id`, not human-friendly names.
-- Resolve category/account/tag IDs before presenting results to the user.
-- Amount sign depends on the user's `debits_as_negative` setting from `/me`.
+**Fetch meta first** when answering finance questions to understand `debits_as_negative` and resolve category/tag IDs.
 
-### Get a single transaction
-```bash
-curl -s "https://api.lunchmoney.dev/v2/transactions/{id}"
+### List transactions (filtered)
+
+```
+GET /api/finance/transactions?start=YYYY-MM-DD&end=YYYY-MM-DD
 ```
 
-### Update a transaction
-```bash
-curl -s -X PATCH "https://api.lunchmoney.dev/v2/transactions/{id}" \
-  -H "Content-Type: application/json" \
-  -d '{"payee": "New Name", "category_id": 123, "notes": "some note", "status": "reviewed"}'
+Query parameters (all optional):
+- `start` — start date (inclusive)
+- `end` — end date (inclusive)
+- `category` — category name substring match (e.g. `restaurant`, `groceries`)
+- `status` — `reviewed`, `unreviewed`, `pending`
+- `payee` — payee/merchant name substring match
+- `account_id` — filter by account ID
+- `limit` — max results (default: all)
+
+Transactions are returned **newest first**, already **hydrated** with `category_name` and `account_name`.
+
+Response:
+```json
+{
+  "transactions": [{
+    "id": 123,
+    "date": "2026-03-20",
+    "amount": "24.2600",
+    "currency": "cad",
+    "to_base": 24.26,
+    "payee": "Uber Eats",
+    "original_name": "UBER EATS",
+    "category_id": 2642589,
+    "category_name": "Restaurants",
+    "account_name": "TD Visa",
+    "notes": null,
+    "status": "unreviewed",
+    "is_pending": false,
+    "plaid_account_id": 377995,
+    "tag_ids": [],
+    "source": "plaid",
+    "is_income": false,
+    "exclude_from_totals": false
+  }],
+  "count": 42,
+  "totalCount": 4932,
+  "dateRange": { "start": "2020-01-01", "end": "2026-03-28" }
+}
 ```
 
-Updatable fields: `payee`, `category_id`, `notes`, `status`, `date`, `amount`, `currency`, `tag_ids`.
+### Get account balances
 
-### List categories
-```bash
-curl -s "https://api.lunchmoney.dev/v2/categories"
+```
+GET /api/finance/accounts
 ```
 
-Response includes nested `children` for category groups. Key fields: `id`, `name`, `is_group`, `group_id`, `is_income`.
-
-### List tags
-```bash
-curl -s "https://api.lunchmoney.dev/v2/tags"
+Returns active accounts with current balances:
+```json
+{
+  "accounts": [{
+    "id": 123,
+    "display_name": "TD Visa",
+    "type": "credit",
+    "balance": "1234.56",
+    "currency": "cad",
+    "to_base": 1234.56,
+    "institution_name": "TD Canada Trust",
+    "status": "active",
+    "source": "plaid"
+  }]
+}
 ```
 
-### List linked accounts (Plaid)
-```bash
-curl -s "https://api.lunchmoney.dev/v2/plaid_accounts"
+Account types: `depository`, `credit`, `investment`, `loan`, `cash`
+
+### Get spending summary by category
+
+```
+GET /api/finance/summary?start=YYYY-MM-DD&end=YYYY-MM-DD
 ```
 
-Key fields: `id`, `display_name`, `type` (depository/credit/investment/loan/cash), `balance`, `currency`, `status`, `institution_name`.
+Both `start` and `end` are required.
 
-### List manual accounts
-```bash
-curl -s "https://api.lunchmoney.dev/v2/manual_accounts"
-```
-
-### Trigger a Plaid sync
-```bash
-curl -s -X POST "https://api.lunchmoney.dev/v2/plaid_accounts/fetch"
-```
-
-### Get summary / rollup
-```bash
-curl -s "https://api.lunchmoney.dev/v2/summary?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD"
-```
-
-Use the Lunch Money API path `/summary` when the user asks for:
-- spending by category
-- monthly/weekly rollups
-- budget-style summaries
-- high-level totals
-
-Use the Lunch Money API path `/transactions` when the user asks for:
-- specific purchases
-- transaction lists
-- merchant searches
-- detailed drill-downs
+Returns spending rollup by category — use this for "how much did I spend on X" or monthly summaries.
 
 ## Common Patterns
 
 ### Spending summary for a date range
-Preferred approach:
-1. Fetch `/me` to understand amount sign semantics
-2. Try `/summary` first for category rollups
-3. If needed, fetch `/categories` to map category IDs to names
-4. Present a concise user-friendly summary
 
-Fallback approach when `/summary` is not enough:
-1. Fetch transactions for the date range
-2. Fetch categories to map `category_id` → name
-3. Group and sum by category
-4. Present as a summary
+1. Fetch `/api/finance/meta` to understand amount sign semantics
+2. Fetch `/api/finance/summary?start=...&end=...` for category rollups
+3. Present a concise user-friendly summary
+
+### Transaction search
+
+```bash
+# Recent restaurant transactions
+curl -s "http://host.docker.internal:3002/api/finance/transactions?start=2026-03-01&end=2026-03-28&category=restaurant"
+
+# Amazon purchases this month
+curl -s "http://host.docker.internal:3002/api/finance/transactions?start=2026-03-01&end=2026-03-28&payee=amazon"
+
+# Unreviewed transactions
+curl -s "http://host.docker.internal:3002/api/finance/transactions?status=unreviewed&limit=20"
+
+# Last 10 transactions
+curl -s "http://host.docker.internal:3002/api/finance/transactions?limit=10"
+```
 
 ### Account balances
-1. Fetch `/me`
-2. Fetch `plaid_accounts`
-3. Optionally fetch `manual_accounts`
-4. Filter by `status: "active"`
-5. Present balances grouped by type (banking, credit, investments, loans)
 
-### Recent unreviewed transactions
 ```bash
-curl -s "https://api.lunchmoney.dev/v2/transactions?start_date=$(date -d '30 days ago' +%Y-%m-%d)&end_date=$(date +%Y-%m-%d)&status=unreviewed"
+curl -s "http://host.docker.internal:3002/api/finance/accounts"
 ```
+
+Parse the JSON response with `node -e` or pipe through shell tools as needed.
 
 ## Formatting Reminders
 
 - Always format currency amounts with 2 decimal places (e.g. `$24.26 CAD`)
-- Respect the user's `debits_as_negative` setting from `/me` when interpreting amounts
-- Resolve IDs to names before presenting results whenever possible
+- Respect the user's `debits_as_negative` setting from `/api/finance/meta` when interpreting amounts
+- Transactions come pre-hydrated with `category_name` and `account_name` — no need to resolve IDs
 - Group by category when summarizing spending
 - Show totals at the bottom of summaries
 - For account balances, separate by type (banking, credit, investments, loans)
 - Keep responses concise — Discord messages have a 2000 character limit
 - **Reminder: NO markdown tables. Use bullet lists or line-per-item format (see top of this skill).**
 
-## Write Operations — Confirmation Required
+## Read-Only
 
-The following actions modify data and **require explicit user confirmation** before executing:
-
-- Updating transaction payee, category, notes, or status
-- Any POST/PATCH/PUT/DELETE request
-
-Always describe the change and ask for confirmation before making write requests.
+This skill is **read-only**. Do not attempt to update transactions, trigger syncs, or modify any data. If the user asks to recategorize or edit a transaction, tell them to do it in the Lunch Money app directly.

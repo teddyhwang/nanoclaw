@@ -15,6 +15,8 @@ import { fileURLToPath } from 'url';
 import {
   getDashboardData,
   getBalances,
+  getMeta,
+  getSummary,
   getTransactions,
 } from './lunchmoney.js';
 import {
@@ -145,6 +147,105 @@ async function handleApi(
       }
       const matches = matchTransactions(txResp.transactions);
       sendJson(res, matches);
+    } else if (pathname === '/api/finance/meta') {
+      // User info, categories, tags — everything needed to interpret transactions
+      const meta = await getMeta();
+      sendJson(res, meta);
+    } else if (pathname === '/api/finance/accounts') {
+      // Active accounts with balances
+      const data = await getBalances();
+      sendJson(res, data);
+    } else if (pathname === '/api/finance/transactions') {
+      // Filtered transactions query
+      const url = new URL(req.url!, `http://${req.headers.host}`);
+      const start = url.searchParams.get('start');
+      const end = url.searchParams.get('end');
+      const category = url.searchParams.get('category');
+      const status = url.searchParams.get('status');
+      const payee = url.searchParams.get('payee');
+      const accountId = url.searchParams.get('account_id');
+      const limit = parseInt(url.searchParams.get('limit') || '0', 10);
+
+      const txData = await getTransactions();
+      let filtered = txData.transactions;
+
+      if (start) filtered = filtered.filter((t) => t.date >= start);
+      if (end) filtered = filtered.filter((t) => t.date <= end);
+      if (status) filtered = filtered.filter((t) => t.status === status);
+      if (accountId) {
+        const aid = parseInt(accountId, 10);
+        filtered = filtered.filter((t) => t.plaid_account_id === aid);
+      }
+      if (category) {
+        // Resolve category name to ID(s)
+        const meta = await getMeta();
+        const lowerCat = category.toLowerCase();
+        const matchIds = new Set<number>();
+        for (const cat of meta.categories) {
+          if (cat.name.toLowerCase().includes(lowerCat)) matchIds.add(cat.id);
+          if (cat.children) {
+            for (const child of cat.children) {
+              if (child.name.toLowerCase().includes(lowerCat))
+                matchIds.add(child.id);
+            }
+          }
+        }
+        filtered = filtered.filter(
+          (t) => t.category_id !== null && matchIds.has(t.category_id),
+        );
+      }
+      if (payee) {
+        const lowerPayee = payee.toLowerCase();
+        filtered = filtered.filter(
+          (t) =>
+            t.payee.toLowerCase().includes(lowerPayee) ||
+            t.original_name.toLowerCase().includes(lowerPayee),
+        );
+      }
+
+      // Sort by date descending (newest first)
+      filtered.sort((a, b) => b.date.localeCompare(a.date));
+
+      if (limit > 0) filtered = filtered.slice(0, limit);
+
+      // Hydrate category names
+      const meta = await getMeta();
+      const catMap = new Map<number, string>();
+      for (const cat of meta.categories) {
+        catMap.set(cat.id, cat.name);
+        if (cat.children) {
+          for (const child of cat.children) catMap.set(child.id, child.name);
+        }
+      }
+      const acctMap = new Map<number, string>();
+      const balances = await getBalances();
+      for (const a of balances.accounts) acctMap.set(a.id, a.display_name);
+
+      const hydrated = filtered.map((t) => ({
+        ...t,
+        category_name: t.category_id ? (catMap.get(t.category_id) ?? null) : null,
+        account_name: t.plaid_account_id
+          ? (acctMap.get(t.plaid_account_id) ?? null)
+          : null,
+      }));
+
+      sendJson(res, {
+        transactions: hydrated,
+        count: hydrated.length,
+        totalCount: txData.transactions.length,
+        dateRange: { start: txData.startDate, end: txData.endDate },
+      });
+    } else if (pathname === '/api/finance/summary') {
+      // Spending summary by category for a date range
+      const url = new URL(req.url!, `http://${req.headers.host}`);
+      const start = url.searchParams.get('start');
+      const end = url.searchParams.get('end');
+      if (!start || !end) {
+        sendError(res, 400, 'start and end query params required');
+        return;
+      }
+      const summary = await getSummary(start, end);
+      sendJson(res, summary);
     } else if (pathname === '/api/health') {
       const url = new URL(req.url!, `http://${req.headers.host}`);
       const sinceParam = url.searchParams.get('since');
