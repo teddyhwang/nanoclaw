@@ -194,7 +194,7 @@ async function exchangeCodeForTokens(
     const text = await resp.text();
     throw new Error(`Token exchange failed: ${resp.status} ${text}`);
   }
-  return resp.json();
+  return resp.json() as Promise<{ id_token: string; access_token: string }>;
 }
 
 function decodeIdToken(idToken: string): {

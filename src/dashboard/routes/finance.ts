@@ -11,6 +11,7 @@ import {
   loadInvestmentData,
   saveInvestmentData,
   updateYearField,
+  type InvestmentData,
 } from '../investments.js';
 import { getLiveCurrentYear } from '../live-accounts.js';
 import { matchTransactions, hasAmazonData } from '../amazon-matcher.js';
@@ -47,7 +48,7 @@ export default async function financeRoutes(fastify: FastifyInstance) {
 
   // POST /api/properties/save
   fastify.post('/api/properties/save', async (request) => {
-    const props = request.body as unknown[];
+    const props = request.body as { name: string; value: number }[];
     const data = loadInvestmentData();
     if (data) {
       data.properties = props;
@@ -88,7 +89,7 @@ export default async function financeRoutes(fastify: FastifyInstance) {
       path: string;
       value: unknown;
     };
-    const updated = updateYearField(year, fieldPath, value);
+    const updated = updateYearField(year, fieldPath.split('.'), value as number);
     if (!updated) {
       reply.code(400);
       return { error: 'Invalid update' };
@@ -98,7 +99,7 @@ export default async function financeRoutes(fastify: FastifyInstance) {
 
   // POST /api/investments/save
   fastify.post('/api/investments/save', async (request) => {
-    const data = request.body as Record<string, unknown>;
+    const data = request.body as InvestmentData;
     saveInvestmentData(data);
     return { ok: true };
   });
