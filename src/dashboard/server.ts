@@ -223,7 +223,9 @@ async function handleApi(
 
       const hydrated = filtered.map((t) => ({
         ...t,
-        category_name: t.category_id ? (catMap.get(t.category_id) ?? null) : null,
+        category_name: t.category_id
+          ? (catMap.get(t.category_id) ?? null)
+          : null,
         account_name: t.plaid_account_id
           ? (acctMap.get(t.plaid_account_id) ?? null)
           : null,
