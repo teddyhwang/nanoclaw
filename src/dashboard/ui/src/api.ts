@@ -1,10 +1,10 @@
 import type { DashboardData, InvestmentData, HealthData } from './types';
 
 export async function fetchDashboard(
-  refreshBalances = false,
+  forceRefresh = false,
 ): Promise<DashboardData> {
-  const url = refreshBalances
-    ? '/api/dashboard?refreshBalances=true'
+  const url = forceRefresh
+    ? '/api/dashboard?refresh=true'
     : '/api/dashboard';
   const r = await fetch(url);
   if (!r.ok) throw new Error(await r.text());

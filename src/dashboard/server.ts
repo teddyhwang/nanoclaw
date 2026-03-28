@@ -79,9 +79,10 @@ async function handleApi(
   try {
     if (pathname === '/api/dashboard') {
       const url = new URL(req.url!, `http://${req.headers.host}`);
-      const refreshBalances =
+      const forceRefresh =
+        url.searchParams.get('refresh') === 'true' ||
         url.searchParams.get('refreshBalances') === 'true';
-      const data = await getDashboardData(refreshBalances);
+      const data = await getDashboardData(forceRefresh);
       sendJson(res, data);
     } else if (pathname === '/api/balances') {
       const data = await getBalances(true);

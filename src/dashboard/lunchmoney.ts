@@ -20,7 +20,7 @@ const API_BASE = 'https://api.lunchmoney.dev/v2';
 
 // Cache TTLs
 const TX_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
-const BALANCE_CACHE_TTL = 60 * 60 * 1000; // 1 hour
+const BALANCE_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
 const META_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
 
 interface CacheFile<T> {
@@ -281,12 +281,12 @@ export interface DashboardData {
 }
 
 export async function getDashboardData(
-  forceRefreshBalances = false,
+  forceRefresh = false,
 ): Promise<DashboardData> {
   const [meta, balances, txData] = await Promise.all([
-    getMeta(),
-    getBalances(forceRefreshBalances),
-    getTransactions(),
+    getMeta(forceRefresh),
+    getBalances(forceRefresh),
+    getTransactions(forceRefresh),
   ]);
 
   // Load properties from investment data
