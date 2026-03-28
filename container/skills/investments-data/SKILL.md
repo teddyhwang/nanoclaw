@@ -1,7 +1,7 @@
 ---
 name: investments-data
 description: Query personal investment tracking data via the dashboard API. Use when users ask about yearly investment totals, returns, contributions, salaries, debt, portfolio composition, or trends.
-allowed-tools: Bash(curl:*), Bash(python3:*)
+allowed-tools: Bash(curl:*)
 ---
 
 # Investments Data — Dashboard API
@@ -26,21 +26,16 @@ Use **bullet lists** or **line-per-item** format instead.
 GET /api/investments
 ```
 
-### Quick test
-
-```bash
-curl -s "http://host.docker.internal:3002/api/investments" | python3 -c "import sys,json; d=json.load(sys.stdin); print(list(d.keys()))"
-```
-
 ## Response Shape
 
 Top-level keys:
 
-- `years` — yearly investment/salary/contribution/returns/debt data keyed by year string
+- `years` — yearly data keyed by year string (e.g. `"2026"`)
 - `salaries` — yearly salary summary rows
 - `savingsVsSalaries` — savings vs earnings comparison rows
 - `predictionModel` — long-term savings/return projections
 - `properties` — property valuation data
+- `lastUpdated` — ISO timestamp of last data update
 
 ## Year Data Structure
 
@@ -54,83 +49,27 @@ Within `years[YYYY]`:
 - **`debt`** — named debts plus `totalDebt`
 - **`subtotal`** — net position for that year
 
-## Common Queries
-
-### List available years
+## Examples
 
 ```bash
-curl -s "http://host.docker.internal:3002/api/investments" | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-print(sorted(data.get('years', {}).keys()))
-"
+# Full investment data (includes live current-year balances)
+curl -s "http://host.docker.internal:3002/api/investments"
 ```
 
-### Summary for a specific year
-
-```bash
-curl -s "http://host.docker.internal:3002/api/investments" | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-year = data['years'].get('2026', {})
-print(json.dumps(year, indent=2))
-"
-```
-
-### Yearly totals overview
-
-```bash
-curl -s "http://host.docker.internal:3002/api/investments" | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-for y, row in sorted(data.get('years', {}).items()):
-    total = row.get('summary', {}).get('total', 'N/A')
-    subtotal = row.get('subtotal', 'N/A')
-    print(f'{y}: total={total}, net={subtotal}')
-"
-```
-
-### Returns comparison across years
-
-```bash
-curl -s "http://host.docker.internal:3002/api/investments" | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-for y, row in sorted(data.get('years', {}).items()):
-    r = row.get('returns', {}).get('total', {})
-    amt = r.get('returnAmount', 'N/A')
-    pct = r.get('returnPct', 'N/A')
-    print(f'{y}: return={amt} ({pct}%)')
-"
-```
+Parse the JSON response with `node -e` or pipe through shell tools as needed.
 
 ## Common Calculations
 
-### Net income for a year
-
-```
-salary.teddy.gross + salary.nicole.gross - salary.teddy.actualTax - salary.nicole.actualTax
-```
-
-### Net contributions for a year
-
-```
-rrsp.teddy + rrsp.nicole + tfsa.teddy + tfsa.nicole + respContributions - tfsaWithdrawals.teddy - tfsaWithdrawals.nicole
-```
-
-### Total return and net position already exist
-
-```
-years[YYYY].returns.total.returnAmount / returnPct
-years[YYYY].subtotal
-```
+- **Net income:** `salary.teddy.gross + salary.nicole.gross - salary.teddy.actualTax - salary.nicole.actualTax`
+- **Total return:** `years[YYYY].returns.total.returnAmount` / `.returnPct`
+- **Net position:** `years[YYYY].subtotal`
 
 ## Response Guidance
 
 - Be explicit about which year(s) you used
 - If comparing years, show both absolute numbers and percentages
 - If the user asks for "current" or "latest", use the latest key in `years`
-- The current year's data is merged with **live** Lunch Money account balances, so it reflects real-time positions
+- The current year's data is merged with **live** Lunch Money account balances
 - Format currency with 2 decimal places and commas (e.g. `$124,500.00`)
 - Keep responses concise — Discord messages have a 2000 character limit
 - **Reminder: NO markdown tables. Use bullet lists or line-per-item format.**

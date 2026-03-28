@@ -188,7 +188,6 @@ function buildVolumeMounts(
         readonly: true,
       });
     }
-
   } else {
     // Other groups only get their own folder
     mounts.push({
