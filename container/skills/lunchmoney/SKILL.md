@@ -38,17 +38,10 @@ Mar 20 — Bell Canada — $108.48
 
 ## Authentication
 
-The API token is stored at `/home/node/.config/lunchmoney/token` (mounted read-only).
+Credentials are injected automatically by the OneCLI gateway proxy — **do not** set `Authorization` headers manually. Just call the API directly:
 
-**Always read the token at runtime:**
 ```bash
-LM_TOKEN=$(cat /home/node/.config/lunchmoney/token)
-```
-
-Then use it in requests:
-```bash
-curl -s "https://api.lunchmoney.dev/v2/..." \
-  -H "Authorization: Bearer $LM_TOKEN"
+curl -s "https://api.lunchmoney.dev/v2/..."
 ```
 
 ## API Base URL
@@ -78,8 +71,7 @@ Lunch Money v2 has a few important rules that you must follow:
 
 ### Get current user
 ```bash
-curl -s "https://api.lunchmoney.dev/v2/me" \
-  -H "Authorization: Bearer $LM_TOKEN"
+curl -s "https://api.lunchmoney.dev/v2/me"
 ```
 
 Important fields from `/me`:
@@ -89,8 +81,7 @@ Important fields from `/me`:
 
 ### List transactions
 ```bash
-curl -s "https://api.lunchmoney.dev/v2/transactions?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD" \
-  -H "Authorization: Bearer $LM_TOKEN"
+curl -s "https://api.lunchmoney.dev/v2/transactions?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD"
 ```
 
 Query parameters:
@@ -133,14 +124,12 @@ Response shape:
 
 ### Get a single transaction
 ```bash
-curl -s "https://api.lunchmoney.dev/v2/transactions/{id}" \
-  -H "Authorization: Bearer $LM_TOKEN"
+curl -s "https://api.lunchmoney.dev/v2/transactions/{id}"
 ```
 
 ### Update a transaction
 ```bash
 curl -s -X PATCH "https://api.lunchmoney.dev/v2/transactions/{id}" \
-  -H "Authorization: Bearer $LM_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"payee": "New Name", "category_id": 123, "notes": "some note", "status": "reviewed"}'
 ```
@@ -149,42 +138,36 @@ Updatable fields: `payee`, `category_id`, `notes`, `status`, `date`, `amount`, `
 
 ### List categories
 ```bash
-curl -s "https://api.lunchmoney.dev/v2/categories" \
-  -H "Authorization: Bearer $LM_TOKEN"
+curl -s "https://api.lunchmoney.dev/v2/categories"
 ```
 
 Response includes nested `children` for category groups. Key fields: `id`, `name`, `is_group`, `group_id`, `is_income`.
 
 ### List tags
 ```bash
-curl -s "https://api.lunchmoney.dev/v2/tags" \
-  -H "Authorization: Bearer $LM_TOKEN"
+curl -s "https://api.lunchmoney.dev/v2/tags"
 ```
 
 ### List linked accounts (Plaid)
 ```bash
-curl -s "https://api.lunchmoney.dev/v2/plaid_accounts" \
-  -H "Authorization: Bearer $LM_TOKEN"
+curl -s "https://api.lunchmoney.dev/v2/plaid_accounts"
 ```
 
 Key fields: `id`, `display_name`, `type` (depository/credit/investment/loan/cash), `balance`, `currency`, `status`, `institution_name`.
 
 ### List manual accounts
 ```bash
-curl -s "https://api.lunchmoney.dev/v2/manual_accounts" \
-  -H "Authorization: Bearer $LM_TOKEN"
+curl -s "https://api.lunchmoney.dev/v2/manual_accounts"
 ```
 
 ### Trigger a Plaid sync
 ```bash
-curl -s -X POST "https://api.lunchmoney.dev/v2/plaid_accounts/fetch" \
-  -H "Authorization: Bearer $LM_TOKEN"
+curl -s -X POST "https://api.lunchmoney.dev/v2/plaid_accounts/fetch"
 ```
 
 ### Get summary / rollup
 ```bash
-curl -s "https://api.lunchmoney.dev/v2/summary?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD" \
-  -H "Authorization: Bearer $LM_TOKEN"
+curl -s "https://api.lunchmoney.dev/v2/summary?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD"
 ```
 
 Use the Lunch Money API path `/summary` when the user asks for:
@@ -223,8 +206,7 @@ Fallback approach when `/summary` is not enough:
 
 ### Recent unreviewed transactions
 ```bash
-curl -s "https://api.lunchmoney.dev/v2/transactions?start_date=$(date -d '30 days ago' +%Y-%m-%d)&end_date=$(date +%Y-%m-%d)&status=unreviewed" \
-  -H "Authorization: Bearer $LM_TOKEN"
+curl -s "https://api.lunchmoney.dev/v2/transactions?start_date=$(date -d '30 days ago' +%Y-%m-%d)&end_date=$(date +%Y-%m-%d)&status=unreviewed"
 ```
 
 ## Formatting Reminders

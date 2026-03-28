@@ -337,19 +337,6 @@ function buildVolumeMounts(
     });
   }
 
-  // Mount Lunch Money API token (read-only)
-  const lunchmoneyConfigDir = path.join(
-    process.env.HOME || os.homedir(),
-    '.config',
-    'lunchmoney',
-  );
-  if (fs.existsSync(lunchmoneyConfigDir)) {
-    mounts.push({
-      hostPath: lunchmoneyConfigDir,
-      containerPath: '/home/node/.config/lunchmoney',
-      readonly: true,
-    });
-  }
 
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {
