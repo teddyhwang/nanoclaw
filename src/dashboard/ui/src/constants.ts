@@ -45,9 +45,9 @@ export const DATE_RANGE_OPTIONS = [
   { value: '30days', label: 'Last 30 Days' },
   { value: 'thisMonth', label: 'This Month' },
   { value: 'lastMonth', label: 'Last Month' },
-  { value: 'ytd', label: 'Year to Date' },
-  { value: '6months', label: 'Last 6 Months' },
   { value: '90days', label: 'Last 90 Days' },
+  { value: '6months', label: 'Last 6 Months' },
+  { value: 'ytd', label: 'Year to Date' },
   { value: 'lastYear', label: 'Last Year' },
   { value: 'all', label: 'All Time' },
 ] as const;
