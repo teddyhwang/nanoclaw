@@ -37,3 +37,6 @@ groups/global/*
 .pi/dev-session/
 agents-sdk-docs
 
+
+# Database (stored in iCloud)
+db/
