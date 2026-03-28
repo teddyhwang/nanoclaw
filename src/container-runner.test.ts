@@ -11,10 +11,10 @@ vi.mock('./config.js', () => ({
   CONTAINER_IMAGE: 'nanoclaw-agent:latest',
   CONTAINER_MAX_OUTPUT_SIZE: 10485760,
   CONTAINER_TIMEOUT: 1800000, // 30min
-  CREDENTIAL_PROXY_PORT: 3001,
   DATA_DIR: '/tmp/nanoclaw-test-data',
   GROUPS_DIR: '/tmp/nanoclaw-test-groups',
   IDLE_TIMEOUT: 1800000, // 30min
+  ONECLI_URL: 'http://localhost:10254',
   TIMEZONE: 'America/Los_Angeles',
 }));
 
@@ -42,6 +42,8 @@ vi.mock('fs', async () => {
       readdirSync: vi.fn(() => []),
       statSync: vi.fn(() => ({ isDirectory: () => false })),
       copyFileSync: vi.fn(),
+      cpSync: vi.fn(),
+      rmSync: vi.fn(),
     },
   };
 });
@@ -49,6 +51,25 @@ vi.mock('fs', async () => {
 // Mock mount-security
 vi.mock('./mount-security.js', () => ({
   validateAdditionalMounts: vi.fn(() => []),
+}));
+
+// Mock container-runtime
+vi.mock('./container-runtime.js', () => ({
+  CONTAINER_RUNTIME_BIN: 'docker',
+  hostGatewayArgs: () => [],
+  readonlyMountArgs: (h: string, c: string) => ['-v', `${h}:${c}:ro`],
+  stopContainer: vi.fn(),
+}));
+
+// Mock OneCLI SDK
+vi.mock('@onecli-sh/sdk', () => ({
+  OneCLI: class {
+    applyContainerConfig = vi.fn().mockResolvedValue(true);
+    createAgent = vi.fn().mockResolvedValue({ id: 'test' });
+    ensureAgent = vi
+      .fn()
+      .mockResolvedValue({ name: 'test', identifier: 'test', created: true });
+  },
 }));
 
 // Create a controllable fake ChildProcess
@@ -86,7 +107,14 @@ vi.mock('child_process', async () => {
   };
 });
 
-import { runContainerAgent, ContainerOutput } from './container-runner.js';
+import fs from 'fs';
+
+import {
+  runContainerAgent,
+  ContainerOutput,
+  writeGroupsSnapshot,
+  writeTasksSnapshot,
+} from './container-runner.js';
 import type { RegisteredGroup } from './types.js';
 
 const testGroup: RegisteredGroup = {
@@ -111,9 +139,174 @@ function emitOutputMarker(
   proc.stdout.push(`${OUTPUT_START_MARKER}\n${json}\n${OUTPUT_END_MARKER}\n`);
 }
 
+describe('container-runner snapshots', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('skips rewriting task snapshots when content is unchanged', () => {
+    const mockedFs = fs as unknown as {
+      mkdirSync: ReturnType<typeof vi.fn>;
+      writeFileSync: ReturnType<typeof vi.fn>;
+      readFileSync: ReturnType<typeof vi.fn>;
+    };
+
+    mockedFs.readFileSync.mockImplementation(() => {
+      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    });
+
+    const tasks = [
+      {
+        id: 'task-1',
+        groupFolder: 'test-group',
+        prompt: 'Do it',
+        schedule_type: 'once',
+        schedule_value: '2026-01-01T00:00:00.000Z',
+        status: 'active',
+        next_run: '2026-01-01T00:00:00.000Z',
+      },
+    ];
+
+    writeTasksSnapshot('test-group', false, tasks);
+    writeTasksSnapshot('test-group', false, tasks);
+
+    expect(mockedFs.writeFileSync).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips rewriting group snapshots when visible groups are unchanged', () => {
+    const mockedFs = fs as unknown as {
+      mkdirSync: ReturnType<typeof vi.fn>;
+      writeFileSync: ReturnType<typeof vi.fn>;
+      readFileSync: ReturnType<typeof vi.fn>;
+    };
+
+    mockedFs.readFileSync.mockImplementation(() => {
+      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    });
+
+    const groups = [
+      {
+        jid: 'dc:1',
+        name: 'Main',
+        lastActivity: '2026-01-01T00:00:00.000Z',
+        isRegistered: true,
+      },
+    ];
+
+    writeGroupsSnapshot('main', true, groups, new Set(['dc:1']));
+    writeGroupsSnapshot('main', true, groups, new Set(['dc:1']));
+
+    expect(mockedFs.writeFileSync).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('container-runner skill sync', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    fakeProc = createFakeProcess();
+  });
+
+  it('skips copying skills when the source stamp is unchanged', async () => {
+    const mockedFs = fs as unknown as {
+      existsSync: ReturnType<typeof vi.fn>;
+      readdirSync: ReturnType<typeof vi.fn>;
+      statSync: ReturnType<typeof vi.fn>;
+      readFileSync: ReturnType<typeof vi.fn>;
+      cpSync: ReturnType<typeof vi.fn>;
+      rmSync: ReturnType<typeof vi.fn>;
+    };
+
+    mockedFs.existsSync.mockImplementation((target: string) => {
+      if (target.endsWith('/container/skills')) return true;
+      if (target.endsWith('/.claude/skills')) return true;
+      return false;
+    });
+    mockedFs.readdirSync.mockImplementation((target: string) => {
+      if (target.endsWith('/container/skills')) return ['skill-a'];
+      if (target.endsWith('/container/skills/skill-a')) return ['SKILL.md'];
+      return [];
+    });
+    mockedFs.statSync.mockImplementation((target: string) => ({
+      isDirectory: () =>
+        target.endsWith('/container/skills') ||
+        target.endsWith('/container/skills/skill-a'),
+      size: 12,
+      mtimeMs: 123,
+    }));
+    mockedFs.readFileSync.mockImplementation((target: string) => {
+      if (target.endsWith('/.skills-sync-stamp')) {
+        return 'dir:skill-a\nfile:skill-a/SKILL.md:12:123';
+      }
+      return '';
+    });
+
+    const resultPromise = runContainerAgent(testGroup, testInput, () => {});
+    fakeProc.emit('close', 0);
+    await resultPromise;
+
+    expect(mockedFs.cpSync).not.toHaveBeenCalledWith(
+      expect.stringContaining('/container/skills/skill-a'),
+      expect.any(String),
+      expect.any(Object),
+    );
+    expect(mockedFs.rmSync).not.toHaveBeenCalled();
+  });
+
+  it('re-copies skills when the source stamp changes', async () => {
+    const mockedFs = fs as unknown as {
+      existsSync: ReturnType<typeof vi.fn>;
+      readdirSync: ReturnType<typeof vi.fn>;
+      statSync: ReturnType<typeof vi.fn>;
+      readFileSync: ReturnType<typeof vi.fn>;
+      cpSync: ReturnType<typeof vi.fn>;
+      rmSync: ReturnType<typeof vi.fn>;
+      writeFileSync: ReturnType<typeof vi.fn>;
+    };
+
+    mockedFs.existsSync.mockImplementation((target: string) => {
+      if (target.endsWith('/container/skills')) return true;
+      if (target.endsWith('/container/skills/skill-a')) return true;
+      if (target.endsWith('/.claude/skills')) return true;
+      return false;
+    });
+    mockedFs.readdirSync.mockImplementation((target: string) => {
+      if (target.endsWith('/container/skills')) return ['skill-a'];
+      if (target.endsWith('/container/skills/skill-a')) return ['SKILL.md'];
+      return [];
+    });
+    mockedFs.statSync.mockImplementation((target: string) => ({
+      isDirectory: () =>
+        target.endsWith('/container/skills') ||
+        target.endsWith('/container/skills/skill-a'),
+      size: 99,
+      mtimeMs: 456,
+    }));
+    mockedFs.readFileSync.mockImplementation((target: string) => {
+      if (target.endsWith('/.skills-sync-stamp')) return 'old-stamp';
+      return '';
+    });
+
+    const resultPromise = runContainerAgent(testGroup, testInput, () => {});
+    fakeProc.emit('close', 0);
+    await resultPromise;
+
+    expect(mockedFs.rmSync).toHaveBeenCalled();
+    expect(mockedFs.cpSync).toHaveBeenCalledWith(
+      expect.stringContaining('/container/skills/skill-a'),
+      expect.stringContaining('/.claude/skills/skill-a'),
+      { recursive: true },
+    );
+    expect(mockedFs.writeFileSync).toHaveBeenCalledWith(
+      expect.stringContaining('/.skills-sync-stamp'),
+      'dir:skill-a\nfile:skill-a/SKILL.md:99:456',
+    );
+  });
+});
+
 describe('container-runner timeout behavior', () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    vi.clearAllMocks();
     fakeProc = createFakeProcess();
   });
 

@@ -1,0 +1,2525 @@
+{
+  "years": {
+    "2016": {
+      "year": 2016,
+      "salary": {
+        "teddy": {
+          "gross": 132053.4,
+          "rrspDeduction": 20000,
+          "actualTaxRate": 43.41,
+          "actualTax": 41344.99
+        },
+        "nicole": {
+          "gross": 77804,
+          "rrspDeduction": 21000,
+          "actualTaxRate": 29.65,
+          "actualTax": 18960.66
+        }
+      },
+      "contributions": {
+        "rrsp": {
+          "teddy": 20000,
+          "nicole": 21000
+        },
+        "tfsa": {
+          "teddy": 0,
+          "nicole": 0
+        },
+        "tfsaWithdrawals": {
+          "teddy": 0,
+          "nicole": 0
+        },
+        "respContributions": 0
+      },
+      "accounts": {
+        "rrsp": {
+          "RBC": {
+            "teddy": 8100,
+            "nicole": 0
+          },
+          "Manulife": {
+            "teddy": 26324,
+            "nicole": 0
+          }
+        },
+        "totalRrsp": {
+          "teddy": 54424,
+          "nicole": 21000,
+          "total": 75424
+        },
+        "tfsa": {},
+        "totalTfsa": {
+          "teddy": 0,
+          "nicole": 0,
+          "total": 0
+        },
+        "privateInvesting": 0,
+        "resp": 0
+      },
+      "summary": {
+        "tdSavings": 0,
+        "wealthsimple": 0,
+        "shopifyRsu": 0,
+        "total": 110424
+      },
+      "returns": {
+        "td": {
+          "startingBalance": 0,
+          "currentBalance": 0,
+          "returnAmount": 0,
+          "returnPct": 0
+        },
+        "wealthsimple": {
+          "teddyStart": 0,
+          "nicoleStart": 0,
+          "teddyCurrent": 0,
+          "nicoleCurrent": 0,
+          "totalStart": 0,
+          "totalCurrent": 0,
+          "returnAmount": 0,
+          "returnPct": 0
+        },
+        "total": {
+          "returnAmount": 0,
+          "returnPct": 0
+        },
+        "goal": 0,
+        "totalGoal": 0,
+        "currentVsGoal": 0,
+        "pctDifference": 0
+      },
+      "debt": {
+        "totalDebt": 0
+      },
+      "subtotal": 0,
+      "taxBrackets": [
+        {
+          "upTo": 41536,
+          "rate": 20.05,
+          "tax": 8328,
+          "cumulative": 0
+        },
+        {
+          "upTo": 45282,
+          "rate": 24.15,
+          "tax": 905,
+          "cumulative": 0
+        },
+        {
+          "upTo": 73145,
+          "rate": 29.65,
+          "tax": 8261,
+          "cumulative": 0
+        },
+        {
+          "upTo": 83075,
+          "rate": 31.48,
+          "tax": 3126,
+          "cumulative": 0
+        },
+        {
+          "upTo": 86176,
+          "rate": 33.89,
+          "tax": 1051,
+          "cumulative": 0
+        },
+        {
+          "upTo": 90563,
+          "rate": 37.91,
+          "tax": 1663,
+          "cumulative": 0
+        },
+        {
+          "upTo": 140388,
+          "rate": 43.41,
+          "tax": 21629,
+          "cumulative": 0
+        },
+        {
+          "upTo": 150000,
+          "rate": 46.41,
+          "tax": 4461,
+          "cumulative": 0
+        },
+        {
+          "upTo": 200000,
+          "rate": 47.97,
+          "tax": 23985,
+          "cumulative": 0
+        },
+        {
+          "upTo": 220000,
+          "rate": 51.97,
+          "tax": 10394,
+          "cumulative": 0
+        }
+      ]
+    },
+    "2017": {
+      "year": 2017,
+      "salary": {
+        "teddy": {
+          "gross": 156523.75,
+          "rrspDeduction": 30000,
+          "actualTaxRate": 47.97,
+          "actualTax": 52253.59
+        },
+        "nicole": {
+          "gross": 104228.26,
+          "rrspDeduction": 25000,
+          "actualTaxRate": 31.48,
+          "actualTax": 27405.71
+        }
+      },
+      "contributions": {
+        "rrsp": {
+          "teddy": 30000,
+          "nicole": 25000
+        },
+        "tfsa": {
+          "teddy": 5000,
+          "nicole": 0
+        },
+        "tfsaWithdrawals": {
+          "teddy": 0,
+          "nicole": 0
+        },
+        "respContributions": 0
+      },
+      "accounts": {
+        "rrsp": {
+          "TD": {
+            "teddy": 45000,
+            "nicole": 21000
+          },
+          "Manulife (DPSP)": {
+            "teddy": 18544.79,
+            "nicole": 0
+          }
+        },
+        "totalRrsp": {
+          "teddy": 93544.79,
+          "nicole": 46000,
+          "total": 139544.79
+        },
+        "tfsa": {
+          "TD": {
+            "teddy": 0,
+            "nicole": 35000
+          }
+        },
+        "totalTfsa": {
+          "teddy": 5000,
+          "nicole": 35000,
+          "total": 40000
+        },
+        "privateInvesting": 0,
+        "resp": 0
+      },
+      "summary": {
+        "tdSavings": 179544.79,
+        "wealthsimple": 0,
+        "shopifyRsu": 0,
+        "total": 179544.79
+      },
+      "returns": {
+        "td": {
+          "startingBalance": 161000,
+          "currentBalance": 177148.75,
+          "returnAmount": 16148.75,
+          "returnPct": 10.03
+        },
+        "wealthsimple": {
+          "teddyStart": 0,
+          "nicoleStart": 0,
+          "teddyCurrent": 0,
+          "nicoleCurrent": 0,
+          "totalStart": 0,
+          "totalCurrent": 0,
+          "returnAmount": 0,
+          "returnPct": 0
+        },
+        "total": {
+          "returnAmount": 16148.75,
+          "returnPct": 0
+        },
+        "goal": 16100,
+        "totalGoal": 177100,
+        "currentVsGoal": 48.75,
+        "pctDifference": 0.03
+      },
+      "debt": {
+        "totalDebt": -261913.65,
+        "Mortgage": -261913.65
+      },
+      "subtotal": -82368.86,
+      "taxBrackets": [
+        {
+          "upTo": 42201,
+          "rate": 20.05,
+          "tax": 8461,
+          "cumulative": 0
+        },
+        {
+          "upTo": 45916,
+          "rate": 24.15,
+          "tax": 897,
+          "cumulative": 0
+        },
+        {
+          "upTo": 74313,
+          "rate": 29.65,
+          "tax": 8420,
+          "cumulative": 0
+        },
+        {
+          "upTo": 84404,
+          "rate": 31.48,
+          "tax": 3177,
+          "cumulative": 0
+        },
+        {
+          "upTo": 87559,
+          "rate": 33.89,
+          "tax": 1069,
+          "cumulative": 0
+        },
+        {
+          "upTo": 91831,
+          "rate": 37.91,
+          "tax": 1620,
+          "cumulative": 0
+        },
+        {
+          "upTo": 142353,
+          "rate": 43.41,
+          "tax": 21932,
+          "cumulative": 0
+        },
+        {
+          "upTo": 150000,
+          "rate": 46.41,
+          "tax": 3549,
+          "cumulative": 0
+        },
+        {
+          "upTo": 202800,
+          "rate": 47.97,
+          "tax": 25328,
+          "cumulative": 0
+        },
+        {
+          "upTo": 220000,
+          "rate": 51.97,
+          "tax": 8939,
+          "cumulative": 0
+        }
+      ]
+    },
+    "2018": {
+      "year": 2018,
+      "salary": {
+        "teddy": {
+          "gross": 214812.97,
+          "rrspDeduction": 51000,
+          "actualTaxRate": 47.97,
+          "actualTax": 80240.54
+        },
+        "nicole": {
+          "gross": 119485.6,
+          "rrspDeduction": 19000,
+          "actualTaxRate": 37.91,
+          "actualTax": 35379.29
+        }
+      },
+      "contributions": {
+        "rrsp": {
+          "teddy": 51000,
+          "nicole": 19000
+        },
+        "tfsa": {
+          "teddy": 900,
+          "nicole": 0
+        },
+        "tfsaWithdrawals": {
+          "teddy": -6026.65,
+          "nicole": -39923.15
+        },
+        "respContributions": 0
+      },
+      "accounts": {
+        "rrsp": {
+          "TD": {
+            "teddy": 110377.76,
+            "nicole": 49054.2
+          },
+          "Manulife (DPSP)": {
+            "teddy": 0,
+            "nicole": 0
+          }
+        },
+        "totalRrsp": {
+          "teddy": 161377.76,
+          "nicole": 68054.2,
+          "total": 229431.96
+        },
+        "tfsa": {
+          "TD": {
+            "teddy": 5126.65,
+            "nicole": 39923.15
+          }
+        },
+        "totalTfsa": {
+          "teddy": 0,
+          "nicole": 0,
+          "total": 0
+        },
+        "privateInvesting": 0,
+        "resp": 0
+      },
+      "summary": {
+        "tdSavings": 229431.96,
+        "wealthsimple": 0,
+        "shopifyRsu": 0,
+        "total": 229431.96
+      },
+      "returns": {
+        "td": {
+          "startingBalance": 229431.96,
+          "currentBalance": 254689.09,
+          "returnAmount": 25257.13,
+          "returnPct": 11.01
+        },
+        "wealthsimple": {
+          "teddyStart": 0,
+          "nicoleStart": 0,
+          "teddyCurrent": 0,
+          "nicoleCurrent": 0,
+          "totalStart": 0,
+          "totalCurrent": 0,
+          "returnAmount": 0,
+          "returnPct": 0
+        },
+        "total": {
+          "returnAmount": 25257.13,
+          "returnPct": 0
+        },
+        "goal": 22943.2,
+        "totalGoal": 252375.16,
+        "currentVsGoal": 2313.93,
+        "pctDifference": 1.01
+      },
+      "debt": {
+        "totalDebt": -220000,
+        "Mortgage": -220000,
+        "Danielle Loan for Mortgage": 21600
+      },
+      "subtotal": 9431.96,
+      "taxBrackets": [
+        {
+          "upTo": 42960,
+          "rate": 20.05,
+          "tax": 8613,
+          "cumulative": 8613
+        },
+        {
+          "upTo": 46605,
+          "rate": 24.15,
+          "tax": 880,
+          "cumulative": 9494
+        },
+        {
+          "upTo": 75657,
+          "rate": 29.65,
+          "tax": 8614,
+          "cumulative": 18108
+        },
+        {
+          "upTo": 85923,
+          "rate": 31.48,
+          "tax": 3232,
+          "cumulative": 21339
+        },
+        {
+          "upTo": 89131,
+          "rate": 33.89,
+          "tax": 1087,
+          "cumulative": 22427
+        },
+        {
+          "upTo": 93208,
+          "rate": 37.91,
+          "tax": 1546,
+          "cumulative": 23972
+        },
+        {
+          "upTo": 144489,
+          "rate": 43.41,
+          "tax": 22261,
+          "cumulative": 46233
+        },
+        {
+          "upTo": 150000,
+          "rate": 46.41,
+          "tax": 2558,
+          "cumulative": 48791
+        },
+        {
+          "upTo": 205842,
+          "rate": 47.97,
+          "tax": 26787,
+          "cumulative": 75578
+        },
+        {
+          "upTo": 220000,
+          "rate": 51.97,
+          "tax": 7358,
+          "cumulative": 82936
+        },
+        {
+          "upTo": 220000,
+          "rate": 53.53,
+          "tax": 0,
+          "cumulative": 0
+        }
+      ]
+    },
+    "2019": {
+      "year": 2019,
+      "salary": {
+        "teddy": {
+          "gross": 188188.08,
+          "rrspDeduction": 26000,
+          "actualTaxRate": 53.53,
+          "actualTax": 66651.39
+        },
+        "nicole": {
+          "gross": 153033.07,
+          "rrspDeduction": 23000,
+          "actualTaxRate": 37.91,
+          "actualTax": 49579.23
+        }
+      },
+      "contributions": {
+        "rrsp": {
+          "teddy": 26000,
+          "nicole": 23000
+        },
+        "tfsa": {
+          "teddy": 0,
+          "nicole": 0
+        },
+        "tfsaWithdrawals": {
+          "teddy": 0,
+          "nicole": 0
+        },
+        "respContributions": 0
+      },
+      "accounts": {
+        "rrsp": {
+          "TD": {
+            "teddy": 179968.35,
+            "nicole": 74719.96
+          }
+        },
+        "totalRrsp": {
+          "teddy": 205968.35,
+          "nicole": 97719.96,
+          "total": 303688.31
+        },
+        "tfsa": {
+          "TD": {
+            "teddy": 0,
+            "nicole": 0
+          }
+        },
+        "totalTfsa": {
+          "teddy": 0,
+          "nicole": 0,
+          "total": 0
+        },
+        "privateInvesting": 0,
+        "resp": 0
+      },
+      "summary": {
+        "tdSavings": 298688.31,
+        "wealthsimple": 0,
+        "shopifyRsu": 5000,
+        "total": 303688.31
+      },
+      "returns": {
+        "td": {
+          "startingBalance": 298688.31,
+          "currentBalance": 311521.04,
+          "returnAmount": 12832.73,
+          "returnPct": 4.3
+        },
+        "wealthsimple": {
+          "teddyStart": 0,
+          "nicoleStart": 0,
+          "teddyCurrent": 0,
+          "nicoleCurrent": 0,
+          "totalStart": 0,
+          "totalCurrent": 0,
+          "returnAmount": 0,
+          "returnPct": 0
+        },
+        "total": {
+          "returnAmount": 12832.73,
+          "returnPct": 0
+        },
+        "goal": 29868.83,
+        "totalGoal": 328557.14,
+        "currentVsGoal": -17036.1,
+        "pctDifference": -5.7
+      },
+      "debt": {
+        "totalDebt": -180000,
+        "Mortgage": -180000,
+        "Danielle Loan for Mortgage": 14600
+      },
+      "subtotal": 123688.31,
+      "taxBrackets": [
+        {
+          "upTo": 43906,
+          "rate": 20.05,
+          "tax": 8803,
+          "cumulative": 8803
+        },
+        {
+          "upTo": 47630,
+          "rate": 24.15,
+          "tax": 899,
+          "cumulative": 9702
+        },
+        {
+          "upTo": 77313,
+          "rate": 29.65,
+          "tax": 8801,
+          "cumulative": 18504
+        },
+        {
+          "upTo": 87813,
+          "rate": 31.48,
+          "tax": 3305,
+          "cumulative": 21809
+        },
+        {
+          "upTo": 91101,
+          "rate": 33.89,
+          "tax": 1114,
+          "cumulative": 22923
+        },
+        {
+          "upTo": 95259,
+          "rate": 37.91,
+          "tax": 1576,
+          "cumulative": 24500
+        },
+        {
+          "upTo": 147667,
+          "rate": 43.41,
+          "tax": 22750,
+          "cumulative": 47250
+        },
+        {
+          "upTo": 150000,
+          "rate": 46.41,
+          "tax": 1083,
+          "cumulative": 48333
+        },
+        {
+          "upTo": 210371,
+          "rate": 47.97,
+          "tax": 28960,
+          "cumulative": 77293
+        },
+        {
+          "upTo": 220000,
+          "rate": 51.97,
+          "tax": 5004,
+          "cumulative": 82297
+        },
+        {
+          "upTo": 220000,
+          "rate": 53.53,
+          "tax": 0,
+          "cumulative": 0
+        }
+      ]
+    },
+    "2020": {
+      "year": 2020,
+      "salary": {
+        "teddy": {
+          "gross": 983526.43,
+          "rrspDeduction": 26000,
+          "actualTaxRate": 53.53,
+          "actualTax": 491012.43
+        },
+        "nicole": {
+          "gross": 105430.43,
+          "rrspDeduction": 23000,
+          "actualTaxRate": 37.91,
+          "actualTax": 28914.93
+        }
+      },
+      "contributions": {
+        "rrsp": {
+          "teddy": 26000,
+          "nicole": 23000
+        },
+        "tfsa": {
+          "teddy": 67887.87,
+          "nicole": 77759.68
+        },
+        "tfsaWithdrawals": {
+          "teddy": 0,
+          "nicole": 0
+        },
+        "respContributions": 0
+      },
+      "accounts": {
+        "rrsp": {
+          "TD": {
+            "teddy": 213123.26,
+            "nicole": 98397
+          },
+          "Wealth Simple": {
+            "teddy": 5000,
+            "nicole": 0
+          }
+        },
+        "totalRrsp": {
+          "teddy": 244123.26,
+          "nicole": 121397,
+          "total": 365520.26
+        },
+        "tfsa": {
+          "TD": {
+            "teddy": 0,
+            "nicole": 0
+          }
+        },
+        "totalTfsa": {
+          "teddy": 67887.87,
+          "nicole": 77759.68,
+          "total": 145647.55
+        },
+        "privateInvesting": 0,
+        "resp": 0
+      },
+      "summary": {
+        "tdSavings": 506167.81,
+        "wealthsimple": 0,
+        "shopifyRsu": 5000,
+        "total": 511167.81
+      },
+      "returns": {
+        "td": {
+          "startingBalance": 506167.81,
+          "currentBalance": 594651.95,
+          "returnAmount": 88484.14,
+          "returnPct": 17.48
+        },
+        "wealthsimple": {
+          "teddyStart": 0,
+          "nicoleStart": 0,
+          "teddyCurrent": 0,
+          "nicoleCurrent": 0,
+          "totalStart": 0,
+          "totalCurrent": 0,
+          "returnAmount": 0,
+          "returnPct": 0
+        },
+        "total": {
+          "returnAmount": 88484.14,
+          "returnPct": 0
+        },
+        "goal": 50616.78,
+        "totalGoal": 556784.59,
+        "currentVsGoal": 37867.36,
+        "pctDifference": 7.48
+      },
+      "debt": {
+        "totalDebt": -2065000,
+        "Beecroft Mortgage": -580000,
+        "Gibson Square Mortgage": -406000,
+        "Pettit Mortgage": -1079000,
+        "Danielle Loan for Mortgage": 0
+      },
+      "subtotal": -1553832.19,
+      "taxBrackets": [
+        {
+          "upTo": 43906,
+          "rate": 20.05,
+          "tax": 8803,
+          "cumulative": 8803
+        },
+        {
+          "upTo": 47630,
+          "rate": 24.15,
+          "tax": 899,
+          "cumulative": 9702
+        },
+        {
+          "upTo": 77313,
+          "rate": 29.65,
+          "tax": 8801,
+          "cumulative": 18504
+        },
+        {
+          "upTo": 87813,
+          "rate": 31.48,
+          "tax": 3305,
+          "cumulative": 21809
+        },
+        {
+          "upTo": 91101,
+          "rate": 33.89,
+          "tax": 1114,
+          "cumulative": 22923
+        },
+        {
+          "upTo": 95259,
+          "rate": 37.91,
+          "tax": 1576,
+          "cumulative": 24500
+        },
+        {
+          "upTo": 147667,
+          "rate": 43.41,
+          "tax": 22750,
+          "cumulative": 47250
+        },
+        {
+          "upTo": 150000,
+          "rate": 46.41,
+          "tax": 1083,
+          "cumulative": 48333
+        },
+        {
+          "upTo": 210371,
+          "rate": 47.97,
+          "tax": 28960,
+          "cumulative": 77293
+        },
+        {
+          "upTo": 220000,
+          "rate": 51.97,
+          "tax": 5004,
+          "cumulative": 82297
+        },
+        {
+          "upTo": 220000,
+          "rate": 53.53,
+          "tax": 0,
+          "cumulative": 0
+        }
+      ]
+    },
+    "2021": {
+      "year": 2021,
+      "salary": {
+        "teddy": {
+          "gross": 2109111,
+          "rrspDeduction": 34000,
+          "actualTaxRate": 53.53,
+          "actualTax": 1092708.91
+        },
+        "nicole": {
+          "gross": 30101.11,
+          "rrspDeduction": 23500,
+          "actualTaxRate": 20.05,
+          "actualTax": 6035.27
+        }
+      },
+      "contributions": {
+        "rrsp": {
+          "teddy": 34000,
+          "nicole": 23500
+        },
+        "tfsa": {
+          "teddy": 7000,
+          "nicole": 7000
+        },
+        "tfsaWithdrawals": {
+          "teddy": 0,
+          "nicole": 0
+        },
+        "respContributions": 0
+      },
+      "accounts": {
+        "rrsp": {
+          "TD": {
+            "teddy": 308347.14,
+            "nicole": 161407.83
+          },
+          "Wealth Simple": {
+            "teddy": 5000,
+            "nicole": 0
+          }
+        },
+        "totalRrsp": {
+          "teddy": 347347.14,
+          "nicole": 184907.83,
+          "total": 532254.97
+        },
+        "tfsa": {
+          "TD": {
+            "teddy": 61371.33,
+            "nicole": 66253.79
+          }
+        },
+        "totalTfsa": {
+          "teddy": 68371.33,
+          "nicole": 73253.79,
+          "total": 141625.12
+        },
+        "privateInvesting": 0,
+        "resp": 0
+      },
+      "summary": {
+        "tdSavings": 663880.09,
+        "wealthsimple": 0,
+        "shopifyRsu": 10000,
+        "total": 673880.09
+      },
+      "returns": {
+        "td": {
+          "startingBalance": 663880.09,
+          "currentBalance": 673414.66,
+          "returnAmount": 9534.57,
+          "returnPct": 1.44
+        },
+        "wealthsimple": {
+          "teddyStart": 0,
+          "nicoleStart": 0,
+          "teddyCurrent": 0,
+          "nicoleCurrent": 0,
+          "totalStart": 0,
+          "totalCurrent": 0,
+          "returnAmount": 0,
+          "returnPct": 0
+        },
+        "total": {
+          "returnAmount": 9534.57,
+          "returnPct": 0
+        },
+        "goal": 66388.01,
+        "totalGoal": 730268.1,
+        "currentVsGoal": -56853.44,
+        "pctDifference": -8.56
+      },
+      "debt": {
+        "totalDebt": -1990000,
+        "Beecroft Mortgage": -560000,
+        "Gibson Square Mortgage": -390000,
+        "Pettit Mortgage": -1040000
+      },
+      "subtotal": -1316119.91,
+      "taxBrackets": [
+        {
+          "upTo": 45142,
+          "rate": 20.05,
+          "tax": 9051,
+          "cumulative": 9051
+        },
+        {
+          "upTo": 49020,
+          "rate": 24.15,
+          "tax": 937,
+          "cumulative": 9988
+        },
+        {
+          "upTo": 79505,
+          "rate": 29.65,
+          "tax": 9039,
+          "cumulative": 19026
+        },
+        {
+          "upTo": 90287,
+          "rate": 31.48,
+          "tax": 3394,
+          "cumulative": 22420
+        },
+        {
+          "upTo": 93655,
+          "rate": 33.89,
+          "tax": 1141,
+          "cumulative": 23562
+        },
+        {
+          "upTo": 98040,
+          "rate": 37.91,
+          "tax": 1662,
+          "cumulative": 25224
+        },
+        {
+          "upTo": 150000,
+          "rate": 43.41,
+          "tax": 22556,
+          "cumulative": 47780
+        },
+        {
+          "upTo": 151978,
+          "rate": 46.41,
+          "tax": 918,
+          "cumulative": 48698
+        },
+        {
+          "upTo": 216511,
+          "rate": 47.97,
+          "tax": 30956,
+          "cumulative": 79655
+        },
+        {
+          "upTo": 220000,
+          "rate": 51.97,
+          "tax": 1813,
+          "cumulative": 81468
+        },
+        {
+          "upTo": 220000,
+          "rate": 53.53,
+          "tax": 0,
+          "cumulative": 0
+        }
+      ]
+    },
+    "2022": {
+      "year": 2022,
+      "salary": {
+        "teddy": {
+          "gross": 631094,
+          "rrspDeduction": 30000,
+          "actualTaxRate": 53.53,
+          "actualTax": 301015.62
+        },
+        "nicole": {
+          "gross": 7427,
+          "rrspDeduction": 0,
+          "actualTaxRate": 20.05,
+          "actualTax": 0
+        }
+      },
+      "contributions": {
+        "rrsp": {
+          "teddy": 30000,
+          "nicole": 0
+        },
+        "tfsa": {
+          "teddy": 6156,
+          "nicole": 6052
+        },
+        "tfsaWithdrawals": {
+          "teddy": 0,
+          "nicole": 0
+        },
+        "respContributions": 2500
+      },
+      "accounts": {
+        "rrsp": {
+          "TD": {
+            "teddy": 360057.34,
+            "nicole": 184749.93
+          },
+          "Wealth Simple": {
+            "teddy": 5000,
+            "nicole": 0
+          }
+        },
+        "totalRrsp": {
+          "teddy": 395057.34,
+          "nicole": 184749.93,
+          "total": 579807.27
+        },
+        "tfsa": {
+          "TD": {
+            "teddy": 92587.74,
+            "nicole": 95623.91
+          }
+        },
+        "totalTfsa": {
+          "teddy": 98743.74,
+          "nicole": 101675.91,
+          "total": 200419.65
+        },
+        "privateInvesting": 644090.26,
+        "resp": 2240.78
+      },
+      "summary": {
+        "tdSavings": 1424057.96,
+        "wealthsimple": 0,
+        "shopifyRsu": 14000,
+        "total": 1453057.96
+      },
+      "returns": {
+        "td": {
+          "startingBalance": 1424057.96,
+          "currentBalance": 1357057.96,
+          "returnAmount": -67000,
+          "returnPct": -4.7
+        },
+        "wealthsimple": {
+          "teddyStart": 0,
+          "nicoleStart": 0,
+          "teddyCurrent": 0,
+          "nicoleCurrent": 0,
+          "totalStart": 0,
+          "totalCurrent": 0,
+          "returnAmount": 0,
+          "returnPct": 0
+        },
+        "total": {
+          "returnAmount": -67000,
+          "returnPct": 0
+        },
+        "goal": 142405.8,
+        "totalGoal": 1566463.76,
+        "currentVsGoal": -209405.8,
+        "pctDifference": -14.7
+      },
+      "debt": {
+        "totalDebt": -1912000,
+        "Beecroft Mortgage": -538000,
+        "Gibson Square Mortgage": -376000,
+        "Pettit Mortgage": -998000
+      },
+      "subtotal": -482942.04,
+      "taxBrackets": [
+        {
+          "upTo": 46226,
+          "rate": 20.05,
+          "tax": 9268,
+          "cumulative": 9268
+        },
+        {
+          "upTo": 50197,
+          "rate": 24.15,
+          "tax": 959,
+          "cumulative": 10227
+        },
+        {
+          "upTo": 81411,
+          "rate": 29.65,
+          "tax": 9255,
+          "cumulative": 19482
+        },
+        {
+          "upTo": 92454,
+          "rate": 31.48,
+          "tax": 3476,
+          "cumulative": 22959
+        },
+        {
+          "upTo": 95906,
+          "rate": 33.89,
+          "tax": 1170,
+          "cumulative": 24128
+        },
+        {
+          "upTo": 100392,
+          "rate": 37.91,
+          "tax": 1701,
+          "cumulative": 25829
+        },
+        {
+          "upTo": 150000,
+          "rate": 43.41,
+          "tax": 21535,
+          "cumulative": 47364
+        },
+        {
+          "upTo": 155625,
+          "rate": 44.97,
+          "tax": 2530,
+          "cumulative": 49894
+        },
+        {
+          "upTo": 220000,
+          "rate": 48.35,
+          "tax": 31125,
+          "cumulative": 81019
+        },
+        {
+          "upTo": 221708,
+          "rate": 49.91,
+          "tax": 852,
+          "cumulative": 81871
+        },
+        {
+          "upTo": 221708,
+          "rate": 53.53,
+          "tax": 0,
+          "cumulative": 0
+        }
+      ]
+    },
+    "2023": {
+      "year": 2023,
+      "salary": {
+        "teddy": {
+          "gross": 682998,
+          "rrspDeduction": 30000,
+          "actualTaxRate": 53.53,
+          "actualTax": 326825.85
+        },
+        "nicole": {
+          "gross": 25392,
+          "rrspDeduction": 0,
+          "actualTaxRate": 20.05,
+          "actualTax": 0
+        }
+      },
+      "contributions": {
+        "rrsp": {
+          "teddy": 30000,
+          "nicole": 0
+        },
+        "tfsa": {
+          "teddy": 6500,
+          "nicole": 6500
+        },
+        "tfsaWithdrawals": {
+          "teddy": 0,
+          "nicole": 0
+        },
+        "respContributions": 2500
+      },
+      "accounts": {
+        "rrsp": {
+          "TD": {
+            "teddy": 296044.35,
+            "nicole": 131948.95
+          },
+          "Wealth Simple": {
+            "teddy": 71730.29,
+            "nicole": 32025.5
+          }
+        },
+        "totalRrsp": {
+          "teddy": 397774.64,
+          "nicole": 163974.45,
+          "total": 561749.09
+        },
+        "tfsa": {
+          "Wealthsimple": {
+            "teddy": 98743.74,
+            "nicole": 101675.91
+          }
+        },
+        "totalTfsa": {
+          "teddy": 105243.74,
+          "nicole": 108175.91,
+          "total": 213419.65
+        },
+        "privateInvesting": 644090.26,
+        "resp": 4740.78
+      },
+      "summary": {
+        "tdSavings": 1109324.34,
+        "wealthsimple": 0,
+        "shopifyRsu": 2200,
+        "total": 1428699.78
+      },
+      "returns": {
+        "td": {
+          "startingBalance": 1109324.34,
+          "currentBalance": 1174315.83,
+          "returnAmount": 64991.49,
+          "returnPct": 5.86
+        },
+        "wealthsimple": {
+          "teddyStart": 176974.03,
+          "nicoleStart": 140201.41,
+          "teddyCurrent": 250180.56,
+          "nicoleCurrent": 177685.04,
+          "totalStart": 317175.44,
+          "totalCurrent": 427865.6,
+          "returnAmount": 175681.65,
+          "returnPct": 34.9
+        },
+        "total": {
+          "returnAmount": 175681.65,
+          "returnPct": 12.3
+        },
+        "goal": 142649.98,
+        "totalGoal": 1569149.76,
+        "currentVsGoal": 33031.67,
+        "pctDifference": 2.32
+      },
+      "debt": {
+        "totalDebt": -2376000,
+        "Beecroft Mortgage": -538000,
+        "Gibson Square Mortgage": -376000,
+        "Pettit Mortgage": -998000,
+        "Valhalla Road Mortgage": -464000
+      },
+      "subtotal": -949500.22,
+      "taxBrackets": [
+        {
+          "upTo": 49231,
+          "rate": 20.05,
+          "tax": 9871,
+          "cumulative": 9871
+        },
+        {
+          "upTo": 53359,
+          "rate": 24.15,
+          "tax": 997,
+          "cumulative": 10868
+        },
+        {
+          "upTo": 86698,
+          "rate": 29.65,
+          "tax": 9885,
+          "cumulative": 20753
+        },
+        {
+          "upTo": 98463,
+          "rate": 31.48,
+          "tax": 3704,
+          "cumulative": 24456
+        },
+        {
+          "upTo": 102135,
+          "rate": 33.89,
+          "tax": 1244,
+          "cumulative": 25701
+        },
+        {
+          "upTo": 106717,
+          "rate": 37.91,
+          "tax": 1737,
+          "cumulative": 27438
+        },
+        {
+          "upTo": 150000,
+          "rate": 43.41,
+          "tax": 18789,
+          "cumulative": 46227
+        },
+        {
+          "upTo": 165430,
+          "rate": 44.97,
+          "tax": 6939,
+          "cumulative": 53166
+        },
+        {
+          "upTo": 220000,
+          "rate": 48.35,
+          "tax": 26385,
+          "cumulative": 79550
+        },
+        {
+          "upTo": 235675,
+          "rate": 49.91,
+          "tax": 7823,
+          "cumulative": 87374
+        },
+        {
+          "upTo": 235675,
+          "rate": 53.53,
+          "tax": 0,
+          "cumulative": 0
+        }
+      ]
+    },
+    "2024": {
+      "year": 2024,
+      "salary": {
+        "teddy": {
+          "gross": 743447,
+          "rrspDeduction": 31648,
+          "actualTaxRate": 53.53,
+          "actualTax": 357608.68
+        },
+        "nicole": {
+          "gross": 22332,
+          "rrspDeduction": 2324,
+          "actualTaxRate": 20.05,
+          "actualTax": 0
+        }
+      },
+      "contributions": {
+        "rrsp": {
+          "teddy": 31648,
+          "nicole": 2324
+        },
+        "tfsa": {
+          "teddy": 7000,
+          "nicole": 7000
+        },
+        "tfsaWithdrawals": {
+          "teddy": 0,
+          "nicole": 0
+        },
+        "respContributions": 5000
+      },
+      "accounts": {
+        "rrsp": {
+          "TD": {
+            "teddy": 345059.7,
+            "nicole": 140397.48
+          },
+          "Wealthsimple": {
+            "teddy": 142981.35,
+            "nicole": 67214
+          }
+        },
+        "totalRrsp": {
+          "teddy": 519689.05,
+          "nicole": 209935.48,
+          "total": 729624.53
+        },
+        "tfsa": {
+          "Wealthsimple": {
+            "teddy": 107199.21,
+            "nicole": 110471.04
+          }
+        },
+        "totalTfsa": {
+          "teddy": 114199.21,
+          "nicole": 117471.04,
+          "total": 231670.25
+        },
+        "privateInvesting": 680687.79,
+        "resp": 8170.86
+      },
+      "summary": {
+        "tdSavings": 1179315.83,
+        "wealthsimple": 0,
+        "shopifyRsu": 6776,
+        "total": 1661929.43
+      },
+      "returns": {
+        "td": {
+          "startingBalance": 1179315.83,
+          "currentBalance": 1348360.99,
+          "returnAmount": 169045.16,
+          "returnPct": 14.33
+        },
+        "wealthsimple": {
+          "teddyStart": 295828.56,
+          "nicoleStart": 194009.04,
+          "teddyCurrent": 356757.02,
+          "nicoleCurrent": 229421.43,
+          "totalStart": 489837.6,
+          "totalCurrent": 586178.45,
+          "returnAmount": 265386.01,
+          "returnPct": 19.67
+        },
+        "total": {
+          "returnAmount": 265386.01,
+          "returnPct": 15.84
+        },
+        "goal": 166915.34,
+        "totalGoal": 1836068.77,
+        "currentVsGoal": 98470.67,
+        "pctDifference": 5.9
+      },
+      "debt": {
+        "totalDebt": -2239000,
+        "Beecroft Mortgage": -504000,
+        "Gibson Square Mortgage": -352000,
+        "Pettit Mortgage": -933000,
+        "Valhalla Road Mortgage": -450000
+      },
+      "subtotal": -583846.57,
+      "taxBrackets": [
+        {
+          "upTo": 51446,
+          "rate": 20.05,
+          "tax": 10315,
+          "cumulative": 10315
+        },
+        {
+          "upTo": 55867,
+          "rate": 24.15,
+          "tax": 1068,
+          "cumulative": 11383
+        },
+        {
+          "upTo": 90599,
+          "rate": 29.65,
+          "tax": 10298,
+          "cumulative": 21681
+        },
+        {
+          "upTo": 102894,
+          "rate": 31.48,
+          "tax": 3870,
+          "cumulative": 25551
+        },
+        {
+          "upTo": 106732,
+          "rate": 33.89,
+          "tax": 1301,
+          "cumulative": 26852
+        },
+        {
+          "upTo": 111733,
+          "rate": 37.91,
+          "tax": 1896,
+          "cumulative": 28748
+        },
+        {
+          "upTo": 150000,
+          "rate": 43.41,
+          "tax": 16612,
+          "cumulative": 45359
+        },
+        {
+          "upTo": 173205,
+          "rate": 44.97,
+          "tax": 10435,
+          "cumulative": 55795
+        },
+        {
+          "upTo": 220000,
+          "rate": 48.29,
+          "tax": 22597,
+          "cumulative": 78392
+        },
+        {
+          "upTo": 246752,
+          "rate": 49.85,
+          "tax": 13336,
+          "cumulative": 91728
+        },
+        {
+          "upTo": 246752,
+          "rate": 53.53,
+          "tax": 0,
+          "cumulative": 0
+        }
+      ]
+    },
+    "2025": {
+      "year": 2025,
+      "salary": {
+        "teddy": {
+          "gross": 759104,
+          "rrspDeduction": 30000,
+          "actualTaxRate": 53.53,
+          "actualTax": 365045.33
+        },
+        "nicole": {
+          "gross": 22332,
+          "rrspDeduction": 2324,
+          "actualTaxRate": 20.05,
+          "actualTax": 0
+        }
+      },
+      "contributions": {
+        "rrsp": {
+          "teddy": 30000,
+          "nicole": 2324
+        },
+        "tfsa": {
+          "teddy": 7000,
+          "nicole": 7000
+        },
+        "tfsaWithdrawals": {
+          "teddy": -126514.98,
+          "nicole": -138911.5
+        },
+        "respContributions": 5000
+      },
+      "accounts": {
+        "rrsp": {
+          "TD": {
+            "teddy": 398300.94,
+            "nicole": 160855.19
+          },
+          "Wealthsimple": {
+            "teddy": 243898.53,
+            "nicole": 101476.5
+          }
+        },
+        "totalRrsp": {
+          "teddy": 672199.47,
+          "nicole": 264655.69,
+          "total": 936855.16
+        },
+        "tfsa": {
+          "Wealthsimple": {
+            "teddy": 122846.19,
+            "nicole": 127944.93
+          }
+        },
+        "totalTfsa": {
+          "teddy": 3331.21,
+          "nicole": -3966.57,
+          "total": -635.36
+        },
+        "privateInvesting": 912828.23,
+        "resp": 16376.63
+      },
+      "summary": {
+        "tdSavings": 1525684.99,
+        "wealthsimple": 344739.67,
+        "shopifyRsu": 0,
+        "total": 1870424.66
+      },
+      "returns": {
+        "td": {
+          "startingBalance": 1525684.99,
+          "currentBalance": 1709183.53,
+          "returnAmount": 183498.54,
+          "returnPct": 12.03
+        },
+        "wealthsimple": {
+          "teddyStart": 254229.74,
+          "nicoleStart": 104509.93,
+          "teddyCurrent": 277608.74,
+          "nicoleCurrent": 106884,
+          "totalStart": 358739.67,
+          "totalCurrent": 384492.74,
+          "returnAmount": 209251.61,
+          "returnPct": 7.18
+        },
+        "total": {
+          "returnAmount": 209251.61,
+          "returnPct": 11.1
+        },
+        "goal": 188442.47,
+        "totalGoal": 2072867.13,
+        "currentVsGoal": 20809.14,
+        "pctDifference": 1.1
+      },
+      "debt": {
+        "totalDebt": -2150000,
+        "Beecroft Mortgage": -490000,
+        "Gibson Square Mortgage": -330000,
+        "Pettit Mortgage": -900000,
+        "Valhalla Road Mortgage": -430000
+      },
+      "subtotal": -279575.34,
+      "taxBrackets": [
+        {
+          "upTo": 52886,
+          "rate": 20.05,
+          "tax": 10604,
+          "cumulative": 10604
+        },
+        {
+          "upTo": 57375,
+          "rate": 24.15,
+          "tax": 1084,
+          "cumulative": 11688
+        },
+        {
+          "upTo": 93132,
+          "rate": 29.65,
+          "tax": 10602,
+          "cumulative": 22290
+        },
+        {
+          "upTo": 105775,
+          "rate": 31.48,
+          "tax": 3980,
+          "cumulative": 26270
+        },
+        {
+          "upTo": 109727,
+          "rate": 33.89,
+          "tax": 1339,
+          "cumulative": 27609
+        },
+        {
+          "upTo": 114750,
+          "rate": 37.91,
+          "tax": 1904,
+          "cumulative": 29513
+        },
+        {
+          "upTo": 150000,
+          "rate": 43.41,
+          "tax": 15302,
+          "cumulative": 44815
+        },
+        {
+          "upTo": 177882,
+          "rate": 44.97,
+          "tax": 12539,
+          "cumulative": 57354
+        },
+        {
+          "upTo": 220000,
+          "rate": 48.29,
+          "tax": 20339,
+          "cumulative": 77693
+        },
+        {
+          "upTo": 253414,
+          "rate": 49.85,
+          "tax": 16657,
+          "cumulative": 94349
+        },
+        {
+          "upTo": 253414,
+          "rate": 53.53,
+          "tax": 0,
+          "cumulative": 0
+        }
+      ]
+    },
+    "2026": {
+      "year": 2026,
+      "salary": {
+        "teddy": {
+          "gross": 800000,
+          "rrspDeduction": 30000,
+          "actualTaxRate": 53.53,
+          "actualTax": 386236.94
+        },
+        "nicole": {
+          "gross": 25000,
+          "rrspDeduction": 0,
+          "actualTaxRate": 20.05,
+          "actualTax": 0
+        }
+      },
+      "contributions": {
+        "rrsp": {
+          "teddy": 30000,
+          "nicole": 0
+        },
+        "tfsa": {
+          "teddy": 133514.98,
+          "nicole": 145911.5
+        },
+        "tfsaWithdrawals": {
+          "teddy": 0,
+          "nicole": 0
+        },
+        "respContributions": 5000
+      },
+      "accounts": {
+        "rrsp": {
+          "Wealthsimple": {
+            "teddy": 262558.99,
+            "nicole": 98906.25
+          },
+          "TD": {
+            "teddy": 458460.56,
+            "nicole": 223879.11000000002
+          }
+        },
+        "totalRrsp": {
+          "teddy": 721019.55,
+          "nicole": 322785.36,
+          "total": 1043804.91
+        },
+        "tfsa": {
+          "TD": {
+            "teddy": 89566.97,
+            "nicole": 96178.93
+          },
+          "Wealthsimple": {
+            "teddy": 44981.71,
+            "nicole": 45308.11
+          }
+        },
+        "totalTfsa": {
+          "teddy": 134548.68,
+          "nicole": 141487.03999999998,
+          "total": 276035.72
+        },
+        "privateInvesting": 410345.16000000003,
+        "nonRegistered": 410345.16000000003,
+        "crypto": 522.31,
+        "resp": 30180.08,
+        "allAccounts": [
+          {
+            "name": "SDRSP (Teddy)",
+            "balance": 458460.56,
+            "currency": "cad",
+            "type": "rrsp",
+            "category": "TD",
+            "institution": "TD Canada Trust"
+          },
+          {
+            "name": "Non-registered (US)",
+            "balance": 232985.2,
+            "currency": "usd",
+            "type": "nonreg",
+            "category": "TD",
+            "institution": "TD Canada Trust"
+          },
+          {
+            "name": "Non-registered",
+            "balance": 172619.32,
+            "currency": "cad",
+            "type": "nonreg",
+            "category": "TD",
+            "institution": "TD Canada Trust"
+          },
+          {
+            "name": "SDRSP (Nicole)",
+            "balance": 167727.85,
+            "currency": "cad",
+            "type": "rrsp",
+            "category": "TD",
+            "institution": "TD Canada Trust"
+          },
+          {
+            "name": "RRSP (Teddy)",
+            "balance": 125350.83,
+            "currency": "cad",
+            "type": "rrsp",
+            "category": "Wealthsimple",
+            "institution": "Wealthsimple (Canada)"
+          },
+          {
+            "name": "RRSP (Nicole)",
+            "balance": 98906.25,
+            "currency": "cad",
+            "type": "rrsp",
+            "category": "Wealthsimple",
+            "institution": "Wealthsimple (Canada)"
+          },
+          {
+            "name": "TFSA (Nicole)",
+            "balance": 96178.93,
+            "currency": "cad",
+            "type": "tfsa",
+            "category": "TD",
+            "institution": "TD Canada Trust"
+          },
+          {
+            "name": "TFSA (Teddy)",
+            "balance": 89566.97,
+            "currency": "cad",
+            "type": "tfsa",
+            "category": "TD",
+            "institution": "TD Canada Trust"
+          },
+          {
+            "name": "RRSP Private Equity (Teddy)",
+            "balance": 67198.82,
+            "currency": "cad",
+            "type": "rrsp",
+            "category": "Wealthsimple",
+            "institution": "Wealthsimple (Canada)"
+          },
+          {
+            "name": "RRSP Private Credit (Teddy)",
+            "balance": 52382.42,
+            "currency": "cad",
+            "type": "rrsp",
+            "category": "Wealthsimple",
+            "institution": "Wealthsimple (Canada)"
+          },
+          {
+            "name": "TFSA (Nicole)",
+            "balance": 45308.11,
+            "currency": "cad",
+            "type": "tfsa",
+            "category": "Wealthsimple",
+            "institution": "Wealthsimple (Canada)"
+          },
+          {
+            "name": "TFSA (Teddy)",
+            "balance": 44981.71,
+            "currency": "cad",
+            "type": "tfsa",
+            "category": "Wealthsimple",
+            "institution": "Wealthsimple (Canada)"
+          },
+          {
+            "name": "SDRSP (Nicole)",
+            "balance": 34114.9,
+            "currency": "cad",
+            "type": "rrsp",
+            "category": "TD",
+            "institution": "TD Canada Trust"
+          },
+          {
+            "name": "RESP ACCOUNT (Cody and Riley)",
+            "balance": 30180.08,
+            "currency": "cad",
+            "type": "resp",
+            "category": "TD",
+            "institution": "TD Canada Trust"
+          },
+          {
+            "name": "SDRSP (Nicole)",
+            "balance": 22036.36,
+            "currency": "cad",
+            "type": "rrsp",
+            "category": "TD",
+            "institution": "TD Canada Trust"
+          },
+          {
+            "name": "Group RRSP (Teddy)",
+            "balance": 17626.92,
+            "currency": "cad",
+            "type": "rrsp",
+            "category": "Wealthsimple",
+            "institution": "Wealthsimple (Canada)"
+          },
+          {
+            "name": "Non-registered (Teddy)",
+            "balance": 4740.64,
+            "currency": "cad",
+            "type": "nonreg",
+            "category": "Wealthsimple",
+            "institution": "Wealthsimple (Canada)"
+          },
+          {
+            "name": "Crypto (Teddy)",
+            "balance": 522.31,
+            "currency": "cad",
+            "type": "crypto",
+            "category": "Wealthsimple",
+            "institution": "Wealthsimple (Canada)"
+          }
+        ],
+        "allLoans": [
+          {
+            "name": "LINE OF CREDIT - 509 Beecroft",
+            "balance": -478765.86,
+            "institution": "TD Canada Trust"
+          },
+          {
+            "name": "LINE OF CREDIT - 5162 Yonge Street",
+            "balance": -333702.63,
+            "institution": "TD Canada Trust"
+          },
+          {
+            "name": "LINE OF CREDIT - 1 Valhalla Inn",
+            "balance": -435509,
+            "institution": "TD Canada Trust"
+          }
+        ]
+      },
+      "summary": {
+        "tdSavings": 1303870.17,
+        "wealthsimple": 457018.01,
+        "shopifyRsu": 0,
+        "total": 1760888.18
+      },
+      "returns": {
+        "td": {
+          "startingBalance": 1314183.53,
+          "currentBalance": 1303870.17,
+          "returnAmount": -10313.360000000102,
+          "returnPct": -0.7847731891754953
+        },
+        "wealthsimple": {
+          "teddyStart": 326222.76,
+          "nicoleStart": 153666.74,
+          "teddyCurrent": 319219.18,
+          "nicoleCurrent": 153036.81,
+          "totalStart": 479889.5,
+          "totalCurrent": 457018.01,
+          "returnAmount": -22871.48999999999,
+          "returnPct": -4.765990920826564
+        },
+        "total": {
+          "returnAmount": -33184.85000000009,
+          "returnPct": -1.8496933761943957
+        },
+        "goal": 179407.303,
+        "totalGoal": 1973480.333,
+        "currentVsGoal": -212592.15300000017,
+        "pctDifference": -10.77244852381309
+      },
+      "debt": {
+        "Beecroft Mortgage": -478765.86,
+        "Gibson Square Mortgage": -333702.63,
+        "Valhalla Road Mortgage": -435509,
+        "totalDebt": -1247977.49
+      },
+      "subtotal": 512910.68999999994,
+      "taxBrackets": [
+        {
+          "upTo": 53891,
+          "rate": 20.05,
+          "tax": 10805,
+          "cumulative": 10805
+        },
+        {
+          "upTo": 58523,
+          "rate": 24.15,
+          "tax": 1119,
+          "cumulative": 11924
+        },
+        {
+          "upTo": 94907,
+          "rate": 29.65,
+          "tax": 10788,
+          "cumulative": 22712
+        },
+        {
+          "upTo": 107785,
+          "rate": 31.48,
+          "tax": 4054,
+          "cumulative": 26766
+        },
+        {
+          "upTo": 111814,
+          "rate": 33.89,
+          "tax": 1365,
+          "cumulative": 28131
+        },
+        {
+          "upTo": 117045,
+          "rate": 37.91,
+          "tax": 1983,
+          "cumulative": 30114
+        },
+        {
+          "upTo": 150000,
+          "rate": 43.41,
+          "tax": 14306,
+          "cumulative": 44420
+        },
+        {
+          "upTo": 181440,
+          "rate": 44.97,
+          "tax": 14139,
+          "cumulative": 58558
+        },
+        {
+          "upTo": 220000,
+          "rate": 48.29,
+          "tax": 18621,
+          "cumulative": 77179
+        },
+        {
+          "upTo": 258482,
+          "rate": 49.85,
+          "tax": 19183,
+          "cumulative": 96362
+        },
+        {
+          "upTo": 258482,
+          "rate": 53.53,
+          "tax": 0,
+          "cumulative": 0
+        }
+      ]
+    }
+  },
+  "salaries": [
+    {
+      "year": 2007,
+      "teddyGross": 17292,
+      "teddyTax": 0,
+      "nicoleGross": 10133,
+      "nicoleTax": 200
+    },
+    {
+      "year": 2008,
+      "teddyGross": 58815,
+      "teddyTax": 11763,
+      "nicoleGross": 10093,
+      "nicoleTax": 200
+    },
+    {
+      "year": 2009,
+      "teddyGross": 28944,
+      "teddyTax": 0,
+      "nicoleGross": 14882,
+      "nicoleTax": 400
+    },
+    {
+      "year": 2010,
+      "teddyGross": 70341,
+      "teddyTax": 12185.82,
+      "nicoleGross": 31444,
+      "nicoleTax": 2213.52
+    },
+    {
+      "year": 2011,
+      "teddyGross": 83548,
+      "teddyTax": 16501.75,
+      "nicoleGross": 42177,
+      "nicoleTax": 6398.73
+    },
+    {
+      "year": 2012,
+      "teddyGross": 94699.58,
+      "teddyTax": 22307.47,
+      "nicoleGross": 25093.22,
+      "nicoleTax": 2762.31
+    },
+    {
+      "year": 2013,
+      "teddyGross": 106768.9,
+      "teddyTax": 26393.68,
+      "nicoleGross": 15298,
+      "nicoleTax": 389.01
+    },
+    {
+      "year": 2014,
+      "teddyGross": 124424.93,
+      "teddyTax": 32133.63,
+      "nicoleGross": 15116,
+      "nicoleTax": 316.16
+    },
+    {
+      "year": 2015,
+      "teddyGross": 119806.16,
+      "teddyTax": 22413.38,
+      "nicoleGross": 43399,
+      "nicoleTax": 6992.63
+    },
+    {
+      "year": 2016,
+      "teddyGross": 132053.4,
+      "teddyTax": 17419.67,
+      "nicoleGross": 77804,
+      "nicoleTax": 10104.35
+    },
+    {
+      "year": 2017,
+      "teddyGross": 156523.75,
+      "teddyTax": 35256.53,
+      "nicoleGross": 104228.26,
+      "nicoleTax": 16852.37
+    },
+    {
+      "year": 2018,
+      "teddyGross": 214812.97,
+      "teddyTax": 51903.21,
+      "nicoleGross": 119485.6,
+      "nicoleTax": 24036.82
+    },
+    {
+      "year": 2019,
+      "teddyGross": 188188.08,
+      "teddyTax": 53879.99,
+      "nicoleGross": 153033.07,
+      "nicoleTax": 36478.71
+    },
+    {
+      "year": 2020,
+      "teddyGross": 983526.43,
+      "teddyTax": 479300.02,
+      "nicoleGross": 105430.43,
+      "nicoleTax": 19265.91
+    },
+    {
+      "year": 2021,
+      "teddyGross": 2109111,
+      "teddyTax": 1072340.29,
+      "nicoleGross": 30101.11,
+      "nicoleTax": 0
+    },
+    {
+      "year": 2022,
+      "teddyGross": 631094,
+      "teddyTax": 278297.56,
+      "nicoleGross": 7427,
+      "nicoleTax": 0
+    },
+    {
+      "year": 2023,
+      "teddyGross": 682998,
+      "teddyTax": 301990.79,
+      "nicoleGross": 25392,
+      "nicoleTax": 576.63
+    },
+    {
+      "year": 2024,
+      "teddyGross": 743447,
+      "teddyTax": 332357.85,
+      "nicoleGross": 22332,
+      "nicoleTax": 624.77
+    },
+    {
+      "year": 2025,
+      "teddyGross": 759104,
+      "teddyTax": 337495.09,
+      "nicoleGross": 22332,
+      "nicoleTax": 624.77
+    },
+    {
+      "year": 2026,
+      "teddyGross": 800000,
+      "teddyTax": 386236.94,
+      "nicoleGross": 25000,
+      "nicoleTax": 0
+    }
+  ],
+  "savingsVsSalaries": [
+    {
+      "year": 2015,
+      "totalSavings": 34424,
+      "totalEarningsBeforeTax": 163205.16,
+      "totalEarningsAfterTax": 133799.15,
+      "avgTaxRate": 18.02
+    },
+    {
+      "year": 2016,
+      "totalSavings": 110424,
+      "totalEarningsBeforeTax": 209857.4,
+      "totalEarningsAfterTax": 182333.38,
+      "avgTaxRate": 13.12
+    },
+    {
+      "year": 2017,
+      "totalSavings": 177148.75,
+      "totalEarningsBeforeTax": 260752.01,
+      "totalEarningsAfterTax": 208643.11,
+      "avgTaxRate": 19.98
+    },
+    {
+      "year": 2018,
+      "totalSavings": 254689.09,
+      "totalEarningsBeforeTax": 334298.57,
+      "totalEarningsAfterTax": 258358.54,
+      "avgTaxRate": 22.72
+    },
+    {
+      "year": 2019,
+      "totalSavings": 311521.04,
+      "totalEarningsBeforeTax": 341221.15,
+      "totalEarningsAfterTax": 250862.45,
+      "avgTaxRate": 26.48
+    },
+    {
+      "year": 2020,
+      "totalSavings": 594651.95,
+      "totalEarningsBeforeTax": 1088956.86,
+      "totalEarningsAfterTax": 590390.93,
+      "avgTaxRate": 45.78
+    },
+    {
+      "year": 2021,
+      "totalSavings": 663880.09,
+      "totalEarningsBeforeTax": 2139212.11,
+      "totalEarningsAfterTax": 1066871.82,
+      "avgTaxRate": 50.13
+    },
+    {
+      "year": 2022,
+      "totalSavings": 1357057.96,
+      "totalEarningsBeforeTax": 638521,
+      "totalEarningsAfterTax": 360223.44,
+      "avgTaxRate": 43.58
+    },
+    {
+      "year": 2023,
+      "totalSavings": 1604381.43,
+      "totalEarningsBeforeTax": 708390,
+      "totalEarningsAfterTax": 405822.58,
+      "avgTaxRate": 42.71
+    },
+    {
+      "year": 2024,
+      "totalSavings": 1941315.44,
+      "totalEarningsBeforeTax": 765779,
+      "totalEarningsAfterTax": 432796.38,
+      "avgTaxRate": 43.48
+    },
+    {
+      "year": 2025,
+      "totalSavings": 2093676.27,
+      "totalEarningsBeforeTax": 781436,
+      "totalEarningsAfterTax": 443316.14,
+      "avgTaxRate": 43.27
+    },
+    {
+      "year": 2026,
+      "totalSavings": 1774498.01,
+      "totalEarningsBeforeTax": 825000,
+      "totalEarningsAfterTax": 438763.06,
+      "avgTaxRate": 46.82
+    }
+  ],
+  "predictionModel": {
+    "roiGoal": 0,
+    "annualSavings": 0,
+    "years": [
+      {
+        "year": 2016,
+        "predictedSavings": 62262,
+        "actualSavings": 62262,
+        "savingsContribution": 41000,
+        "annualReturn": 0,
+        "annualReturnPct": 0,
+        "deltaFromGoal": 0,
+        "teddyAge": 32,
+        "nicoleAge": 29
+      },
+      {
+        "year": 2017,
+        "predictedSavings": 123488.2,
+        "actualSavings": 177148.75,
+        "savingsContribution": 55000,
+        "annualReturn": 16148.75,
+        "annualReturnPct": 10.03,
+        "deltaFromGoal": 53660.55,
+        "teddyAge": 33,
+        "nicoleAge": 30
+      },
+      {
+        "year": 2018,
+        "predictedSavings": 190837.02,
+        "actualSavings": 254689.09,
+        "savingsContribution": 70900,
+        "annualReturn": 25257.13,
+        "annualReturnPct": 11.01,
+        "deltaFromGoal": 63852.07,
+        "teddyAge": 34,
+        "nicoleAge": 31
+      },
+      {
+        "year": 2019,
+        "predictedSavings": 264920.72,
+        "actualSavings": 311521.04,
+        "savingsContribution": 49000,
+        "annualReturn": 12832.73,
+        "annualReturnPct": 4.3,
+        "deltaFromGoal": 46600.32,
+        "teddyAge": 35,
+        "nicoleAge": 32
+      },
+      {
+        "year": 2020,
+        "predictedSavings": 346412.79,
+        "actualSavings": 594651.95,
+        "savingsContribution": 194647.55,
+        "annualReturn": 88484.14,
+        "annualReturnPct": 17.48,
+        "deltaFromGoal": 248239.16,
+        "teddyAge": 36,
+        "nicoleAge": 33
+      },
+      {
+        "year": 2021,
+        "predictedSavings": 436054.07,
+        "actualSavings": 673414.66,
+        "savingsContribution": 71500,
+        "annualReturn": 9534.57,
+        "annualReturnPct": 1.44,
+        "deltaFromGoal": 237360.59,
+        "teddyAge": 37,
+        "nicoleAge": 34
+      },
+      {
+        "year": 2022,
+        "predictedSavings": 534659.48,
+        "actualSavings": 1357057.96,
+        "savingsContribution": 688798.26,
+        "annualReturn": -67000,
+        "annualReturnPct": -4.7,
+        "deltaFromGoal": 822398.48,
+        "teddyAge": 38,
+        "nicoleAge": 35
+      },
+      {
+        "year": 2023,
+        "predictedSavings": 643125.43,
+        "actualSavings": 1604381.43,
+        "savingsContribution": 45500,
+        "annualReturn": 175681.65,
+        "annualReturnPct": 12.3,
+        "deltaFromGoal": 961256,
+        "teddyAge": 39,
+        "nicoleAge": 36
+      },
+      {
+        "year": 2024,
+        "predictedSavings": 762437.97,
+        "actualSavings": 1941315.44,
+        "savingsContribution": 52972,
+        "annualReturn": 265386.01,
+        "annualReturnPct": 15.84,
+        "deltaFromGoal": 1178877.47,
+        "teddyAge": 40,
+        "nicoleAge": 37
+      },
+      {
+        "year": 2025,
+        "predictedSavings": 893681.77,
+        "actualSavings": 2093676.27,
+        "savingsContribution": 51324,
+        "annualReturn": 209251.61,
+        "annualReturnPct": 11.1,
+        "deltaFromGoal": 1199994.5,
+        "teddyAge": 41,
+        "nicoleAge": 38
+      },
+      {
+        "year": 2026,
+        "predictedSavings": 1038049.95,
+        "actualSavings": 1774498.01,
+        "savingsContribution": 314426.48,
+        "annualReturn": -19575.02,
+        "annualReturnPct": -1.09,
+        "deltaFromGoal": 736448.06,
+        "teddyAge": 42,
+        "nicoleAge": 39
+      },
+      {
+        "year": 2027,
+        "predictedSavings": 1196854.94,
+        "actualSavings": null,
+        "savingsContribution": null,
+        "annualReturn": null,
+        "annualReturnPct": null,
+        "deltaFromGoal": null,
+        "teddyAge": 43,
+        "nicoleAge": 40
+      },
+      {
+        "year": 2028,
+        "predictedSavings": 1371540.43,
+        "actualSavings": null,
+        "savingsContribution": null,
+        "annualReturn": null,
+        "annualReturnPct": null,
+        "deltaFromGoal": null,
+        "teddyAge": 44,
+        "nicoleAge": 41
+      },
+      {
+        "year": 2029,
+        "predictedSavings": 1563694.48,
+        "actualSavings": null,
+        "savingsContribution": null,
+        "annualReturn": null,
+        "annualReturnPct": null,
+        "deltaFromGoal": null,
+        "teddyAge": 45,
+        "nicoleAge": 42
+      },
+      {
+        "year": 2030,
+        "predictedSavings": 1775063.93,
+        "actualSavings": null,
+        "savingsContribution": null,
+        "annualReturn": null,
+        "annualReturnPct": null,
+        "deltaFromGoal": null,
+        "teddyAge": 46,
+        "nicoleAge": 43
+      },
+      {
+        "year": 2031,
+        "predictedSavings": 2007570.32,
+        "actualSavings": null,
+        "savingsContribution": null,
+        "annualReturn": null,
+        "annualReturnPct": null,
+        "deltaFromGoal": null,
+        "teddyAge": 47,
+        "nicoleAge": 44
+      },
+      {
+        "year": 2032,
+        "predictedSavings": 2263327.35,
+        "actualSavings": null,
+        "savingsContribution": null,
+        "annualReturn": null,
+        "annualReturnPct": null,
+        "deltaFromGoal": null,
+        "teddyAge": 48,
+        "nicoleAge": 45
+      },
+      {
+        "year": 2033,
+        "predictedSavings": 2544660.09,
+        "actualSavings": null,
+        "savingsContribution": null,
+        "annualReturn": null,
+        "annualReturnPct": null,
+        "deltaFromGoal": null,
+        "teddyAge": 49,
+        "nicoleAge": 46
+      },
+      {
+        "year": 2034,
+        "predictedSavings": 2854126.09,
+        "actualSavings": null,
+        "savingsContribution": null,
+        "annualReturn": null,
+        "annualReturnPct": null,
+        "deltaFromGoal": null,
+        "teddyAge": 50,
+        "nicoleAge": 47
+      },
+      {
+        "year": 2035,
+        "predictedSavings": 3194538.7,
+        "actualSavings": null,
+        "savingsContribution": null,
+        "annualReturn": null,
+        "annualReturnPct": null,
+        "deltaFromGoal": null,
+        "teddyAge": 51,
+        "nicoleAge": 48
+      },
+      {
+        "year": 2036,
+        "predictedSavings": 3568992.57,
+        "actualSavings": null,
+        "savingsContribution": null,
+        "annualReturn": null,
+        "annualReturnPct": null,
+        "deltaFromGoal": null,
+        "teddyAge": 52,
+        "nicoleAge": 49
+      },
+      {
+        "year": 2037,
+        "predictedSavings": 3980891.83,
+        "actualSavings": null,
+        "savingsContribution": null,
+        "annualReturn": null,
+        "annualReturnPct": null,
+        "deltaFromGoal": null,
+        "teddyAge": 53,
+        "nicoleAge": 50
+      },
+      {
+        "year": 2038,
+        "predictedSavings": 4433981.01,
+        "actualSavings": null,
+        "savingsContribution": null,
+        "annualReturn": null,
+        "annualReturnPct": null,
+        "deltaFromGoal": null,
+        "teddyAge": 54,
+        "nicoleAge": 51
+      },
+      {
+        "year": 2039,
+        "predictedSavings": 4932379.12,
+        "actualSavings": null,
+        "savingsContribution": null,
+        "annualReturn": null,
+        "annualReturnPct": null,
+        "deltaFromGoal": null,
+        "teddyAge": 55,
+        "nicoleAge": 52
+      }
+    ]
+  },
+  "lastUpdated": "2026-03-28T00:26:37.991Z",
+  "properties": [
+    {
+      "name": "31 Pettit Drive",
+      "value": 1800000
+    },
+    {
+      "name": "5162 Yonge Street",
+      "value": 800000
+    },
+    {
+      "name": "509 Beecroft Road",
+      "value": 700000
+    },
+    {
+      "name": "1 Valhalla Inn Road",
+      "value": 420000
+    }
+  ]
+}

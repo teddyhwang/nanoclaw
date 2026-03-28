@@ -1,0 +1,25 @@
+/* ── PageContent — scrollable content area ─────────────────── */
+.content {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* Fill mode: children fill available space, no scroll on this container */
+.fill {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-height: 0;
+  min-width: 0;
+}
+
+@media (max-width: 1024px) {
+  .fill {
+    overflow-y: auto;
+    display: block;
+  }
+}

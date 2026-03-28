@@ -2,15 +2,19 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
+import { OneCLI } from '@onecli-sh/sdk';
+
 import {
   ASSISTANT_NAME,
-  CREDENTIAL_PROXY_PORT,
+  DEFAULT_TRIGGER,
+  getTriggerPattern,
+  GROUPS_DIR,
   IDLE_TIMEOUT,
+  MAX_MESSAGES_PER_PROMPT,
+  ONECLI_URL,
   POLL_INTERVAL,
   TIMEZONE,
-  TRIGGER_PATTERN,
 } from './config.js';
-import { startCredentialProxy } from './credential-proxy.js';
 import './channels/index.js';
 import {
   getChannelFactory,
@@ -25,13 +29,13 @@ import {
 import {
   cleanupOrphans,
   ensureContainerRuntimeRunning,
-  PROXY_BIND_HOST,
 } from './container-runtime.js';
 import {
   getAllChats,
   getAllRegisteredGroups,
   getAllSessions,
   getAllTasks,
+  getLastBotMessageTimestamp,
   getMessagesSince,
   getNewMessages,
   getRouterState,
@@ -79,7 +83,38 @@ let messageLoopRunning = false;
 const channels: Channel[] = [];
 const devTypingIntervals = new Map<string, ReturnType<typeof setInterval>>();
 const devReactionMessages = new Map<string, { messageId: string }>();
+const devStreamMessages = new Map<string, { messageId: string }>();
 const queue = new GroupQueue();
+
+function splitDiscordChunks(text: string, maxLength = 2000): string[] {
+  if (!text) return [''];
+  const chunks: string[] = [];
+  for (let i = 0; i < text.length; i += maxLength) {
+    chunks.push(text.slice(i, i + maxLength));
+  }
+  return chunks;
+}
+
+const onecli = new OneCLI({ url: ONECLI_URL });
+
+function ensureOneCLIAgent(jid: string, group: RegisteredGroup): void {
+  if (group.isMain) return;
+  const identifier = group.folder.toLowerCase().replace(/_/g, '-');
+  onecli.ensureAgent({ name: group.name, identifier }).then(
+    (res) => {
+      logger.info(
+        { jid, identifier, created: res.created },
+        'OneCLI agent ensured',
+      );
+    },
+    (err) => {
+      logger.debug(
+        { jid, identifier, err: String(err) },
+        'OneCLI agent ensure skipped',
+      );
+    },
+  );
+}
 
 function loadState(): void {
   lastTimestamp = getRouterState('last_timestamp') || '';
@@ -96,6 +131,27 @@ function loadState(): void {
     { groupCount: Object.keys(registeredGroups).length },
     'State loaded',
   );
+}
+
+/**
+ * Return the message cursor for a group, recovering from the last bot reply
+ * if lastAgentTimestamp is missing (new group, corrupted state, restart).
+ */
+function getOrRecoverCursor(chatJid: string): string {
+  const existing = lastAgentTimestamp[chatJid];
+  if (existing) return existing;
+
+  const botTs = getLastBotMessageTimestamp(chatJid, ASSISTANT_NAME);
+  if (botTs) {
+    logger.info(
+      { chatJid, recoveredFrom: botTs },
+      'Recovered message cursor from last bot reply',
+    );
+    lastAgentTimestamp[chatJid] = botTs;
+    saveState();
+    return botTs;
+  }
+  return '';
 }
 
 function saveState(): void {
@@ -120,6 +176,29 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
 
   // Create group folder
   fs.mkdirSync(path.join(groupDir, 'logs'), { recursive: true });
+
+  // Copy CLAUDE.md template into the new group folder so agents have
+  // identity and instructions from the first run.  (Fixes #1391)
+  const groupMdFile = path.join(groupDir, 'CLAUDE.md');
+  if (!fs.existsSync(groupMdFile)) {
+    const templateFile = path.join(
+      GROUPS_DIR,
+      group.isMain ? 'main' : 'global',
+      'CLAUDE.md',
+    );
+    if (fs.existsSync(templateFile)) {
+      let content = fs.readFileSync(templateFile, 'utf-8');
+      if (ASSISTANT_NAME !== 'Andy') {
+        content = content.replace(/^# Andy$/m, `# ${ASSISTANT_NAME}`);
+        content = content.replace(/You are Andy/g, `You are ${ASSISTANT_NAME}`);
+      }
+      fs.writeFileSync(groupMdFile, content);
+      logger.info({ folder: group.folder }, 'Created CLAUDE.md from template');
+    }
+  }
+
+  // Ensure a corresponding OneCLI agent exists (best-effort, non-blocking)
+  ensureOneCLIAgent(jid, group);
 
   logger.info(
     { jid, name: group.name, folder: group.folder },
@@ -168,21 +247,22 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const isMainGroup = group.isMain === true;
 
-  const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
   const missedMessages = getMessagesSince(
     chatJid,
-    sinceTimestamp,
+    getOrRecoverCursor(chatJid),
     ASSISTANT_NAME,
+    MAX_MESSAGES_PER_PROMPT,
   );
 
   if (missedMessages.length === 0) return true;
 
   // For non-main groups, check if trigger is required and present
   if (!isMainGroup && group.requiresTrigger !== false) {
+    const triggerPattern = getTriggerPattern(group.trigger);
     const allowlistCfg = loadSenderAllowlist();
     const hasTrigger = missedMessages.some(
       (m) =>
-        TRIGGER_PATTERN.test(m.content.trim()) &&
+        triggerPattern.test(m.content.trim()) &&
         (m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
     );
     if (!hasTrigger) return true;
@@ -299,6 +379,7 @@ async function runAgent(
       id: t.id,
       groupFolder: t.group_folder,
       prompt: t.prompt,
+      script: t.script || undefined,
       schedule_type: t.schedule_type,
       schedule_value: t.schedule_value,
       status: t.status,
@@ -369,7 +450,7 @@ async function startMessageLoop(): Promise<void> {
   }
   messageLoopRunning = true;
 
-  logger.info(`NanoClaw running (trigger: @${ASSISTANT_NAME})`);
+  logger.info(`NanoClaw running (default trigger: ${DEFAULT_TRIGGER})`);
 
   while (true) {
     try {
@@ -415,10 +496,11 @@ async function startMessageLoop(): Promise<void> {
           // Non-trigger messages accumulate in DB and get pulled as
           // context when a trigger eventually arrives.
           if (needsTrigger) {
+            const triggerPattern = getTriggerPattern(group.trigger);
             const allowlistCfg = loadSenderAllowlist();
             const hasTrigger = groupMessages.some(
               (m) =>
-                TRIGGER_PATTERN.test(m.content.trim()) &&
+                triggerPattern.test(m.content.trim()) &&
                 (m.is_from_me ||
                   isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
             );
@@ -429,8 +511,9 @@ async function startMessageLoop(): Promise<void> {
           // context that accumulated between triggers is included.
           const allPending = getMessagesSince(
             chatJid,
-            lastAgentTimestamp[chatJid] || '',
+            getOrRecoverCursor(chatJid),
             ASSISTANT_NAME,
+            MAX_MESSAGES_PER_PROMPT,
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
@@ -469,8 +552,12 @@ async function startMessageLoop(): Promise<void> {
  */
 function recoverPendingMessages(): void {
   for (const [chatJid, group] of Object.entries(registeredGroups)) {
-    const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
-    const pending = getMessagesSince(chatJid, sinceTimestamp, ASSISTANT_NAME);
+    const pending = getMessagesSince(
+      chatJid,
+      getOrRecoverCursor(chatJid),
+      ASSISTANT_NAME,
+      MAX_MESSAGES_PER_PROMPT,
+    );
     if (pending.length > 0) {
       logger.info(
         { group: group.name, pendingCount: pending.length },
@@ -491,18 +578,18 @@ async function main(): Promise<void> {
   initDatabase();
   logger.info('Database initialized');
   loadState();
-  restoreRemoteControl();
 
-  // Start credential proxy (containers route API calls through this)
-  const proxyServer = await startCredentialProxy(
-    CREDENTIAL_PROXY_PORT,
-    PROXY_BIND_HOST,
-  );
+  // Ensure OneCLI agents exist for all registered groups.
+  // Recovers from missed creates (e.g. OneCLI was down at registration time).
+  for (const [jid, group] of Object.entries(registeredGroups)) {
+    ensureOneCLIAgent(jid, group);
+  }
+
+  restoreRemoteControl();
 
   // Graceful shutdown handlers
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutdown signal received');
-    proxyServer.close();
     await queue.shutdown(10000);
     for (const ch of channels) await ch.disconnect();
     process.exit(0);
@@ -567,6 +654,9 @@ async function main(): Promise<void> {
       // Route message: /dev prefix or LLM classification → pi session vs container agent
       if (!msg.is_from_me && !msg.is_bot_message && registeredGroups[chatJid]) {
         const isExplicitDev = trimmed.startsWith('/dev ') || trimmed === '/dev';
+        const group = registeredGroups[chatJid];
+        const triggerPattern = getTriggerPattern(group.trigger);
+        const isExplicitAssistant = triggerPattern.test(trimmed);
         const messageContent = isExplicitDev
           ? trimmed.slice(4).trim()
           : trimmed;
@@ -581,6 +671,7 @@ async function main(): Promise<void> {
           );
           fs.mkdirSync(piQueueDir, { recursive: true });
           const queueFile = path.join(piQueueDir, `${Date.now()}-msg.json`);
+          const forwardedToPiAt = new Date().toISOString();
           fs.writeFileSync(
             queueFile,
             JSON.stringify({
@@ -589,11 +680,21 @@ async function main(): Promise<void> {
               senderName: msg.sender_name,
               content,
               timestamp: msg.timestamp,
+              sourceMessageId: msg.id,
+              discordMessageTimestamp: msg.timestamp,
+              forwardedToPiAt,
             }),
           );
           markDevRoute(chatJid);
           logger.info(
-            { chatJid, sender: msg.sender_name, method },
+            {
+              chatJid,
+              sender: msg.sender_name,
+              method,
+              sourceMessageId: msg.id,
+              discordMessageTimestamp: msg.timestamp,
+              forwardedToPiAt,
+            },
             'Dev message forwarded to pi',
           );
           const ackChannel = findChannel(channels, chatJid);
@@ -622,6 +723,14 @@ async function main(): Promise<void> {
 
         if (isExplicitDev) {
           forwardToPi(messageContent, 'explicit');
+          return;
+        }
+
+        // Explicit assistant trigger (@Optimus ...) should route to the
+        // container assistant even if the chat is currently in dev context.
+        if (isExplicitAssistant) {
+          markAssistantRoute(chatJid);
+          storeMessage(msg);
           return;
         }
 
@@ -748,6 +857,7 @@ async function main(): Promise<void> {
         id: t.id,
         groupFolder: t.group_folder,
         prompt: t.prompt,
+        script: t.script || undefined,
         schedule_type: t.schedule_type,
         schedule_value: t.schedule_value,
         status: t.status,
@@ -766,12 +876,27 @@ async function main(): Promise<void> {
     'pi-outbox',
   );
   fs.mkdirSync(piOutboxDir, { recursive: true });
-  setInterval(() => {
+  const PI_OUTBOX_POLL_MS = 1000;
+  const PI_OUTBOX_MAX_IDLE_POLL_MS = PI_OUTBOX_POLL_MS * 5;
+  let piOutboxPollMs = PI_OUTBOX_POLL_MS;
+
+  const pollPiOutbox = () => {
     try {
       const files = fs
         .readdirSync(piOutboxDir)
         .filter((f) => f.endsWith('.json'))
         .sort();
+
+      if (files.length === 0) {
+        piOutboxPollMs = Math.min(
+          PI_OUTBOX_MAX_IDLE_POLL_MS,
+          piOutboxPollMs * 2,
+        );
+        return;
+      }
+
+      piOutboxPollMs = PI_OUTBOX_POLL_MS;
+
       for (const file of files) {
         const filePath = path.join(piOutboxDir, file);
         try {
@@ -780,45 +905,135 @@ async function main(): Promise<void> {
           if (data.chatJid && data.message) {
             const channel = findChannel(channels, data.chatJid);
             if (channel) {
-              // Stop typing indicator for this chat (legacy cleanup)
-              const typingInterval = devTypingIntervals.get(data.chatJid);
-              if (typingInterval) {
-                clearInterval(typingInterval);
-                devTypingIntervals.delete(data.chatJid);
-              }
-
-              // Switch reaction from 🤔 to 📝 (writing), send message, then clear both.
-              const tracked = devReactionMessages.get(data.chatJid);
-              const sendReply = async () => {
-                if (tracked && channel.addReaction && channel.removeReaction) {
-                  const { messageId } = tracked;
-                  devReactionMessages.delete(data.chatJid);
-                  try {
-                    await channel.removeReaction(data.chatJid, messageId, '🤔');
-                    await channel.addReaction(data.chatJid, messageId, '📝');
-                    await channel.sendMessage(data.chatJid, data.message);
-                  } finally {
-                    await channel
-                      .removeReaction(data.chatJid, messageId, '📝')
-                      .catch(() => {});
-                    await channel
-                      .removeReaction(data.chatJid, messageId, '🤔')
-                      .catch(() => {});
+              const replyPolledAt = new Date().toISOString();
+              const latency = data.latency as
+                | {
+                    promptId?: string;
+                    queueToDequeueMs?: number;
+                    dequeueToPiAcceptMs?: number;
+                    dequeueToFirstAssistantMs?: number;
+                    dequeueToFirstTokenMs?: number;
+                    totalAgentMs?: number;
+                    totalFromForwardMs?: number;
+                    forwardedToPiAt?: string;
                   }
+                | undefined;
+              const kind = (data.kind as string | undefined) || 'final';
+
+              const stopTyping = () => {
+                const typingInterval = devTypingIntervals.get(data.chatJid);
+                if (typingInterval) {
+                  clearInterval(typingInterval);
+                  devTypingIntervals.delete(data.chatJid);
+                }
+              };
+
+              const finishReaction = async () => {
+                const tracked = devReactionMessages.get(data.chatJid);
+                if (
+                  !tracked ||
+                  !channel.addReaction ||
+                  !channel.removeReaction
+                ) {
+                  return;
+                }
+                const { messageId } = tracked;
+                devReactionMessages.delete(data.chatJid);
+                try {
+                  await channel.removeReaction(data.chatJid, messageId, '🤔');
+                  await channel.removeReaction(data.chatJid, messageId, '📝');
+                } catch {
+                  // ignore reaction cleanup failures
+                }
+              };
+
+              const markWritingReaction = async () => {
+                const tracked = devReactionMessages.get(data.chatJid);
+                if (
+                  !tracked ||
+                  !channel.addReaction ||
+                  !channel.removeReaction
+                ) {
+                  return;
+                }
+                const { messageId } = tracked;
+                try {
+                  await channel.removeReaction(data.chatJid, messageId, '🤔');
+                  await channel.addReaction(data.chatJid, messageId, '📝');
+                } catch {
+                  // ignore reaction update failures
+                }
+              };
+
+              const sendReply = async () => {
+                if (kind === 'stream_start' || kind === 'stream_update') {
+                  await markWritingReaction();
+                  const existing = devStreamMessages.get(data.chatJid);
+                  if (existing && channel.editMessage) {
+                    await channel.editMessage(
+                      data.chatJid,
+                      existing.messageId,
+                      data.message,
+                    );
+                  } else if (!existing && channel.sendMessageWithId) {
+                    const messageId = await channel.sendMessageWithId(
+                      data.chatJid,
+                      data.message,
+                    );
+                    if (messageId) {
+                      devStreamMessages.set(data.chatJid, { messageId });
+                    }
+                  }
+                  markDevRoute(data.chatJid);
+                  return;
+                }
+
+                stopTyping();
+                await markWritingReaction();
+                const existing = devStreamMessages.get(data.chatJid);
+                if (existing && channel.editMessage) {
+                  const chunks = splitDiscordChunks(data.message);
+                  await channel.editMessage(
+                    data.chatJid,
+                    existing.messageId,
+                    chunks[0],
+                  );
+                  for (const chunk of chunks.slice(1)) {
+                    await channel.sendMessage(data.chatJid, chunk);
+                  }
+                  devStreamMessages.delete(data.chatJid);
                 } else {
                   await channel.sendMessage(data.chatJid, data.message);
                 }
 
+                await finishReaction();
+
                 // Keep dev context alive — pi just replied to this chat
                 markDevRoute(data.chatJid);
                 logger.info(
-                  { jid: data.chatJid },
+                  {
+                    jid: data.chatJid,
+                    replyPolledAt,
+                    totalFromForwardMs: latency?.totalFromForwardMs,
+                    totalAgentMs: latency?.totalAgentMs,
+                    queueToDequeueMs: latency?.queueToDequeueMs,
+                    dequeueToPiAcceptMs: latency?.dequeueToPiAcceptMs,
+                    dequeueToFirstAssistantMs:
+                      latency?.dequeueToFirstAssistantMs,
+                    dequeueToFirstTokenMs: latency?.dequeueToFirstTokenMs,
+                    outboxToDiscordSendMs:
+                      latency?.forwardedToPiAt !== undefined
+                        ? new Date(replyPolledAt).getTime() -
+                          new Date(latency.forwardedToPiAt).getTime() -
+                          (latency.totalFromForwardMs || 0)
+                        : undefined,
+                  },
                   'Pi outbox message sent to Discord',
                 );
               };
 
               sendReply().catch((err) =>
-                logger.error({ err }, 'Failed to send pi outbox message'),
+                logger.error({ err, kind }, 'Failed to send pi outbox message'),
               );
             }
           }
@@ -831,9 +1046,13 @@ async function main(): Promise<void> {
         }
       }
     } catch {
-      /* ignore */
+      piOutboxPollMs = Math.min(PI_OUTBOX_MAX_IDLE_POLL_MS, piOutboxPollMs * 2);
+    } finally {
+      setTimeout(pollPiOutbox, piOutboxPollMs);
     }
-  }, 1000);
+  };
+
+  setTimeout(pollPiOutbox, piOutboxPollMs);
 
   // HomeKit event watcher — monitors automation sequences, alerts on failure
   const ownerDmJid = 'dc:1485414819614949377';

@@ -1,0 +1,85 @@
+/* ── Health page grid layouts ──────────────────────────────── */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--g);
+  padding: var(--g);
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.gridWide {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.midRow {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--g);
+}
+
+.midRow > :last-child {
+  grid-column: 1 / -1;
+}
+
+/* ── Sliding window nav controls ───────────────────────────── */
+.navArrow {
+  padding: 4px 6px !important;
+  display: inline-flex;
+  align-items: center;
+}
+
+.dateIndicator {
+  font-size: 11px;
+  color: var(--accent);
+  font-weight: 500;
+  white-space: nowrap;
+  padding: 4px 8px;
+  letter-spacing: 0.3px;
+}
+
+.loadingDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  margin-left: 6px;
+  flex-shrink: 0;
+  animation: healthPulse 1s ease-in-out infinite;
+}
+
+@keyframes healthPulse {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
+}
+
+/* ── Responsive ────────────────────────────────────────────── */
+@media (max-width: 900px) {
+  .grid {
+    grid-template-columns: 1fr;
+  }
+
+  .gridWide {
+    grid-column: 1;
+  }
+
+  .midRow {
+    grid-template-columns: 1fr;
+  }
+
+  .midRow > :last-child {
+    grid-column: 1;
+  }
+}
+
+@media (min-width: 1400px) {
+  .midRow {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .midRow > :last-child {
+    grid-column: auto;
+  }
+}

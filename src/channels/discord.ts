@@ -193,9 +193,13 @@ export class DiscordChannel implements Channel {
   }
 
   async sendMessage(jid: string, text: string): Promise<void> {
+    await this.sendMessageWithId(jid, text);
+  }
+
+  async sendMessageWithId(jid: string, text: string): Promise<string | null> {
     if (!this.client) {
       logger.warn('Discord client not initialized');
-      return;
+      return null;
     }
 
     try {
@@ -204,7 +208,7 @@ export class DiscordChannel implements Channel {
 
       if (!channel || !('send' in channel)) {
         logger.warn({ jid }, 'Discord channel not found or not text-based');
-        return;
+        return null;
       }
 
       const textChannel = channel as TextChannel;
@@ -212,15 +216,53 @@ export class DiscordChannel implements Channel {
       // Discord has a 2000 character limit per message — split if needed
       const MAX_LENGTH = 2000;
       if (text.length <= MAX_LENGTH) {
-        await textChannel.send(text);
-      } else {
-        for (let i = 0; i < text.length; i += MAX_LENGTH) {
-          await textChannel.send(text.slice(i, i + MAX_LENGTH));
-        }
+        const msg = await textChannel.send(text);
+        logger.info({ jid, length: text.length }, 'Discord message sent');
+        return msg.id;
+      }
+
+      let firstMessageId: string | null = null;
+      for (let i = 0; i < text.length; i += MAX_LENGTH) {
+        const msg = await textChannel.send(text.slice(i, i + MAX_LENGTH));
+        if (!firstMessageId) firstMessageId = msg.id;
       }
       logger.info({ jid, length: text.length }, 'Discord message sent');
+      return firstMessageId;
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Discord message');
+      return null;
+    }
+  }
+
+  async editMessage(
+    jid: string,
+    messageId: string,
+    text: string,
+  ): Promise<void> {
+    if (!this.client) {
+      logger.warn('Discord client not initialized');
+      return;
+    }
+
+    try {
+      const channelId = jid.replace(/^dc:/, '');
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel || !('messages' in channel)) {
+        logger.warn(
+          { jid, messageId },
+          'Discord channel not found or not text-based',
+        );
+        return;
+      }
+
+      const msg = await (channel as TextChannel).messages.fetch(messageId);
+      await msg.edit(text.slice(0, 2000));
+      logger.debug(
+        { jid, messageId, length: text.length },
+        'Discord message edited',
+      );
+    } catch (err) {
+      logger.error({ jid, messageId, err }, 'Failed to edit Discord message');
     }
   }
 

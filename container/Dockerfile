@@ -33,8 +33,10 @@ ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 RUN npm install -g agent-browser @anthropic-ai/claude-code @tobilu/qmd
 
 # Install gws (Google Workspace CLI) to a globally accessible location
+# Upstream renamed the installer asset from gws-installer.sh to
+# google-workspace-cli-installer.sh.
 RUN curl --proto '=https' --tlsv1.2 -LsSf \
-    https://github.com/googleworkspace/cli/releases/latest/download/gws-installer.sh | sh \
+    https://github.com/googleworkspace/cli/releases/latest/download/google-workspace-cli-installer.sh | sh \
     && mv /root/.cargo/bin/gws /usr/local/bin/gws
 
 # Create app directory

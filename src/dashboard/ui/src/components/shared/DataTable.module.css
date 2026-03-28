@@ -1,0 +1,95 @@
+/* ── DataTable — sortable data table ───────────────────────── */
+.wrapper {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.wrapper::-webkit-scrollbar {
+  width: 4px;
+}
+
+.wrapper::-webkit-scrollbar-thumb {
+  background: var(--border-lit);
+  border-radius: 2px;
+}
+
+.wrapper::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.table th {
+  text-align: left;
+  padding: 6px 10px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--muted);
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: var(--bg-panel-solid);
+  z-index: 1;
+  white-space: nowrap;
+  transition: color 0.15s;
+}
+
+.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.sortable:hover {
+  color: var(--text);
+}
+
+.sortActive {
+  color: var(--accent);
+}
+
+.alignRight {
+  text-align: right;
+}
+
+.alignCenter {
+  text-align: center;
+}
+
+.table td {
+  padding: 5px 10px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  border-bottom: 1px solid rgba(62, 75, 89, 0.15);
+}
+
+.table tbody tr {
+  transition: background 0.1s;
+}
+
+.table tbody tr:hover {
+  background: var(--bg-hover);
+}
+
+.sortArrow {
+  font-size: 11px;
+  opacity: 0.3;
+  margin-left: 2px;
+}
+
+.sortArrowActive {
+  opacity: 1;
+  color: var(--accent);
+}
+
+.emptyRow {
+  text-align: center;
+  color: var(--muted);
+  padding: 20px;
+}
