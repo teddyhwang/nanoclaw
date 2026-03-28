@@ -1,4 +1,4 @@
-import { type ReactNode, type MouseEventHandler, useMemo } from 'react';
+import { type ReactNode, type MouseEventHandler, useMemo, useState, useEffect } from 'react';
 import { relTime } from '../../utils/format';
 import styles from './SubNav.module.css';
 
@@ -54,12 +54,19 @@ interface SyncInfoProps {
 }
 
 function SyncInfo({ timestamps }: SyncInfoProps) {
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick(t => t + 1), 30000);
+    return () => clearInterval(id);
+  }, []);
+
   const label = useMemo(() => {
+    void tick; // force recompute every 30s
     const parts = Object.entries(timestamps)
       .filter(([, ts]) => ts)
       .map(([name, ts]) => `${name} ${relTime(ts!)}`);
     return parts.length > 0 ? parts.join(' · ') : null;
-  }, [timestamps]);
+  }, [timestamps, tick]);
 
   if (!label) return null;
   return (

@@ -9,8 +9,13 @@ export async function fetchDashboard(
   return r.json();
 }
 
-export async function fetchInvestments(): Promise<InvestmentData> {
-  const r = await fetch('/api/investments');
+export async function fetchInvestments(
+  forceRefresh = false,
+): Promise<InvestmentData> {
+  const url = forceRefresh
+    ? '/api/investments?refresh=true'
+    : '/api/investments';
+  const r = await fetch(url);
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }

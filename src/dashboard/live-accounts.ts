@@ -161,9 +161,9 @@ function mapAccount(account: LMAccount): AccountMapping | null {
 
 // ── Build live year data ────────────────────────────────────
 
-export async function getLiveCurrentYear(): Promise<
-  (YearData & { trends?: TrendData }) | null
-> {
+export async function getLiveCurrentYear(
+  forceRefresh = false,
+): Promise<(YearData & { trends?: TrendData }) | null> {
   const investData = loadInvestmentData();
   if (!investData) return null;
 
@@ -172,7 +172,7 @@ export async function getLiveCurrentYear(): Promise<
   if (!baseYear) return null;
 
   // Get fresh balances
-  const balances = await getBalances(false);
+  const balances = await getBalances(forceRefresh);
 
   // Categorize accounts
   const rrsp: Record<string, { teddy: number; nicole: number }> = {};

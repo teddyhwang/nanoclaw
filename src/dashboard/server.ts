@@ -301,6 +301,8 @@ async function handleApi(
       }
       sendJson(res, { ok: true });
     } else if (pathname === '/api/investments') {
+      const url = new URL(req.url!, `http://${req.headers.host}`);
+      const forceRefresh = url.searchParams.get('refresh') === 'true';
       const data = loadInvestmentData();
       if (!data) {
         sendError(
@@ -312,7 +314,7 @@ async function handleApi(
       }
       // Merge live LM data for current year
       try {
-        const liveYear = await getLiveCurrentYear();
+        const liveYear = await getLiveCurrentYear(forceRefresh);
         if (liveYear) {
           data.years[String(new Date().getFullYear())] = liveYear;
         }

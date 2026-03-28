@@ -1,3 +1,32 @@
+/* ── Pull to refresh (standalone PWA) ──────────────────────── */
+.ptr-indicator {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: center;
+  z-index: 9998;
+  opacity: 0;
+  pointer-events: none;
+}
+.ptr-indicator .ptr-spinner {
+  width: 28px;
+  height: 28px;
+  border: 2px solid var(--border-lit, rgba(89,194,255,0.3));
+  border-top-color: var(--accent, #59c2ff);
+  border-radius: 50%;
+  transition: none;
+}
+.ptr-indicator.ptr-refreshing .ptr-spinner {
+  animation: spin 0.7s linear infinite;
+}
+
+/* Ensure the app container can be translated */
+#app {
+  will-change: transform;
+}
+
 /* ── Global scrollbar ──────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-thumb { background: var(--border-lit, rgba(62,75,89,0.5)); border-radius: 3px; }
@@ -473,10 +502,11 @@ header::after {
   .amazon-product { max-width: none; white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
   .nw-value { font-size: 16px; }
   header { height: 40px; min-height: 40px; padding: 6px 8px; flex-wrap: nowrap; gap: 6px; }
-  .header-left { flex-wrap: nowrap; gap: 6px; min-width: 0; flex: 1; }
+  .header-left { flex-wrap: nowrap; gap: 6px; min-width: 0; flex: 1; overflow: hidden; }
   .header-right { gap: 6px; flex-shrink: 0; }
-  .top-nav { gap: 2px; }
-  .nav-link { padding: 3px 8px; font-size: 12px; }
+  .top-nav { gap: 2px; overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch; scrollbar-width: none; flex-shrink: 1; min-width: 0; }
+  .top-nav::-webkit-scrollbar { display: none; }
+  .nav-link { padding: 3px 8px; font-size: 12px; white-space: nowrap; flex-shrink: 0; }
   .logo-icon { width: 16px; height: 16px; }
   .select-sm { max-width: 118px; padding: 4px 8px; font-size: 12px; }
   .btn-icon, .btn-privacy { width: 28px; height: 28px; }

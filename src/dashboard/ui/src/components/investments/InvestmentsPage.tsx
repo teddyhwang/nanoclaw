@@ -61,7 +61,7 @@ export function InvestmentsPage({ initialData }: Props) {
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
-      const newData = await fetchInvestments();
+      const newData = await fetchInvestments(true);
       setData(newData);
     } catch (e) {
       console.error(e);
