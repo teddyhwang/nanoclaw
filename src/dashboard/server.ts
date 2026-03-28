@@ -15,6 +15,7 @@ import { fileURLToPath } from 'url';
 import {
   getDashboardData,
   getBalances,
+  getBalancesCachedAt,
   getMeta,
   getSummary,
   getTransactions,
@@ -123,7 +124,9 @@ async function handleApi(
       } catch (err) {
         console.error('Failed to get live account data:', err);
       }
-      sendJson(res, data);
+      // Include balance cache timestamp so UI can show sync age
+      const balCachedAt = getBalancesCachedAt();
+      sendJson(res, { ...data, cachedAt: { balances: balCachedAt } });
     } else if (
       pathname === '/api/investments/update' &&
       req.method === 'POST'

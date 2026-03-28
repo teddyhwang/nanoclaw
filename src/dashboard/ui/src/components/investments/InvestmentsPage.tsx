@@ -56,10 +56,7 @@ export function InvestmentsPage({ initialData }: Props) {
     [data.years],
   );
 
-  const syncTimestamp = useMemo(() => {
-    const currentYear = String(new Date().getFullYear());
-    return data.years[currentYear]?.trends?.updatedAt ?? null;
-  }, [data]);
+  const balCachedAt = data.cachedAt?.balances ?? null;
 
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -128,7 +125,7 @@ export function InvestmentsPage({ initialData }: Props) {
             {y}
           </NavLink>
         ))}
-        <SubNav.SyncInfo timestamps={{ synced: syncTimestamp }} />
+        <SubNav.SyncInfo timestamps={{ bal: balCachedAt }} />
       </SubNav>
 
       <PageContent style={{ padding: 'var(--g)', display: 'flex', flexDirection: 'column' }}>
