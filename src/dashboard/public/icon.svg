@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0d1117"/>
+      <stop offset="100%" stop-color="#161b22"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#59c2ff"/>
+      <stop offset="100%" stop-color="#43a5d5"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="108" fill="url(#bg)"/>
+  <!-- T letterform — clean geometric -->
+  <rect x="136" y="120" width="240" height="44" rx="8" fill="url(#accent)"/>
+  <rect x="232" y="164" width="48" height="228" rx="8" fill="url(#accent)"/>
+  <!-- Subtle glow -->
+  <rect x="136" y="120" width="240" height="44" rx="8" fill="#59c2ff" opacity="0.15" filter="url(#glow)"/>
+  <filter id="glow"><feGaussianBlur stdDeviation="12" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+</svg>

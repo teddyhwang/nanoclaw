@@ -26,6 +26,7 @@ export interface IpcDeps {
 }
 
 let ipcWatcherRunning = false;
+const IPC_MAX_IDLE_POLL_INTERVAL = IPC_POLL_INTERVAL * 5;
 
 export function startIpcWatcher(deps: IpcDeps): void {
   if (ipcWatcherRunning) {
@@ -37,7 +38,11 @@ export function startIpcWatcher(deps: IpcDeps): void {
   const ipcBaseDir = path.join(DATA_DIR, 'ipc');
   fs.mkdirSync(ipcBaseDir, { recursive: true });
 
+  let currentPollInterval = IPC_POLL_INTERVAL;
+
   const processIpcFiles = async () => {
+    let processedAny = false;
+
     // Scan all group IPC directories (identity determined by directory)
     let groupFolders: string[];
     try {
@@ -47,7 +52,11 @@ export function startIpcWatcher(deps: IpcDeps): void {
       });
     } catch (err) {
       logger.error({ err }, 'Error reading IPC base directory');
-      setTimeout(processIpcFiles, IPC_POLL_INTERVAL);
+      currentPollInterval = Math.min(
+        IPC_MAX_IDLE_POLL_INTERVAL,
+        currentPollInterval * 2,
+      );
+      setTimeout(processIpcFiles, currentPollInterval);
       return;
     }
 
@@ -70,6 +79,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
           const messageFiles = fs
             .readdirSync(messagesDir)
             .filter((f) => f.endsWith('.json'));
+          if (messageFiles.length > 0) processedAny = true;
           for (const file of messageFiles) {
             const filePath = path.join(messagesDir, file);
             try {
@@ -121,6 +131,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
           const taskFiles = fs
             .readdirSync(tasksDir)
             .filter((f) => f.endsWith('.json'));
+          if (taskFiles.length > 0) processedAny = true;
           for (const file of taskFiles) {
             const filePath = path.join(tasksDir, file);
             try {
@@ -147,7 +158,10 @@ export function startIpcWatcher(deps: IpcDeps): void {
       }
     }
 
-    setTimeout(processIpcFiles, IPC_POLL_INTERVAL);
+    currentPollInterval = processedAny
+      ? IPC_POLL_INTERVAL
+      : Math.min(IPC_MAX_IDLE_POLL_INTERVAL, currentPollInterval * 2);
+    setTimeout(processIpcFiles, currentPollInterval);
   };
 
   processIpcFiles();
@@ -162,6 +176,7 @@ export async function processTaskIpc(
     schedule_type?: string;
     schedule_value?: string;
     context_mode?: string;
+    script?: string;
     groupFolder?: string;
     chatJid?: string;
     targetJid?: string;
@@ -260,6 +275,7 @@ export async function processTaskIpc(
           group_folder: targetFolder,
           chat_jid: targetJid,
           prompt: data.prompt,
+          script: data.script || null,
           schedule_type: scheduleType,
           schedule_value: data.schedule_value,
           context_mode: contextMode,
@@ -352,6 +368,7 @@ export async function processTaskIpc(
 
         const updates: Parameters<typeof updateTask>[1] = {};
         if (data.prompt !== undefined) updates.prompt = data.prompt;
+        if (data.script !== undefined) updates.script = data.script || null;
         if (data.schedule_type !== undefined)
           updates.schedule_type = data.schedule_type as
             | 'cron'
@@ -438,7 +455,10 @@ export async function processTaskIpc(
           );
           break;
         }
-        // Defense in depth: agent cannot set isMain via IPC
+        // Defense in depth: agent cannot set isMain via IPC.                                                                                                                                    
+        // Preserve isMain from the existing registration so IPC config                                                                                                                          
+        // updates (e.g. adding additionalMounts) don't strip the flag.                                                                                                                          
+        const existingGroup = registeredGroups[data.jid];
         deps.registerGroup(data.jid, {
           name: data.name,
           folder: data.folder,
@@ -446,6 +466,7 @@ export async function processTaskIpc(
           added_at: new Date().toISOString(),
           containerConfig: data.containerConfig,
           requiresTrigger: data.requiresTrigger,
+          isMain: existingGroup?.isMain,
         });
       } else {
         logger.warn(

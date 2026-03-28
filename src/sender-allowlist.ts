@@ -20,6 +20,15 @@ const DEFAULT_CONFIG: SenderAllowlistConfig = {
   logDenied: true,
 };
 
+const allowlistCache = new Map<
+  string,
+  {
+    mtimeMs: number | null;
+    size: number | null;
+    value: SenderAllowlistConfig;
+  }
+>();
+
 function isValidEntry(entry: unknown): entry is ChatAllowlistEntry {
   if (!entry || typeof entry !== 'object') return false;
   const e = entry as Record<string, unknown>;
@@ -35,11 +44,36 @@ export function loadSenderAllowlist(
 ): SenderAllowlistConfig {
   const filePath = pathOverride ?? SENDER_ALLOWLIST_PATH;
 
+  let stat: fs.Stats | null = null;
+  try {
+    stat = fs.statSync(filePath);
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      const cached = allowlistCache.get(filePath);
+      if (cached?.mtimeMs === null) return cached.value;
+      allowlistCache.set(filePath, {
+        mtimeMs: null,
+        size: null,
+        value: DEFAULT_CONFIG,
+      });
+      return DEFAULT_CONFIG;
+    }
+    logger.warn(
+      { err, path: filePath },
+      'sender-allowlist: cannot stat config',
+    );
+    return DEFAULT_CONFIG;
+  }
+
+  const cached = allowlistCache.get(filePath);
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    return cached.value;
+  }
+
   let raw: string;
   try {
     raw = fs.readFileSync(filePath, 'utf-8');
   } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return DEFAULT_CONFIG;
     logger.warn(
       { err, path: filePath },
       'sender-allowlist: cannot read config',
@@ -81,11 +115,17 @@ export function loadSenderAllowlist(
     }
   }
 
-  return {
+  const value = {
     default: obj.default as ChatAllowlistEntry,
     chats,
     logDenied: obj.logDenied !== false,
   };
+  allowlistCache.set(filePath, {
+    mtimeMs: stat.mtimeMs,
+    size: stat.size,
+    value,
+  });
+  return value;
 }
 
 function getEntry(

@@ -17,6 +17,15 @@ const ITSYHOME_PORT = 8423;
 const ITSYHOME_HOST = 'localhost';
 const AUTOMATION_TIMEOUT_MS = 2.5 * 60 * 1000; // 2.5 minutes (give automations a buffer)
 const RECONNECT_DELAY_MS = 5000;
+const SECURITY_VERIFY_TIMEOUT_MS = 45 * 1000;
+const SECURITY_VERIFY_POLL_MS = 1000;
+
+// Confirmed/assumed DSC mapping for this Itsyhome setup:
+// - Disarmed/off:        current=3, target=3
+// - Setting to Stay:     current=3, target=0
+// - Armed Stay/Home:     current=0, target=0
+// - Setting to Away:     current=3, target=1 (deduced)
+// - Armed Away:          current=1, target=1 (deduced)
 
 interface PendingAutomation {
   trigger: string;
@@ -116,7 +125,7 @@ export function startHomekitWatcher(
         trigger: 'Night switch ON',
         expectedDevice: 'DSC',
         expectedCharacteristic: 'securitySystemTargetState',
-        expectedSecurityTargetState: 0, // Stay / Home
+        expectedSecurityTargetState: 0, // Stay / Home target (stable state expected: 0/0)
         timer: setTimeout(
           () => onAutomationFailed('night-to-stay'),
           AUTOMATION_TIMEOUT_MS,
@@ -139,7 +148,7 @@ export function startHomekitWatcher(
         trigger: 'Away switch ON',
         expectedDevice: 'DSC',
         expectedCharacteristic: 'securitySystemTargetState',
-        expectedSecurityTargetState: 1, // Away
+        expectedSecurityTargetState: 1, // Away target (expected stable state: 1/1)
         timer: setTimeout(
           () => onAutomationFailed('away-to-armed'),
           AUTOMATION_TIMEOUT_MS,
@@ -231,51 +240,96 @@ export function startHomekitWatcher(
       'HomeKit watcher: automation failed',
     );
 
-    // Notify user
-    const message =
-      `⚠️ **Home Automation Failed**\n` +
-      `Trigger: **${automation.trigger}** (${elapsed}s ago)\n` +
-      `Expected the security system to update, but it didn't.\n` +
-      `Attempting to fix...`;
-
     try {
-      await sendMessage(ownerJid, message);
-    } catch (err) {
-      logger.error({ err }, 'HomeKit watcher: failed to send alert');
-    }
+      const fixAction = await attemptSecurityAutoFix(key);
+      logger.info({ key, fixAction }, 'HomeKit watcher: fix applied');
 
-    // Auto-fix using the security-system service ID directly
-    // (bypasses the name ambiguity between the switch and security-system services)
-    const SECURITY_SYSTEM_SERVICE_ID = '53D95070-5CA7-502A-AC46-7C67DFB6ED4B';
-    try {
-      let fixAction: string;
-      let armPath: string;
-      if (key === 'night-to-stay') {
-        fixAction = 'Arming security system to Stay';
-        armPath = `/arm/stay/${SECURITY_SYSTEM_SERVICE_ID}`;
-      } else if (key === 'away-to-armed') {
-        fixAction = 'Arming security system to Away';
-        armPath = `/arm/away/${SECURITY_SYSTEM_SERVICE_ID}`;
-      } else {
-        await sendMessage(ownerJid, `❌ Unknown automation key: ${key}`).catch(
-          () => {},
-        );
-        return;
+      if (automation.expectedSecurityTargetState !== undefined) {
+        try {
+          const actual = await waitForSecuritySystemState(
+            automation.expectedSecurityTargetState,
+            SECURITY_VERIFY_TIMEOUT_MS,
+          );
+          await sendMessage(
+            ownerJid,
+            `⚠️ **Home Automation Recovered**\n` +
+              `Trigger: **${automation.trigger}** (${elapsed}s ago)\n` +
+              `The original automation missed, but the auto-fix succeeded.`,
+          ).catch(() => {});
+          logger.info(
+            { key, trigger: automation.trigger, elapsed, actual },
+            'HomeKit watcher: auto-fix verified successfully',
+          );
+          return;
+        } catch (err) {
+          logger.warn(
+            { err, key },
+            'HomeKit watcher: failed to verify actual DSC state after auto-fix',
+          );
+        }
       }
 
-      await itsyhomeRequest(armPath);
       await sendMessage(
         ownerJid,
-        `🔧 ${fixAction} — command sent successfully.`,
-      );
-      logger.info({ key, fixAction, armPath }, 'HomeKit watcher: fix applied');
+        `⚠️ **Home Automation Failed**\n` +
+          `Trigger: **${automation.trigger}** (${elapsed}s ago)\n` +
+          `Attempted auto-fix: **${fixAction}**\n` +
+          `The command was sent, but I could not verify that the security system reached the expected state.`,
+      ).catch(() => {});
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      await sendMessage(ownerJid, `❌ Failed to auto-fix: ${errMsg}`).catch(
-        () => {},
-      );
+      await sendMessage(
+        ownerJid,
+        `⚠️ **Home Automation Failed**\n` +
+          `Trigger: **${automation.trigger}** (${elapsed}s ago)\n` +
+          `Auto-fix also failed: ${errMsg}`,
+      ).catch(() => {});
       logger.error({ err: errMsg, key }, 'HomeKit watcher: fix failed');
     }
+  }
+
+  async function attemptSecurityAutoFix(key: string): Promise<string> {
+    if (key === 'night-to-stay') {
+      // Direct /arm/stay returns success but does not move the DSC state on this setup.
+      // Re-triggering the Night switch reliably advances the target state to Stay.
+      await itsyhomeRequest('/off/Security/Night').catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      await itsyhomeRequest('/on/Security/Night');
+      return 'Re-triggered Security/Night switch';
+    }
+
+    if (key === 'away-to-armed') {
+      await itsyhomeRequest('/off/Security/Away').catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      await itsyhomeRequest('/on/Security/Away');
+      return 'Re-triggered Security/Away switch';
+    }
+
+    throw new Error(`Unknown automation key: ${key}`);
+  }
+
+  async function waitForSecuritySystemState(
+    expectedState: number,
+    timeoutMs: number,
+  ): Promise<{ currentState: number | null; targetState: number | null }> {
+    const deadline = Date.now() + timeoutMs;
+    let lastActual = await getSecuritySystemState();
+
+    while (Date.now() < deadline) {
+      const currentMatches = lastActual.currentState === expectedState;
+      const targetMatches = lastActual.targetState === expectedState;
+      if (currentMatches || targetMatches) {
+        return lastActual;
+      }
+      await new Promise((resolve) =>
+        setTimeout(resolve, SECURITY_VERIFY_POLL_MS),
+      );
+      lastActual = await getSecuritySystemState();
+    }
+
+    throw new Error(
+      `Timed out waiting for security state ${expectedState}. Last state: current=${lastActual.currentState}, target=${lastActual.targetState}`,
+    );
   }
 
   async function getSecuritySystemState(): Promise<{

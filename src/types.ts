@@ -58,6 +58,7 @@ export interface ScheduledTask {
   group_folder: string;
   chat_jid: string;
   prompt: string;
+  script?: string | null;
   schedule_type: 'cron' | 'interval' | 'once';
   schedule_value: string;
   context_mode: 'group' | 'isolated';
@@ -86,6 +87,10 @@ export interface Channel {
   isConnected(): boolean;
   ownsJid(jid: string): boolean;
   disconnect(): Promise<void>;
+  // Optional: send and return the created platform message id.
+  sendMessageWithId?(jid: string, text: string): Promise<string | null>;
+  // Optional: edit an existing platform message.
+  editMessage?(jid: string, messageId: string, text: string): Promise<void>;
   // Optional: typing indicator. Channels that support it implement it.
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
   // Optional: add/remove emoji reactions on a message.
