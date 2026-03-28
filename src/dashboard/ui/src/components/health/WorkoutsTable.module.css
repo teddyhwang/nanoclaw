@@ -1,0 +1,76 @@
+/* ── Workouts Table — search/filter controls ───────────────── */
+.workoutsPanel {
+  max-height: 500px;
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.search {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.searchIcon {
+  position: absolute;
+  left: 7px;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.searchInput {
+  background: rgba(62, 75, 89, 0.2);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 11px;
+  padding: 4px 22px 4px 24px;
+  width: 130px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.searchInput::placeholder {
+  color: var(--muted);
+}
+
+.searchInput:focus {
+  border-color: var(--accent);
+}
+
+.searchClear {
+  position: absolute;
+  right: 4px;
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 2px;
+  display: flex;
+  align-items: center;
+}
+
+.searchClear:hover {
+  color: var(--text);
+}
+
+.typeFilter {
+  background: rgba(62, 75, 89, 0.2);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 11px;
+  padding: 4px 8px;
+  outline: none;
+  cursor: pointer;
+}
+
+.typeFilter:focus {
+  border-color: var(--accent);
+}

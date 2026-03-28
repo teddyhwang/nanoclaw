@@ -129,7 +129,7 @@ export function Salaries({ data, onSaveSalaryField }: Props) {
 
         <div className="ov-card full">
           <h3>All Salaries</h3>
-          <div style={{ overflowX: 'auto' }}>
+          <div style={{ overflowX: 'auto', overflowY: 'auto', maxHeight: 400 }}>
             <table className="salary-table">
               <thead>
                 <tr>
@@ -182,7 +182,7 @@ export function Salaries({ data, onSaveSalaryField }: Props) {
 
         <div className="ov-card full">
           <h3>Savings vs Earnings</h3>
-          <div style={{ overflowX: 'auto' }}>
+          <div style={{ overflowX: 'auto', overflowY: 'auto', maxHeight: 400 }}>
             <table className="salary-table">
               <thead><tr><th>Year</th><th>Total Savings</th><th>Earnings (Pre-Tax)</th><th>Earnings (Post-Tax)</th><th>Avg Tax Rate</th></tr></thead>
               <tbody>

@@ -1,6 +1,9 @@
 import { useState, useMemo, useCallback } from 'react';
-import { Dumbbell, ChevronUp, ChevronDown, Search, X } from 'lucide-react';
+import { Search, X } from 'lucide-react';
 import { COLORS } from '../../constants';
+import { Panel, DataTable } from '@/components/shared';
+import type { Column } from '@/components/shared';
+import styles from './WorkoutsTable.module.css';
 
 interface Workout {
   date: string;
@@ -29,7 +32,6 @@ function formatDuration(mins: number): string {
 }
 
 type SortCol = 'date' | 'type' | 'duration' | 'distance' | 'calories' | 'avgHR' | 'maxHR';
-type SortDir = 1 | -1;
 
 function getSortValue(w: Workout, col: SortCol): number | string {
   switch (col) {
@@ -43,25 +45,80 @@ function getSortValue(w: Workout, col: SortCol): number | string {
   }
 }
 
+const columns: Column<Workout>[] = [
+  {
+    key: 'date',
+    label: 'Date',
+    sortable: true,
+    render: (w) => <span style={{ color: COLORS.muted }}>{w.date.slice(5)}</span>,
+  },
+  {
+    key: 'type',
+    label: 'Type',
+    sortable: true,
+    render: (w) => <span style={{ color: COLORS.hi }}>{humanizeType(w.type)}</span>,
+  },
+  {
+    key: 'duration',
+    label: 'Duration',
+    sortable: true,
+    render: (w) => formatDuration(w.duration),
+  },
+  {
+    key: 'distance',
+    label: 'Distance',
+    sortable: true,
+    render: (w) => w.distance != null ? `${w.distance.toFixed(1)} km` : '—',
+  },
+  {
+    key: 'calories',
+    label: 'Calories',
+    sortable: true,
+    render: (w) => <span style={{ color: COLORS.orange }}>{w.calories != null ? w.calories : '—'}</span>,
+  },
+  {
+    key: 'avgHR',
+    label: 'Avg HR',
+    sortable: true,
+    render: (w) => <span style={{ color: COLORS.red }}>{w.avgHR ?? '—'}</span>,
+  },
+  {
+    key: 'maxHR',
+    label: 'Max HR',
+    sortable: true,
+    render: (w) => <span style={{ color: COLORS.red }}>{w.maxHR ?? '—'}</span>,
+  },
+];
+
 export function WorkoutsTable({ data, rangeLabel }: Props) {
-  const [typeFilter, setTypeFilter] = useState<string>('all');
+  const [typeFilter, setTypeFilter] = useState<string>(() => localStorage.getItem('health-workout-filter') || 'all');
   const [search, setSearch] = useState('');
-  const [sortCol, setSortCol] = useState<SortCol>('date');
-  const [sortDir, setSortDir] = useState<SortDir>(-1);
+  const [sortCol, setSortCol] = useState<SortCol>(() => (localStorage.getItem('health-workout-sort-col') as SortCol) || 'date');
+  const [sortDir, setSortDir] = useState<1 | -1>(() => {
+    const saved = localStorage.getItem('health-workout-sort-dir');
+    return saved === '1' ? 1 : -1;
+  });
 
   const types = useMemo(() => {
     const set = new Set(data.map(w => w.type));
     return Array.from(set).sort();
   }, [data]);
 
-  const handleSort = useCallback((col: SortCol) => {
+  const handleSort = useCallback((col: string) => {
+    const typedCol = col as SortCol;
     setSortCol(prev => {
-      if (prev === col) {
-        setSortDir(d => (d === 1 ? -1 : 1) as SortDir);
-        return col;
+      if (prev === typedCol) {
+        setSortDir(d => {
+          const next = (d === 1 ? -1 : 1) as 1 | -1;
+          localStorage.setItem('health-workout-sort-dir', String(next));
+          return next;
+        });
+        return typedCol;
       }
-      setSortDir(col === 'date' ? -1 : -1);
-      return col;
+      setSortDir(-1);
+      localStorage.setItem('health-workout-sort-col', typedCol);
+      localStorage.setItem('health-workout-sort-dir', '-1');
+      return typedCol;
     });
   }, []);
 
@@ -87,84 +144,51 @@ export function WorkoutsTable({ data, rangeLabel }: Props) {
     return result;
   }, [data, typeFilter, search, sortCol, sortDir]);
 
-  const SortIcon = ({ col }: { col: SortCol }) => {
-    if (sortCol !== col) return null;
-    return sortDir === 1 ? <ChevronUp size={10} /> : <ChevronDown size={10} />;
-  };
-
-  const thStyle = (col: SortCol): React.CSSProperties => ({
-    cursor: 'pointer',
-    userSelect: 'none',
-    color: sortCol === col ? COLORS.accent : undefined,
-  });
+  const headerRight = (
+    <div className={styles.controls}>
+      <div className={styles.search}>
+        <Search size={12} className={styles.searchIcon} />
+        <input
+          type="text"
+          placeholder="Search…"
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          className={styles.searchInput}
+        />
+        {search && (
+          <button className={styles.searchClear} onClick={() => setSearch('')}>
+            <X size={10} />
+          </button>
+        )}
+      </div>
+      <select
+        className={styles.typeFilter}
+        value={typeFilter}
+        onChange={e => { setTypeFilter(e.target.value); localStorage.setItem('health-workout-filter', e.target.value); }}
+      >
+        <option value="all">All Types</option>
+        {types.map(t => (
+          <option key={t} value={t}>{humanizeType(t)}</option>
+        ))}
+      </select>
+    </div>
+  );
 
   return (
-    <div className="panel health-workouts-panel">
-      <div className="panel-head workouts-head">
-        <div className="workouts-title">
-          <Dumbbell size={14} />
-          Recent Workouts <span className="panel-sub">{rangeLabel} · {filtered.length} sessions</span>
-        </div>
-        <div className="workouts-controls">
-          <div className="workouts-search">
-            <Search size={12} className="workouts-search-icon" />
-            <input
-              type="text"
-              placeholder="Search…"
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              className="workouts-search-input"
-            />
-            {search && (
-              <button className="workouts-search-clear" onClick={() => setSearch('')}>
-                <X size={10} />
-              </button>
-            )}
-          </div>
-          <select
-            className="workouts-type-filter"
-            value={typeFilter}
-            onChange={e => setTypeFilter(e.target.value)}
-          >
-            <option value="all">All Types</option>
-            {types.map(t => (
-              <option key={t} value={t}>{humanizeType(t)}</option>
-            ))}
-          </select>
-        </div>
-      </div>
-      <div className="health-workouts-scroll">
-        <table className="health-workouts-table">
-          <thead>
-            <tr>
-              <th style={thStyle('date')} onClick={() => handleSort('date')}>Date <SortIcon col="date" /></th>
-              <th style={thStyle('type')} onClick={() => handleSort('type')}>Type <SortIcon col="type" /></th>
-              <th style={thStyle('duration')} onClick={() => handleSort('duration')}>Duration <SortIcon col="duration" /></th>
-              <th style={thStyle('distance')} onClick={() => handleSort('distance')}>Distance <SortIcon col="distance" /></th>
-              <th style={thStyle('calories')} onClick={() => handleSort('calories')}>Calories <SortIcon col="calories" /></th>
-              <th style={thStyle('avgHR')} onClick={() => handleSort('avgHR')}>Avg HR <SortIcon col="avgHR" /></th>
-              <th style={thStyle('maxHR')} onClick={() => handleSort('maxHR')}>Max HR <SortIcon col="maxHR" /></th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.length === 0 ? (
-              <tr><td colSpan={7} style={{ textAlign: 'center', color: COLORS.muted, padding: 20 }}>No workouts found</td></tr>
-            ) : (
-              filtered.map((w, i) => (
-                <tr key={i}>
-                  <td style={{ color: COLORS.muted }}>{w.date.slice(5)}</td>
-                  <td style={{ color: COLORS.hi }}>{humanizeType(w.type)}</td>
-                  <td>{formatDuration(w.duration)}</td>
-                  <td>{w.distance != null ? `${w.distance.toFixed(1)} km` : '—'}</td>
-                  <td style={{ color: COLORS.orange }}>{w.calories != null ? w.calories : '—'}</td>
-                  <td style={{ color: COLORS.red }}>{w.avgHR ?? '—'}</td>
-                  <td style={{ color: COLORS.red }}>{w.maxHR ?? '—'}</td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
-    </div>
+    <Panel
+      title="Recent Workouts"
+      subtitle={`${rangeLabel} · ${filtered.length} sessions`}
+      headerRight={headerRight}
+      className={styles.workoutsPanel}
+    >
+      <DataTable<Workout>
+        columns={columns}
+        data={filtered}
+        sortCol={sortCol}
+        sortDir={sortDir}
+        onSort={handleSort}
+        emptyMessage="No workouts found"
+      />
+    </Panel>
   );
 }

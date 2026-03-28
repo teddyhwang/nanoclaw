@@ -7,6 +7,7 @@ import { fmt, fmtFull } from '../../utils/format';
 import { getDateRange } from '../../utils/dates';
 import { CHART_COLORS, COLORS } from '../../constants';
 import { usePrivacy } from '../../contexts/PrivacyContext';
+import { Panel } from '@/components/shared';
 
 const RECURRING_CATS = ['condo mortgage', 'mortgage', 'condo fees', 'rent'];
 
@@ -96,9 +97,8 @@ export function TopMerchants({
   }, [buildData, selectedMerchant, onMerchantClick, privacyMode]);
 
   return (
-    <div className="panel chart-panel">
-      <div className="panel-head">Top Merchants</div>
+    <Panel className="chart-panel" title="Top Merchants">
       <div className="chart-wrap"><canvas ref={canvasRef} /></div>
-    </div>
+    </Panel>
   );
 }

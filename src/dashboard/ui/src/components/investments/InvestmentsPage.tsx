@@ -18,6 +18,8 @@ import {
 import type { InvestmentData } from '../../types';
 import { fetchInvestments, updateInvestmentField, saveInvestmentData } from '../../api';
 import { COLORS } from '../../constants';
+import { SubNav, PageContent } from '@/components/shared';
+import subNavStyles from '@/components/shared/SubNav.module.css';
 import { Layout } from '../Layout';
 import { Loading } from '../Loading';
 import { Overview } from './Overview';
@@ -96,33 +98,33 @@ export function InvestmentsPage({ initialData }: Props) {
 
   return (
     <Layout refreshing={refreshing} onRefresh={handleRefresh}>
-      <nav className="sub-nav">
+      <SubNav>
         <NavLink
           to="/investments"
           end
-          className={({ isActive }) => `sub-tab${isActive && view === 'overview' ? ' active' : ''}`}
+          className={({ isActive }) => isActive && view === 'overview' ? subNavStyles.tabActive : subNavStyles.tab}
         >
           Overview
         </NavLink>
         <NavLink
           to="/investments/salaries"
-          className={({ isActive }) => `sub-tab${isActive ? ' active' : ''}`}
+          className={({ isActive }) => isActive ? subNavStyles.tabActive : subNavStyles.tab}
         >
           Salaries
         </NavLink>
-        <div className="sub-sep" />
+        <SubNav.Separator />
         {years.map((y) => (
           <NavLink
             key={y}
             to={`/investments/${y}`}
-            className={({ isActive }) => `sub-tab${isActive ? ' active' : ''}`}
+            className={({ isActive }) => isActive ? subNavStyles.tabActive : subNavStyles.tab}
           >
             {y}
           </NavLink>
         ))}
-      </nav>
+      </SubNav>
 
-      <div className="view-container">
+      <PageContent style={{ padding: 'var(--g)', display: 'flex', flexDirection: 'column' }}>
         {view === 'overview' && <Overview data={data} />}
         {view === 'salaries' && (
           <Salaries data={data} onSaveSalaryField={handleSaveSalaryField} />
@@ -134,7 +136,7 @@ export function InvestmentsPage({ initialData }: Props) {
             onUpdateField={handleUpdateField}
           />
         )}
-      </div>
+      </PageContent>
     </Layout>
   );
 }

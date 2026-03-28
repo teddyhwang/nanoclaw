@@ -1,6 +1,7 @@
 import { Doughnut } from 'react-chartjs-2';
 import type { ChartOptions } from 'chart.js';
 import { CHART_COLORS, COLORS } from '../../constants';
+import { ChartPanel, tooltipStyle } from '@/components/shared';
 
 function humanizeType(s: string): string {
   return s.replace(/([a-z])([A-Z])/g, '$1 $2');
@@ -34,11 +35,7 @@ export function WorkoutBreakdown({ data, rangeLabel }: Props) {
         labels: { boxWidth: 10, padding: 6, color: COLORS.text, font: { size: 11 } },
       },
       tooltip: {
-        backgroundColor: 'rgba(19,23,33,0.95)',
-        borderColor: 'rgba(62,75,89,0.5)',
-        borderWidth: 1,
-        titleColor: COLORS.text,
-        bodyColor: COLORS.hi,
+        ...tooltipStyle,
         callbacks: {
           label: (ctx) => {
             const item = data[ctx.dataIndex];
@@ -50,13 +47,8 @@ export function WorkoutBreakdown({ data, rangeLabel }: Props) {
   };
 
   return (
-    <div className="panel chart-panel">
-      <div className="panel-head">
-        Workout Breakdown <span className="panel-sub">{rangeLabel}</span>
-      </div>
-      <div className="chart-wrap">
-        <Doughnut data={chartData} options={options} />
-      </div>
-    </div>
+    <ChartPanel title="Workout Breakdown" subtitle={rangeLabel}>
+      <Doughnut data={chartData} options={options} />
+    </ChartPanel>
   );
 }

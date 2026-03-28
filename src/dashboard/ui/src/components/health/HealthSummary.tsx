@@ -1,5 +1,7 @@
 import { Footprints, Flame, Timer, ArrowUpFromDot, Route, Heart } from 'lucide-react';
 import type { HealthData } from '../../types';
+import { StatCard, StatGrid } from '@/components/shared';
+import styles from './HealthSummary.module.css';
 
 interface Props {
   data: HealthData;
@@ -91,24 +93,18 @@ export function HealthSummary({ data }: Props) {
   ];
 
   return (
-    <div className="health-summary">
-      <div className="health-summary-grid">
-        <div className="health-stat health-stat-rings">
+    <div className={styles.summary}>
+      <div className={styles.summaryGrid}>
+        <div className={styles.ringCard}>
           <RingIndicator move={avgMovePct} exercise={avgExercisePct} stand={avgStandPct} />
-          <div className="ring-labels">
+          <div className={styles.ringLabels}>
             <span style={{ color: '#f07178' }}>Move {Math.round(avgMovePct * 100)}%</span>
             <span style={{ color: '#aad94c' }}>Exercise {Math.round(avgExercisePct * 100)}%</span>
             <span style={{ color: '#59c2ff' }}>Stand {Math.round(avgStandPct * 100)}%</span>
           </div>
         </div>
         {stats.map((st) => (
-          <div key={st.label} className="health-stat">
-            <div className="health-stat-icon" style={{ color: st.color }}>
-              <st.icon size={16} />
-            </div>
-            <span className="health-stat-label">{st.label}</span>
-            <span className="health-stat-value" style={{ color: st.color }}>{st.value}</span>
-          </div>
+          <StatCard key={st.label} label={st.label} value={st.value} icon={st.icon} color={st.color} />
         ))}
       </div>
     </div>

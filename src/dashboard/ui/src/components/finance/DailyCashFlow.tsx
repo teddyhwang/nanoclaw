@@ -7,6 +7,7 @@ import { fmt, fmtFull } from '../../utils/format';
 import { getDateRange } from '../../utils/dates';
 import { COLORS } from '../../constants';
 import { usePrivacy } from '../../contexts/PrivacyContext';
+import { Panel } from '@/components/shared';
 
 interface Props {
   transactions: Transaction[];
@@ -128,9 +129,8 @@ export function DailyCashFlow({
   }, [buildData, selectedDay, onDayClick, privacyMode]);
 
   return (
-    <div className="panel chart-panel">
-      <div className="panel-head">Daily Cash Flow</div>
+    <Panel className="chart-panel" title="Daily Cash Flow">
       <div className="chart-wrap"><canvas ref={canvasRef} /></div>
-    </div>
+    </Panel>
   );
 }

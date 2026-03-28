@@ -2,6 +2,8 @@ import { Line } from 'react-chartjs-2';
 import type { ChartOptions } from 'chart.js';
 import { Info } from 'lucide-react';
 import { COLORS } from '../../constants';
+import { ChartPanel, tooltipStyle, axisStyle, createLineDataset } from '@/components/shared';
+import wStyles from './WeightChart.module.css';
 
 interface DateValue { date: string; value: number; }
 
@@ -24,33 +26,30 @@ export function WeightChart({ weight, bodyFat, rangeLabel, fallback }: Props) {
   const chartData = {
     labels: displayWeight.map((d) => d.date),
     datasets: [
-      {
-        label: 'Weight (lbs)',
-        data: displayWeight.map((d) => d.value),
-        borderColor: COLORS.blue,
-        backgroundColor: 'rgba(89,194,255,0.08)',
-        fill: true,
-        tension: 0.3,
-        pointRadius: displayWeight.length < 20 ? 3 : 0,
-        pointHoverRadius: 4,
-        borderWidth: 2,
-        yAxisID: 'y',
-      },
+      createLineDataset(
+        'Weight (lbs)',
+        displayWeight.map((d) => d.value),
+        COLORS.blue,
+        {
+          pointRadius: displayWeight.length < 20 ? 3 : 0,
+          yAxisID: 'y',
+        },
+      ),
       ...(hasBodyFat
         ? [
-            {
-              label: 'Body Fat %',
-              data: displayBodyFat.map((d) => d.value),
-              borderColor: COLORS.purple,
-              backgroundColor: 'transparent',
-              fill: false,
-              tension: 0.3,
-              pointRadius: displayBodyFat.length < 20 ? 3 : 0,
-              pointHoverRadius: 4,
-              borderWidth: 1.5,
-              borderDash: [4, 4],
-              yAxisID: 'y1' as const,
-            },
+            createLineDataset(
+              'Body Fat %',
+              displayBodyFat.map((d) => d.value),
+              COLORS.purple,
+              {
+                fill: false,
+                backgroundColor: 'transparent',
+                pointRadius: displayBodyFat.length < 20 ? 3 : 0,
+                borderWidth: 1.5,
+                borderDash: [4, 4],
+                yAxisID: 'y1' as const,
+              },
+            ),
           ]
         : []),
     ],
@@ -62,23 +61,17 @@ export function WeightChart({ weight, bodyFat, rangeLabel, fallback }: Props) {
     interaction: { mode: 'index', intersect: false },
     plugins: {
       legend: { display: hasBodyFat, position: 'top', labels: { boxWidth: 12, padding: 8, color: COLORS.muted, font: { size: 11 } } },
-      tooltip: {
-        backgroundColor: 'rgba(19,23,33,0.95)',
-        borderColor: 'rgba(62,75,89,0.5)',
-        borderWidth: 1,
-        titleColor: COLORS.text,
-        bodyColor: COLORS.hi,
-      },
+      tooltip: tooltipStyle,
     },
     scales: {
       x: {
-        grid: { display: false },
-        ticks: { maxTicksLimit: 8, callback: (_, i) => displayWeight[i]?.date?.slice(5) || '' },
+        ...axisStyle.x,
+        ticks: { ...axisStyle.x.ticks, maxTicksLimit: 8, callback: (_, i) => displayWeight[i]?.date?.slice(5) || '' },
       },
       y: {
         position: 'left',
-        grid: { color: 'rgba(62,75,89,0.2)' },
-        ticks: { callback: (v) => `${v}` },
+        ...axisStyle.y,
+        ticks: { ...axisStyle.y.ticks, callback: (v) => `${v}` },
       },
       ...(hasBodyFat
         ? {
@@ -92,22 +85,19 @@ export function WeightChart({ weight, bodyFat, rangeLabel, fallback }: Props) {
     },
   };
 
+  const headerRight = useFallback ? (
+    <span className={wStyles.infoBadge} title="Not enough weight data in the selected range — showing 90 days instead">
+      <Info size={12} />
+    </span>
+  ) : undefined;
+
   return (
-    <div className="panel chart-panel">
-      <div className="panel-head">
-        Weight{' '}
-        <span className="panel-sub">
-          {useFallback ? '90 days' : rangeLabel}
-        </span>
-        {useFallback && (
-          <span className="health-info-badge" title="Not enough weight data in the selected range — showing 90 days instead">
-            <Info size={12} />
-          </span>
-        )}
-      </div>
-      <div className="chart-wrap">
-        <Line data={chartData} options={options} />
-      </div>
-    </div>
+    <ChartPanel
+      title="Weight"
+      subtitle={useFallback ? '90 days' : rangeLabel}
+      headerRight={headerRight}
+    >
+      <Line data={chartData} options={options} />
+    </ChartPanel>
   );
 }

@@ -21,8 +21,7 @@
 
 /* Sub nav */
 
-/* View container */
-.view-container { flex: 1; overflow-y: auto; overflow-x: hidden; padding: var(--g); display: flex; flex-direction: column; min-height: 0; }
+
 
 /* ── Overview 2×2 grid ─────────────────────────────────────── */
 .ov-grid-2x2 {

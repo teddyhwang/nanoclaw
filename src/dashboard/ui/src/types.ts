@@ -77,6 +77,7 @@ export type SortState = {
 // ── Health types ────────────────────────────────────────────
 
 export interface HealthData {
+  minDate: string;
   steps: { date: string; steps: number }[];
   restingHeartRate: { date: string; value: number }[];
   heartRateVariability: { date: string; value: number }[];

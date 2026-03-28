@@ -148,12 +148,14 @@ async function handleApi(
     } else if (pathname === '/api/health') {
       const url = new URL(req.url!, `http://${req.headers.host}`);
       const sinceParam = url.searchParams.get('since');
+      const untilParam = url.searchParams.get('until');
       const daysParam = url.searchParams.get('days');
-      const opts = sinceParam
+      const opts: { since?: string; until?: string; days?: number } = sinceParam
         ? { since: sinceParam }
         : {
             days: Math.min(Math.max(parseInt(daysParam || '90', 10), 1), 5500),
           };
+      if (untilParam) opts.until = untilParam;
       const data = getHealthData(opts);
       sendJson(res, data);
     } else if (pathname === '/api/investments/save' && req.method === 'POST') {

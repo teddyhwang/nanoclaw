@@ -1,6 +1,8 @@
 import { Bar } from 'react-chartjs-2';
 import type { ChartOptions } from 'chart.js';
 import { COLORS } from '../../constants';
+import { Panel, tooltipStyle, axisStyle } from '@/components/shared';
+import styles from './ActivityRings.module.css';
 
 interface RingDay {
   date: string;
@@ -27,7 +29,7 @@ function MiniRing({ move, exercise, stand, label }: { move: number; exercise: nu
   ];
 
   return (
-    <div className="mini-ring-day">
+    <div className={styles.miniRingDay}>
       <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
         {rings.map((ring, i) => {
           const r = (size / 2) - sw * (i + 1) - i * 1.5;
@@ -46,7 +48,7 @@ function MiniRing({ move, exercise, stand, label }: { move: number; exercise: nu
           );
         })}
       </svg>
-      <span className="mini-ring-label">{label}</span>
+      <span className={styles.miniRingLabel}>{label}</span>
     </div>
   );
 }
@@ -85,26 +87,19 @@ export function ActivityRings({ data, rangeLabel }: Props) {
     plugins: {
       legend: { position: 'top', labels: { boxWidth: 10, padding: 8, color: COLORS.muted, font: { size: 10 } } },
       tooltip: {
-        backgroundColor: 'rgba(19,23,33,0.95)',
-        borderColor: 'rgba(62,75,89,0.5)',
-        borderWidth: 1,
-        titleColor: COLORS.text,
-        bodyColor: COLORS.hi,
+        ...tooltipStyle,
         callbacks: { label: (ctx) => `${ctx.dataset.label}: ${Math.round(ctx.parsed.y ?? 0)}%` },
       },
     },
     scales: {
-      x: { grid: { display: false }, stacked: false, ticks: { maxTicksLimit: 10, callback: (_: unknown, i: number) => data[i]?.date?.slice(5) || '' } },
-      y: { grid: { color: 'rgba(62,75,89,0.2)' }, max: 150, ticks: { callback: (v) => `${v}%` } },
+      x: { ...axisStyle.x, stacked: false, ticks: { ...axisStyle.x.ticks, maxTicksLimit: 10, callback: (_: unknown, i: number) => data[i]?.date?.slice(5) || '' } },
+      y: { ...axisStyle.y, max: 150, ticks: { ...axisStyle.y.ticks, callback: (v) => `${v}%` } },
     },
   };
 
   return (
-    <div className="panel chart-panel health-rings-panel">
-      <div className="panel-head">
-        Activity Rings <span className="panel-sub">{rangeLabel}</span>
-      </div>
-      <div className="health-rings-week">
+    <Panel title="Activity Rings" subtitle={rangeLabel}>
+      <div className={styles.ringsWeek}>
         {last7.map((d) => (
           <MiniRing
             key={d.date}
@@ -115,9 +110,9 @@ export function ActivityRings({ data, rangeLabel }: Props) {
           />
         ))}
       </div>
-      <div className="chart-wrap">
+      <div className={styles.chartWrap} style={{ height: 220, flex: 'none' }}>
         <Bar data={chartData} options={options} />
       </div>
-    </div>
+    </Panel>
   );
 }

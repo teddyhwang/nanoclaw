@@ -7,6 +7,7 @@ import { fmt, fmtFull } from '../../utils/format';
 import { getDateRange, weekRange } from '../../utils/dates';
 import { COLORS } from '../../constants';
 import { usePrivacy } from '../../contexts/PrivacyContext';
+import { Panel } from '@/components/shared';
 
 interface Props {
   transactions: Transaction[];
@@ -108,11 +109,8 @@ export function WeeklyTrend({
   }, [buildData, selectedWeekStart, onWeekClick, privacyMode]);
 
   return (
-    <div className="panel chart-panel">
-      <div className="panel-head">
-        Weekly Trend <span className="panel-sub" ref={avgRef} />
-      </div>
+    <Panel className="chart-panel" title="Weekly Trend" headerRight={<span className="panel-sub" ref={avgRef} />}>
       <div className="chart-wrap"><canvas ref={canvasRef} /></div>
-    </div>
+    </Panel>
   );
 }

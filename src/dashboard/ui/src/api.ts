@@ -20,11 +20,13 @@ export async function fetchInvestments(): Promise<InvestmentData> {
 export async function fetchHealth(params?: {
   days?: number;
   since?: string;
+  until?: string;
 }): Promise<HealthData> {
-  const qs = params?.since
-    ? `since=${params.since}`
-    : `days=${params?.days ?? 90}`;
-  const r = await fetch(`/api/health?${qs}`);
+  const parts: string[] = [];
+  if (params?.since) parts.push(`since=${params.since}`);
+  else parts.push(`days=${params?.days ?? 90}`);
+  if (params?.until) parts.push(`until=${params.until}`);
+  const r = await fetch(`/api/health?${parts.join('&')}`);
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }

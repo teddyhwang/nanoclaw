@@ -1,3 +1,9 @@
+/* ── Global scrollbar ──────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-thumb { background: var(--border-lit, rgba(62,75,89,0.5)); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(89,108,128,0.6); }
+::-webkit-scrollbar-track { background: transparent; }
+
 /* ── Seti UI Dark — Glassmorphic Dashboard ─────────────────── */
 :root {
   --bg:         #0b0e14;
@@ -27,7 +33,7 @@
 
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
-html, body { height: 100%; overflow: auto; }
+html, body { height: 100%; margin: 0; overflow: hidden; }
 
 body {
   font-family: -apple-system, 'SF Pro Text', 'Inter', system-ui, sans-serif;
@@ -80,7 +86,7 @@ header {
   border-bottom: 1px solid var(--border);
   box-shadow: 0 1px 12px rgba(0,0,0,0.3);
   height: 48px; flex-shrink: 0;
-  position: relative; z-index: 10;
+  position: relative; z-index: 30;
 }
 header::after {
   content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 1px;
@@ -119,7 +125,7 @@ header::after {
 .is-val.net-pos { color: var(--green); }
 .is-val.net-neg { color: var(--red); }
 
-.cache-info { font-size: 12px; color: var(--muted); }
+
 .btn-icon {
   background: var(--bg-card); border: 1px solid var(--border); color: var(--muted);
   width: 32px; height: 32px; border-radius: var(--r);
@@ -130,7 +136,7 @@ header::after {
 .btn-icon.spinning svg { animation: spin .7s linear infinite; }
 
 /* ── App layout ────────────────────────────────────────────── */
-#app { display: flex; flex-direction: column; height: 100vh; }
+#app { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
 
 .finance-summary {
   padding: var(--g) var(--g) 0;
@@ -182,6 +188,20 @@ header::after {
 .finance-stat-value.neg { color: var(--red); text-shadow: 0 0 10px rgba(240,113,120,0.15); }
 .finance-stat-value.orange { color: var(--orange); text-shadow: 0 0 10px rgba(255,143,64,0.15); }
 
+/* ── Panel base (used by TransactionsPanel which isn't using shared Panel component) */
+.panel {
+  background: var(--bg-panel);
+  backdrop-filter: blur(12px) saturate(1.1);
+  -webkit-backdrop-filter: blur(12px) saturate(1.1);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.2), inset 0 1px 0 rgba(255,255,255,0.02);
+}
+
 /* ── Dashboard grid ────────────────────────────────────────── */
 .dash-grid {
   flex: 1; display: grid;
@@ -190,23 +210,7 @@ header::after {
   gap: var(--g); padding: var(--g); min-height: 0;
 }
 
-/* Panel base — glass effect */
-.panel {
-  background: var(--bg-panel);
-  backdrop-filter: blur(12px) saturate(1.1);
-  -webkit-backdrop-filter: blur(12px) saturate(1.1);
-  border: 1px solid var(--border);
-  border-radius: var(--r);
-  display: flex; flex-direction: column; min-height: 0; overflow: hidden;
-  box-shadow: 0 2px 12px rgba(0,0,0,0.2), inset 0 1px 0 rgba(255,255,255,0.02);
-}
-.panel-head {
-  padding: 10px 14px; font-size: 13px; font-weight: 600; text-transform: uppercase;
-  letter-spacing: 1px; color: var(--accent);
-  border-bottom: 1px solid var(--border);
-  background: linear-gradient(180deg, rgba(89,194,255,0.04) 0%, transparent 100%);
-  flex-shrink: 0; display: flex; align-items: center; gap: 8px;
-}
+/* Panel sub — still used by finance chart panels */
 .panel-sub { font-weight: 400; color: var(--muted); text-transform: none; letter-spacing: 0; font-size: 12px; }
 
 /* ── Accounts panel (left column) ──────────────────────────── */
@@ -424,12 +428,23 @@ header::after {
   opacity: 0.5;
 }
 
+/* ── Short viewport: give transactions more room ───────────── */
+@media (max-height: 900px) {
+  .dash-grid {
+    grid-template-rows: minmax(160px, 0.7fr) minmax(160px, 0.7fr) minmax(250px, 2fr);
+  }
+}
+
+@media (max-height: 750px) {
+  .dash-grid {
+    grid-template-rows: minmax(140px, 0.5fr) minmax(140px, 0.5fr) minmax(200px, 3fr);
+  }
+}
+
 /* ── Responsive ────────────────────────────────────────────── */
 @media (max-width: 1024px) {
-  html, body { overflow: auto; }
-  #app { height: auto; min-height: 100vh; }
   .finance-summary-grid { grid-template-columns: 1fr 1fr 1fr; }
-  .dash-grid { grid-template-columns: 1fr 1fr; grid-template-rows: auto !important; height: auto; }
+  .dash-grid { grid-template-columns: 1fr 1fr; grid-template-rows: auto !important; height: auto; flex: none; }
   .accounts-panel { grid-row: auto; grid-column: 1 / 3; max-height: 300px; }
   .properties-panel { grid-column: 1 / 3; grid-row: auto; }
   .tx-panel { grid-column: 1 / 3; grid-row: auto; height: 350px; }
@@ -442,7 +457,6 @@ header::after {
 
 @media (max-width: 768px) {
   .nw-pills { display: none; }
-  .cache-info { display: none; }
 }
 
 @media (max-width: 640px) {
@@ -478,22 +492,4 @@ header::after {
   .nav-link { padding: 3px 6px; }
 }
 
-/* ── Sub-navigation (shared across pages) ──────────────────── */
-.sub-nav {
-  display: flex; gap: 2px; padding: 6px 16px;
-  background: rgba(13, 15, 16, 0.6);
-  backdrop-filter: blur(12px);
-  border-bottom: 1px solid var(--border); overflow-x: auto; flex-shrink: 0;
-  align-items: center;
-}
-.sub-nav::-webkit-scrollbar { height: 3px; }
-.sub-nav::-webkit-scrollbar-thumb { background: var(--border-lit); border-radius: 2px; }
-.sub-tab {
-  background: none; border: 1px solid transparent; color: var(--muted);
-  padding: 4px 14px; border-radius: var(--r); cursor: pointer;
-  font-family: inherit; font-size: 12px; font-weight: 500; white-space: nowrap;
-  transition: all .2s; text-decoration: none;
-}
-.sub-tab:hover { color: var(--text-hi); border-color: var(--border); background: var(--bg-card); }
-.sub-tab.active { color: var(--accent); background: rgba(89,194,255,0.1); border-color: rgba(89,194,255,0.2); box-shadow: 0 0 8px rgba(89,194,255,0.08); }
-.sub-sep { width: 1px; background: var(--border); margin: 2px 6px; flex-shrink: 0; align-self: stretch; }
+

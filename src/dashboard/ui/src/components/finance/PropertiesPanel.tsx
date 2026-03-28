@@ -3,6 +3,7 @@ import type { Account, Property } from '../../types';
 import { normType } from '../../utils/accounts';
 import { fmt, fmtFull } from '../../utils/format';
 import { usePrivacy } from '../../contexts/PrivacyContext';
+import { Panel } from '@/components/shared';
 
 interface Props {
   properties: Property[];
@@ -37,8 +38,7 @@ export function PropertiesPanel({ properties, accounts, onSaveProperty }: Props)
   }
 
   return (
-    <div className="panel properties-panel">
-      <div className="panel-head">Properties</div>
+    <Panel className="properties-panel" title="Properties">
       <div className="properties-list">
         <div className="prop-section-label">Valuations</div>
         {properties.map((p, i) => (
@@ -90,7 +90,7 @@ export function PropertiesPanel({ properties, accounts, onSaveProperty }: Props)
           </>
         )}
       </div>
-    </div>
+    </Panel>
   );
 }
 

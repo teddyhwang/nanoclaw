@@ -2,6 +2,7 @@ import type { Account } from '../../types';
 import { normType } from '../../utils/accounts';
 import { fmt, fmtFull } from '../../utils/format';
 import { usePrivacy } from '../../contexts/PrivacyContext';
+import { Panel } from '@/components/shared';
 
 const TYPE_ORDER = ['cash', 'investment', 'credit', 'other'] as const;
 const TYPE_LABELS: Record<string, string> = {
@@ -25,8 +26,7 @@ export function AccountsPanel({ accounts }: Props) {
   }
 
   return (
-    <div className="panel accounts-panel">
-      <div className="panel-head">Accounts</div>
+    <Panel className="accounts-panel" title="Accounts">
       <div className="accounts-scroll">
         {TYPE_ORDER.map((type) => {
           const accts = grouped[type];
@@ -62,6 +62,6 @@ export function AccountsPanel({ accounts }: Props) {
           );
         })}
       </div>
-    </div>
+    </Panel>
   );
 }

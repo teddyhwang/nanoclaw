@@ -22,6 +22,7 @@ import { COLORS, DATE_RANGE_OPTIONS } from '../../constants';
 import { fetchDashboard, saveProperties, fetchAmazonMatches } from '../../api';
 import type { AmazonMatch } from '../../api';
 import { useFilterState } from '../../hooks/useFilterState';
+import { SubNav, PageContent } from '@/components/shared';
 import { Layout } from '../Layout';
 import { Loading } from '../Loading';
 import { FinanceSummary } from './FinanceSummary';
@@ -144,23 +145,24 @@ export function FinancePage({ initialData }: Props) {
 
   return (
     <Layout refreshing={refreshing} onRefresh={handleRefresh}>
-      <nav className="sub-nav">
+      <SubNav>
         {DATE_RANGE_OPTIONS.map((opt) => (
-          <button
+          <SubNav.Tab
             key={opt.value}
-            className={`sub-tab${filters.dateRange === opt.value ? ' active' : ''}`}
+            active={filters.dateRange === opt.value}
             onClick={() => handleDateRangeChange(opt.value)}
           >
             {opt.label}
-          </button>
+          </SubNav.Tab>
         ))}
         {cacheInfo && (
           <>
-            <div className="sub-sep" />
-            <span className="cache-info">{cacheInfo}</span>
+            <SubNav.Separator />
+            <SubNav.Info>{cacheInfo}</SubNav.Info>
           </>
         )}
-      </nav>
+      </SubNav>
+      <PageContent fill>
       <FinanceSummary
         accounts={data.accounts}
         properties={data.properties}
@@ -227,6 +229,7 @@ export function FinancePage({ initialData }: Props) {
           onClearAll={clearAllFilters}
         />
       </div>
+      </PageContent>
     </Layout>
   );
 }

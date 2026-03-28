@@ -7,6 +7,7 @@ import { fmtFull } from '../../utils/format';
 import { getDateRange } from '../../utils/dates';
 import { CHART_COLORS, COLORS } from '../../constants';
 import { usePrivacy } from '../../contexts/PrivacyContext';
+import { Panel } from '@/components/shared';
 
 interface Props {
   transactions: Transaction[];
@@ -100,11 +101,10 @@ export function CategoryDonut({
   }, [buildData, selectedCategory, onCategoryClick, privacyMode]);
 
   return (
-    <div className="panel chart-panel">
-      <div className="panel-head">Spending by Category</div>
+    <Panel className="chart-panel" title="Spending by Category">
       <div className="chart-wrap">
         <canvas ref={canvasRef} />
       </div>
-    </div>
+    </Panel>
   );
 }
