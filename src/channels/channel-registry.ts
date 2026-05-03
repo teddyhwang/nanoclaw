@@ -25,6 +25,14 @@ const activeAdapters = new Map<string, ChannelAdapter>();
  * adapter. Used by unregisterChannelAdapter to find the live adapter without
  * re-running the factory or parsing synthetic names. */
 const nameToChannelType = new Map<string, string>();
+/**
+ * Boot-time setupFn captured during initChannelAdapters. The host's setup
+ * builder closes over routeInbound/dispatchResponse — internal to host-boot
+ * and not part of the plugin surface. Stash it here so addChannelAdapterAtRuntime
+ * can wire newly-added adapters into the same router pipeline that boot
+ * adapters use. Cleared on teardownChannelAdapters().
+ */
+let bootSetupFn: ((adapter: ChannelAdapter) => ChannelSetup) | null = null;
 
 /** Register a channel adapter factory. Called by channel modules on import. */
 export function registerChannelAdapter(name: string, registration: ChannelRegistration): void {
@@ -56,6 +64,7 @@ export function getChannelContainerConfig(name: string): ChannelRegistration['co
  * Skips adapters that return null (missing credentials).
  */
 export async function initChannelAdapters(setupFn: (adapter: ChannelAdapter) => ChannelSetup): Promise<void> {
+  bootSetupFn = setupFn;
   for (const [name, registration] of registry) {
     try {
       const adapter = await registration.factory();
@@ -111,15 +120,25 @@ export async function initChannelAdapters(setupFn: (adapter: ChannelAdapter) => 
 export async function addChannelAdapterAtRuntime(
   name: string,
   registration: ChannelRegistration,
-  setupFn: (adapter: ChannelAdapter) => ChannelSetup,
+  setupFn?: (adapter: ChannelAdapter) => ChannelSetup,
 ): Promise<string | null> {
+  // Plugins called from outside the engine can't construct a real ChannelSetup
+  // (it closes over the host's router/dispatch internals). Fall back to the
+  // setupFn captured during initChannelAdapters so newly-added adapters wire
+  // into the same router pipeline as boot-time adapters.
+  const effectiveSetup = setupFn ?? bootSetupFn;
+  if (!effectiveSetup) {
+    throw new Error(
+      'addChannelAdapterAtRuntime: no setupFn available. Call from a plugin running after initChannelAdapters, or pass an explicit setupFn (test contexts only).',
+    );
+  }
   registry.set(name, registration);
   const adapter = await registration.factory();
   if (!adapter) {
     log.warn('Channel credentials missing, skipping', { channel: name });
     return null;
   }
-  const setup = setupFn(adapter);
+  const setup = effectiveSetup(adapter);
   let attempt = 0;
   while (true) {
     try {
@@ -179,4 +198,5 @@ export async function teardownChannelAdapters(): Promise<void> {
   }
   activeAdapters.clear();
   nameToChannelType.clear();
+  bootSetupFn = null;
 }
