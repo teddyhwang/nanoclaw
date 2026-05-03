@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 
 import { log } from '../../log.js';
+import { applyPluginMigrations } from '../../engine/db-extensions.js';
 import { migration001 } from './001-initial.js';
 import { migration002 } from './002-chat-sdk-state.js';
 import { moduleAgentToAgentDestinations } from './module-agent-to-agent-destinations.js';
@@ -70,4 +71,8 @@ export function runMigrations(db: Database.Database): void {
     })();
     log.info('Migration applied', { name: m.name });
   }
+
+  // Engine plugin migrations — applied after core. No-op when no host has
+  // registered any (the standalone case).
+  applyPluginMigrations(db);
 }

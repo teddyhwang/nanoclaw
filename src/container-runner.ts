@@ -25,6 +25,7 @@ import { composeGroupClaudeMd } from './claude-md-compose.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
 import { initGroupFilesystem } from './group-init.js';
+import { emitEngineEvent } from './engine/events.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
@@ -132,6 +133,25 @@ async function spawnContainer(session: Session): Promise<void> {
   // buildMounts and buildContainerArgs so side effects (mkdir, etc.) fire once.
   const { provider, contribution } = resolveProviderContribution(session, agentGroup, containerConfig);
 
+  // Engine plugin spawn contributions — extra mounts/env from plugins that
+  // need per-spawn customization (per-channel auth folders, MCP token mounts,
+  // workspace-specific config). Merged into the provider contribution so the
+  // existing buildMounts/buildContainerArgs surface stays unchanged.
+  const { collectSpawnContributions } = await import('./engine/spawn-contrib.js');
+  const pluginContrib = await collectSpawnContributions({
+    sessionId: session.id,
+    agentGroupId: agentGroup.id,
+    agentGroupFolder: agentGroup.folder,
+    sessionDir: sessionDir(agentGroup.id, session.id),
+    channelTypes: [],
+  });
+  if (pluginContrib.mounts.length > 0) {
+    contribution.mounts = [...(contribution.mounts ?? []), ...pluginContrib.mounts];
+  }
+  if (Object.keys(pluginContrib.env).length > 0) {
+    contribution.env = { ...(contribution.env ?? {}), ...pluginContrib.env };
+  }
+
   const mounts = buildMounts(agentGroup, session, containerConfig, contribution);
   const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
   // OneCLI agent identifier is always the agent group id — stable across
@@ -159,6 +179,7 @@ async function spawnContainer(session: Session): Promise<void> {
 
   activeContainers.set(session.id, { process: container, containerName });
   markContainerRunning(session.id);
+  emitEngineEvent('container.spawn', { sessionId: session.id, agentGroupId: agentGroup.id });
 
   // Log stderr
   container.stderr?.on('data', (data) => {
@@ -180,6 +201,7 @@ async function spawnContainer(session: Session): Promise<void> {
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
     log.info('Container exited', { sessionId: session.id, code, containerName });
+    emitEngineEvent('container.stop', { sessionId: session.id, agentGroupId: agentGroup.id, reason: 'idle' });
   });
 
   container.on('error', (err) => {
@@ -443,6 +465,21 @@ async function buildContainerArgs(
   if (providerContribution.env) {
     for (const [key, value] of Object.entries(providerContribution.env)) {
       args.push('-e', `${key}=${value}`);
+    }
+  }
+
+  // Plugin credential provider — if a host has registered one, layer its env
+  // contributions on top before OneCLI runs. The provider is additive only
+  // (extra env vars / gateway URL hints); OneCLI remains the default vault
+  // flow, so standalone v2 behavior is unchanged when no provider is set.
+  const { getCredentialProvider } = await import('./engine/credentials.js');
+  const credProvider = getCredentialProvider();
+  if (credProvider) {
+    const bundle = await credProvider.resolve({ agentGroupId: agentGroup.id });
+    if (bundle.env) {
+      for (const [key, value] of Object.entries(bundle.env)) {
+        args.push('-e', `${key}=${value}`);
+      }
     }
   }
 

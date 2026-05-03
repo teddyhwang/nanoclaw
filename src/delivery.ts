@@ -20,6 +20,7 @@ import {
   markDeliveryFailed,
   migrateDeliveredTable,
 } from './db/session-db.js';
+import { emitEngineEvent } from './engine/events.js';
 import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';
@@ -192,6 +193,12 @@ async function drainSession(session: Session): Promise<void> {
         const platformMsgId = await deliverMessage(msg, session, inDb);
         markDelivered(inDb, msg.id, platformMsgId ?? null);
         deliveryAttempts.delete(msg.id);
+        emitEngineEvent('outbound.delivered', {
+          sessionId: session.id,
+          agentGroupId: session.agent_group_id,
+          channelType: msg.channel_type ?? '',
+          platformId: msg.platform_id ?? '',
+        });
 
         // Pause the typing indicator after a real user-facing message
         // lands on the user's screen, so the client has time to visually
@@ -214,6 +221,13 @@ async function drainSession(session: Session): Promise<void> {
           });
           markDeliveryFailed(inDb, msg.id);
           deliveryAttempts.delete(msg.id);
+          emitEngineEvent('outbound.failed', {
+            sessionId: session.id,
+            agentGroupId: session.agent_group_id,
+            channelType: msg.channel_type ?? '',
+            platformId: msg.platform_id ?? '',
+            err,
+          });
         } else {
           log.warn('Message delivery failed, will retry', {
             messageId: msg.id,

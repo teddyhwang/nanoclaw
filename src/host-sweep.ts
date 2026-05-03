@@ -42,6 +42,7 @@ import {
   syncProcessingAcks,
   type ContainerState,
 } from './db/session-db.js';
+import { emitEngineEvent } from './engine/events.js';
 import { log } from './log.js';
 import { openInboundDb, openOutboundDb, openOutboundDbRw, inboundDbPath, heartbeatPath } from './session-manager.js';
 import { isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
@@ -236,6 +237,7 @@ function enforceRunningContainerSla(
       ceilingMs: decision.ceilingMs,
     });
     killContainer(session.id, 'absolute-ceiling');
+    emitEngineEvent('container.stuck', { sessionId: session.id, agentGroupId: session.agent_group_id });
     resetStuckProcessingRows(inDb, outDb, session, 'absolute-ceiling');
     return;
   }
@@ -247,6 +249,7 @@ function enforceRunningContainerSla(
     toleranceMs: decision.toleranceMs,
   });
   killContainer(session.id, 'claim-stuck');
+  emitEngineEvent('container.stuck', { sessionId: session.id, agentGroupId: session.agent_group_id });
   resetStuckProcessingRows(inDb, outDb, session, 'claim-stuck');
 }
 

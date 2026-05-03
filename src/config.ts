@@ -1,6 +1,4 @@
-import os from 'os';
-import path from 'path';
-
+import { getEnginePaths } from './engine/paths.js';
 import { readEnvFile } from './env.js';
 import { getContainerImageBase, getDefaultContainerImage, getInstallSlug } from './install-slug.js';
 import { isValidTimezone } from './timezone.js';
@@ -12,16 +10,17 @@ export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || envConfig.ASSISTANT_
 export const ASSISTANT_HAS_OWN_NUMBER =
   (process.env.ASSISTANT_HAS_OWN_NUMBER || envConfig.ASSISTANT_HAS_OWN_NUMBER) === 'true';
 
-// Absolute paths needed for container mounts
-const PROJECT_ROOT = process.cwd();
-const HOME_DIR = process.env.HOME || os.homedir();
+// Paths come from the engine paths registry. Standalone defaults match the
+// previous `process.cwd()`-derived layout exactly; embedded hosts override
+// via setEnginePaths() before this module is imported.
+const _paths = getEnginePaths();
+const PROJECT_ROOT = _paths.projectRoot;
 
-// Mount security: allowlist stored OUTSIDE project root, never mounted into containers
-export const MOUNT_ALLOWLIST_PATH = path.join(HOME_DIR, '.config', 'nanoclaw', 'mount-allowlist.json');
-export const SENDER_ALLOWLIST_PATH = path.join(HOME_DIR, '.config', 'nanoclaw', 'sender-allowlist.json');
-export const STORE_DIR = path.resolve(PROJECT_ROOT, 'store');
-export const GROUPS_DIR = path.resolve(PROJECT_ROOT, 'groups');
-export const DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
+export const MOUNT_ALLOWLIST_PATH = _paths.mountAllowlistPath;
+export const SENDER_ALLOWLIST_PATH = _paths.senderAllowlistPath;
+export const STORE_DIR = _paths.storeDir;
+export const GROUPS_DIR = _paths.groupsDir;
+export const DATA_DIR = _paths.dataDir;
 
 // Per-checkout image tag so two installs on the same host don't share
 // `nanoclaw-agent:latest` and clobber each other on rebuild.

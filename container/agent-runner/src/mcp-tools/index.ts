@@ -10,13 +10,17 @@ import './scheduling.js';
 import './interactive.js';
 import './agents.js';
 import './self-mod.js';
+import { loadToolPlugins } from '../engine/tool-plugins.js';
 import { startMcpServer } from './server.js';
 
 function log(msg: string): void {
   console.error(`[mcp-tools] ${msg}`);
 }
 
-startMcpServer().catch((err) => {
+(async () => {
+  await loadToolPlugins();
+  await startMcpServer();
+})().catch((err) => {
   log(`MCP server error: ${err instanceof Error ? err.message : String(err)}`);
   process.exit(1);
 });

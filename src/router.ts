@@ -17,6 +17,7 @@
  * drops (no agent wired, no trigger match); the access gate writes rows
  * for policy refusals.
  */
+import { emitEngineEvent } from './engine/events.js';
 import { getChannelAdapter } from './channels/channel-registry.js';
 import { gateCommand } from './command-gate.js';
 import { getAgentGroup } from './db/agent-groups.js';
@@ -250,6 +251,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   //    side effect so later role/access lookups find a real record).
   //    Without the module, userId is null — downstream tolerates it.
   const userId: string | null = senderResolver ? senderResolver(event) : null;
+  emitEngineEvent('inbound.routed', { event, userId });
 
   // 3. Fetch wired agents in full (we already know the count is > 0; now
   //    we need their actual rows for fan-out).
@@ -337,6 +339,12 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       reason: 'no_agent_engaged',
       messaging_group_id: mg.id,
       agent_group_id: null,
+    });
+    emitEngineEvent('inbound.dropped', {
+      reason: 'no_agent_engaged',
+      channelType: event.channelType,
+      platformId: event.platformId,
+      userId,
     });
   }
 }
@@ -447,8 +455,9 @@ async function deliverToAgent(
     }
   }
 
+  const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);
   writeSessionMessage(session.agent_group_id, session.id, {
-    id: messageIdForAgent(event.message.id, agent.agent_group_id),
+    id: messageId,
     kind: event.message.kind,
     timestamp: event.message.timestamp,
     platformId: deliveryAddr.platformId,
@@ -457,6 +466,13 @@ async function deliverToAgent(
     content: event.message.content,
     trigger: wake ? 1 : 0,
   });
+  emitEngineEvent('inbound.written', {
+    sessionId: session.id,
+    agentGroupId: session.agent_group_id,
+    messageId,
+    trigger: wake,
+  });
+  if (created) emitEngineEvent('session.created', { session, created });
 
   log.info('Message routed', {
     sessionId: session.id,

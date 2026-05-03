@@ -19,6 +19,7 @@ import path from 'path';
 
 import { GROUPS_DIR } from './config.js';
 import { readContainerConfig } from './container-config.js';
+import { getExtraSkillRoots } from './engine/skill-roots.js';
 import { log } from './log.js';
 import type { AgentGroup } from './types.js';
 
@@ -67,6 +68,23 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
         desired.set(`skill-${skillName}.md`, {
           type: 'symlink',
           content: `${SHARED_SKILLS_CONTAINER_BASE}/${skillName}/instructions.md`,
+        });
+      }
+    }
+  }
+
+  // Extra skill roots — plugin-registered skill directories. Each root maps
+  // a host path to a container path; we emit symlinks in the same shape as
+  // built-in skills so the composed CLAUDE.md treats them identically.
+  for (const root of getExtraSkillRoots()) {
+    if (!fs.existsSync(root.hostPath)) continue;
+    for (const skillName of fs.readdirSync(root.hostPath)) {
+      if (root.skillFilter && !root.skillFilter(skillName)) continue;
+      const hostFragment = path.join(root.hostPath, skillName, 'instructions.md');
+      if (fs.existsSync(hostFragment)) {
+        desired.set(`skill-${skillName}.md`, {
+          type: 'symlink',
+          content: `${root.containerPath}/${skillName}/instructions.md`,
         });
       }
     }
