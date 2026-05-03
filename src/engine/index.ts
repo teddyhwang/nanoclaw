@@ -92,3 +92,9 @@ export {
   type PluginMigration,
   type ReadDal,
 } from './db-extensions.js';
+
+// Delivery adapter accessor for plugins that need to send out-of-band
+// messages (pause notices, system warnings, etc.) via the same adapter
+// the engine uses for normal outbound. Read-only — plugins can't replace
+// the adapter, only call deliver/setTyping on it.
+export { getDeliveryAdapter, type ChannelDeliveryAdapter } from '../delivery.js';
