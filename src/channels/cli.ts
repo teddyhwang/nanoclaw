@@ -37,15 +37,17 @@ import fs from 'fs';
 import net from 'net';
 import path from 'path';
 
-import { DATA_DIR } from '../config.js';
+import { getEnginePaths } from '../engine/paths.js';
 import { log } from '../log.js';
 import type { ChannelAdapter, ChannelSetup, DeliveryAddress, InboundEvent, OutboundMessage } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
 
 const PLATFORM_ID = 'local';
 
+// Resolved lazily so `setEnginePaths()` overrides apply even when this module
+// is loaded before the embedding host has finished configuring paths.
 function socketPath(): string {
-  return path.join(DATA_DIR, 'cli.sock');
+  return path.join(getEnginePaths().dataDir, 'cli.sock');
 }
 
 function createAdapter(): ChannelAdapter {
