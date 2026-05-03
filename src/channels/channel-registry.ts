@@ -20,6 +20,11 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 
 const registry = new Map<string, ChannelRegistration>();
 const activeAdapters = new Map<string, ChannelAdapter>();
+/** Maps registration name → channelType used as the activeAdapters key.
+ * Set when initChannelAdapters or addChannelAdapterAtRuntime sets up an
+ * adapter. Used by unregisterChannelAdapter to find the live adapter without
+ * re-running the factory or parsing synthetic names. */
+const nameToChannelType = new Map<string, string>();
 
 /** Register a channel adapter factory. Called by channel modules on import. */
 export function registerChannelAdapter(name: string, registration: ChannelRegistration): void {
@@ -86,11 +91,80 @@ export async function initChannelAdapters(setupFn: (adapter: ChannelAdapter) => 
         }
       }
       activeAdapters.set(adapter.channelType, adapter);
+      nameToChannelType.set(name, adapter.channelType);
       log.info('Channel adapter started', { channel: name, type: adapter.channelType });
     } catch (err) {
       log.error('Failed to start channel adapter', { channel: name, err });
     }
   }
+}
+
+/**
+ * Register, set up, and add a single adapter post-boot. Mirrors the per-adapter
+ * branch of `initChannelAdapters` (factory → setup with retry → activeAdapters)
+ * for hosts that add channels at runtime (e.g. credential-driven multi-instance
+ * plugins reconciling against a dashboard DB).
+ *
+ * Returns the registered name on success, null if the factory yielded nothing.
+ * Throws if setup fails after retries — caller decides how to back off.
+ */
+export async function addChannelAdapterAtRuntime(
+  name: string,
+  registration: ChannelRegistration,
+  setupFn: (adapter: ChannelAdapter) => ChannelSetup,
+): Promise<string | null> {
+  registry.set(name, registration);
+  const adapter = await registration.factory();
+  if (!adapter) {
+    log.warn('Channel credentials missing, skipping', { channel: name });
+    return null;
+  }
+  const setup = setupFn(adapter);
+  let attempt = 0;
+  while (true) {
+    try {
+      await adapter.setup(setup);
+      break;
+    } catch (err) {
+      if (isNetworkError(err) && attempt < SETUP_RETRY_DELAYS_MS.length) {
+        const delay = SETUP_RETRY_DELAYS_MS[attempt]!;
+        log.warn('Channel adapter setup failed with network error, retrying', {
+          channel: name,
+          attempt: attempt + 1,
+          delayMs: delay,
+          err: err.message,
+        });
+        await sleep(delay);
+        attempt += 1;
+        continue;
+      }
+      throw err;
+    }
+  }
+  activeAdapters.set(adapter.channelType, adapter);
+  nameToChannelType.set(name, adapter.channelType);
+  log.info('Channel adapter started', { channel: name, type: adapter.channelType });
+  return name;
+}
+
+/**
+ * Tear down and remove a single adapter by registration name. Mirrors
+ * `addChannelAdapterAtRuntime`. Idempotent — unknown names are a no-op.
+ */
+export async function unregisterChannelAdapter(name: string): Promise<void> {
+  const channelType = nameToChannelType.get(name);
+  registry.delete(name);
+  nameToChannelType.delete(name);
+  if (!channelType) return;
+  const adapter = activeAdapters.get(channelType);
+  if (!adapter) return;
+  try {
+    await adapter.teardown();
+    log.info('Channel adapter stopped', { channel: name });
+  } catch (err) {
+    log.error('Failed to stop channel adapter', { channel: name, err });
+  }
+  activeAdapters.delete(channelType);
 }
 
 /** Tear down all active adapters. */
@@ -104,4 +178,5 @@ export async function teardownChannelAdapters(): Promise<void> {
     }
   }
   activeAdapters.clear();
+  nameToChannelType.clear();
 }

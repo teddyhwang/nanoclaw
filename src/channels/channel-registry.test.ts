@@ -115,6 +115,52 @@ describe('channel registry', () => {
     const noCreds = active.find((a) => a.name === 'no-creds');
     expect(noCreds).toBeUndefined();
   });
+
+  it('addChannelAdapterAtRuntime + unregisterChannelAdapter round-trip', async () => {
+    const { addChannelAdapterAtRuntime, unregisterChannelAdapter, getActiveAdapters, getRegisteredChannelNames } =
+      await import('./channel-registry.js');
+
+    const mock = createMockAdapter('runtime');
+    const setupFn = () => ({
+      conversations: [],
+      onInbound: () => {},
+      onInboundEvent: () => {},
+      onMetadata: () => {},
+      onAction: () => {},
+    });
+
+    const result = await addChannelAdapterAtRuntime('runtime-channel', { factory: () => mock }, setupFn);
+    expect(result).toBe('runtime-channel');
+    expect(getRegisteredChannelNames()).toContain('runtime-channel');
+    expect(getActiveAdapters().some((a) => a.channelType === 'runtime')).toBe(true);
+    expect(mock.isConnected()).toBe(true);
+
+    await unregisterChannelAdapter('runtime-channel');
+    expect(getRegisteredChannelNames()).not.toContain('runtime-channel');
+    expect(getActiveAdapters().some((a) => a.channelType === 'runtime')).toBe(false);
+    expect(mock.isConnected()).toBe(false);
+  });
+
+  it('addChannelAdapterAtRuntime returns null when factory yields null', async () => {
+    const { addChannelAdapterAtRuntime, getActiveAdapters } = await import('./channel-registry.js');
+
+    const setupFn = () => ({
+      conversations: [],
+      onInbound: () => {},
+      onInboundEvent: () => {},
+      onMetadata: () => {},
+      onAction: () => {},
+    });
+
+    const result = await addChannelAdapterAtRuntime('runtime-no-creds', { factory: () => null }, setupFn);
+    expect(result).toBeNull();
+    expect(getActiveAdapters().some((a) => a.name === 'runtime-no-creds')).toBe(false);
+  });
+
+  it('unregisterChannelAdapter on unknown name is a no-op', async () => {
+    const { unregisterChannelAdapter } = await import('./channel-registry.js');
+    await expect(unregisterChannelAdapter('does-not-exist')).resolves.toBeUndefined();
+  });
 });
 
 describe('channel + router integration', () => {

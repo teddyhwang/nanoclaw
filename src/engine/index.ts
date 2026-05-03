@@ -58,6 +58,33 @@ export {
   type MultiChannelRegistration,
 } from './channel-multi.js';
 
+// Channel adapter surface for plugins that build their own adapters at runtime
+// (e.g. Optimus' workspace-credential-driven multi-instance Discord/Telegram).
+// Hosts that just want the upstream env-singleton channels do not need these.
+export {
+  registerChannelAdapter,
+  unregisterChannelAdapter,
+  addChannelAdapterAtRuntime,
+  getActiveAdapters,
+  getRegisteredChannelNames,
+} from '../channels/channel-registry.js';
+export {
+  createChatSdkBridge,
+  splitForLimit,
+  type ChatSdkBridgeConfig,
+  type ReplyContext,
+  type ReplyContextExtractor,
+} from '../channels/chat-sdk-bridge.js';
+export type {
+  ChannelAdapter,
+  ChannelRegistration,
+  ChannelSetup,
+  InboundMessage,
+  InboundEvent,
+  OutboundMessage,
+  DeliveryAddress,
+} from '../channels/adapter.js';
+
 export {
   registerPluginMigrations,
   applyPluginMigrations,
