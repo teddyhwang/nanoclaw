@@ -98,3 +98,11 @@ export {
 // the engine uses for normal outbound. Read-only — plugins can't replace
 // the adapter, only call deliver/setTyping on it.
 export { getDeliveryAdapter, type ChannelDeliveryAdapter } from '../delivery.js';
+
+// Session DB path + open helpers + scheduling primitives for plugins that
+// need to seed recurring tasks at session-creation time (e.g. Optimus'
+// daily maintenance/dream task). Plugins should treat the inbound.db as
+// host-owned and only insert/update task rows via insertTask — direct
+// schema manipulation belongs in the engine.
+export { inboundDbPath, outboundDbPath, openInboundDb } from '../session-manager.js';
+export { insertTask, cancelTask, pauseTask, resumeTask } from '../modules/scheduling/db.js';
