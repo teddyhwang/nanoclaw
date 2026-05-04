@@ -99,6 +99,13 @@ export {
 // the adapter, only call deliver/setTyping on it.
 export { getDeliveryAdapter, type ChannelDeliveryAdapter } from '../delivery.js';
 
+// System-action registry for plugins that handle container-emitted
+// `kind: 'system'` outbound messages (e.g. escalate_to_dev_agent,
+// schedule_task). The handler runs in the host with the session row
+// + inbound DB handle so it can write follow-up state without the
+// container touching inbound.db directly.
+export { registerDeliveryAction, type DeliveryActionHandler } from '../delivery.js';
+
 // Session DB path + open helpers + scheduling primitives for plugins that
 // need to seed recurring tasks at session-creation time (e.g. Optimus'
 // daily maintenance/dream task). Plugins should treat the inbound.db as
