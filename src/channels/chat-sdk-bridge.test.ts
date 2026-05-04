@@ -77,4 +77,72 @@ describe('createChatSdkBridge', () => {
     });
     expect(typeof bridge.subscribe).toBe('function');
   });
+
+  describe('deliver operations', () => {
+    type Call = { method: string; args: unknown[] };
+
+    function makeBridgeWithRecorder(): { bridge: ReturnType<typeof createChatSdkBridge>; calls: Call[] } {
+      const calls: Call[] = [];
+      const bridge = createChatSdkBridge({
+        adapter: stubAdapter({
+          editMessage: async (...args: unknown[]) => {
+            calls.push({ method: 'editMessage', args });
+            return {} as never;
+          },
+          addReaction: async (...args: unknown[]) => {
+            calls.push({ method: 'addReaction', args });
+          },
+          removeReaction: async (...args: unknown[]) => {
+            calls.push({ method: 'removeReaction', args });
+          },
+          deleteMessage: async (...args: unknown[]) => {
+            calls.push({ method: 'deleteMessage', args });
+          },
+          postMessage: async (...args: unknown[]) => {
+            calls.push({ method: 'postMessage', args });
+            return { id: 'posted-1' } as never;
+          },
+        }),
+        supportsThreads: true,
+      });
+      return { bridge, calls };
+    }
+
+    it('routes operation: edit through adapter.editMessage', async () => {
+      const { bridge, calls } = makeBridgeWithRecorder();
+      await bridge.deliver('discord:g:c', null, {
+        kind: 'chat',
+        content: { operation: 'edit', messageId: 'm1', text: 'updated' },
+      });
+      expect(calls.map((c) => c.method)).toEqual(['editMessage']);
+      expect(calls[0].args[1]).toBe('m1');
+    });
+
+    it('routes operation: reaction through adapter.addReaction', async () => {
+      const { bridge, calls } = makeBridgeWithRecorder();
+      await bridge.deliver('discord:g:c', null, {
+        kind: 'chat',
+        content: { operation: 'reaction', messageId: 'm1', emoji: '🤔' },
+      });
+      expect(calls).toEqual([{ method: 'addReaction', args: ['discord:g:c', 'm1', '🤔'] }]);
+    });
+
+    it('routes operation: remove_reaction through adapter.removeReaction', async () => {
+      const { bridge, calls } = makeBridgeWithRecorder();
+      await bridge.deliver('discord:g:c', null, {
+        kind: 'chat',
+        content: { operation: 'remove_reaction', messageId: 'm1', emoji: '🤔' },
+      });
+      expect(calls).toEqual([{ method: 'removeReaction', args: ['discord:g:c', 'm1', '🤔'] }]);
+    });
+
+    it('routes operation: delete through adapter.deleteMessage', async () => {
+      const { bridge, calls } = makeBridgeWithRecorder();
+      await bridge.deliver('discord:g:c', null, {
+        kind: 'chat',
+        content: { operation: 'delete', messageId: 'm1' },
+      });
+      expect(calls).toEqual([{ method: 'deleteMessage', args: ['discord:g:c', 'm1'] }]);
+    });
+  });
 });
