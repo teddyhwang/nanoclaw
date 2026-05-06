@@ -164,6 +164,36 @@ export interface ChannelAdapter {
    * Returning the same platform_id on repeated calls is expected.
    */
   openDM?(userHandle: string): Promise<string>;
+
+  /**
+   * Replay missed inbound messages for one platformId by fetching recent
+   * history from the platform and re-emitting each through the same
+   * `onInbound` callback that live messages use.
+   *
+   * Called by the host on startup (or after a long disconnect) so messages
+   * sent during the gap aren't silently dropped. Adapters that can't fetch
+   * history (or whose gateway protocol guarantees resume-from-cursor on
+   * reconnect) should omit this method — callers treat absence as a no-op.
+   *
+   * Implementation contract:
+   *   - Fetch the most recent `limit` messages for `platformId`.
+   *   - Filter to messages within `lookbackMs` of now.
+   *   - Re-emit each through the saved `setupConfig.onInbound` in
+   *     chronological order. The router's per-session inbound.db PK
+   *     (session_id, message_id) handles same-session dedup; cross-session
+   *     replay (same physical message arriving for two agents in a shared
+   *     group) routes to both, which is the correct semantic.
+   *   - Return `{ recoveredCount, earliestTimestamp }` so callers can log
+   *     and reason about gap size.
+   *
+   * Errors should not propagate — recovery is best-effort. Log and return
+   * `{ recoveredCount: 0 }` on failure.
+   */
+  recoverMissedMessages?(opts: {
+    platformId: string;
+    lookbackMs: number;
+    limit: number;
+  }): Promise<{ recoveredCount: number; earliestTimestamp?: string }>;
 }
 
 /** Factory function that creates a channel adapter (returns null if credentials missing). */

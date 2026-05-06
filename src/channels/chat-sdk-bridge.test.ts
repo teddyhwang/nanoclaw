@@ -145,4 +145,43 @@ describe('createChatSdkBridge', () => {
       expect(calls).toEqual([{ method: 'deleteMessage', args: ['discord:g:c', 'm1'] }]);
     });
   });
+
+  describe('recoverMissedMessages', () => {
+    it('returns 0 when called before setup (no setupConfig closure)', async () => {
+      const bridge = createChatSdkBridge({
+        adapter: stubAdapter({
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          fetchMessages: (async () => ({ messages: [] })) as any,
+          channelIdFromThreadId: (t: string) => t,
+        }),
+        supportsThreads: false,
+      });
+      const result = await bridge.recoverMissedMessages!({
+        platformId: 'telegram:1',
+        lookbackMs: 60_000,
+        limit: 50,
+      });
+      expect(result).toEqual({ recoveredCount: 0 });
+    });
+
+    it('returns 0 when the underlying adapter has no fetchMessages', async () => {
+      const bridge = createChatSdkBridge({
+        adapter: stubAdapter({
+          channelIdFromThreadId: (t: string) => t,
+        }),
+        supportsThreads: false,
+      });
+      const result = await bridge.recoverMissedMessages!({
+        platformId: 'telegram:1',
+        lookbackMs: 60_000,
+        limit: 50,
+      });
+      expect(result).toEqual({ recoveredCount: 0 });
+    });
+
+    // Replay-through-onInbound is covered end-to-end by the apps/optimus
+    // channel-recovery test (Port #4), which drives a real CompositeAdapter
+    // with a stub sub-adapter — `setupConfig` lives in the bridge's closure
+    // so unit tests that bypass setup() can't exercise the replay path.
+  });
 });

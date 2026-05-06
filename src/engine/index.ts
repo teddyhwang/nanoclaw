@@ -113,3 +113,10 @@ export { registerDeliveryAction, type DeliveryActionHandler } from '../delivery.
 // schema manipulation belongs in the engine.
 export { inboundDbPath, outboundDbPath, openInboundDb } from '../session-manager.js';
 export { insertTask, cancelTask, pauseTask, resumeTask } from '../modules/scheduling/db.js';
+
+// Messaging group queries for plugins that need to enumerate which
+// platforms the host owns (e.g. channel-bots driving startup-time
+// recoverMissedMessages over every wired chat). Read-only — write
+// surface stays inside the router/setup paths.
+export { getMessagingGroupsByChannel } from '../db/messaging-groups.js';
+export type { MessagingGroup } from '../types.js';

@@ -469,6 +469,86 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // the original inbound event.
       await state.subscribe(threadId);
     },
+
+    async recoverMissedMessages({
+      platformId,
+      lookbackMs,
+      limit,
+    }: {
+      platformId: string;
+      lookbackMs: number;
+      limit: number;
+    }): Promise<{ recoveredCount: number; earliestTimestamp?: string }> {
+      // No-op if setup hasn't run yet — the host must finish setup before
+      // recovery makes sense (we need onInbound to replay through).
+      if (!setupConfig) return { recoveredCount: 0 };
+
+      // Adapters that don't expose fetchMessages (or where the gateway's
+      // resume protocol is the source of truth) can't recover; the host
+      // checks for this method's presence so a clean no-op is fine here too.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const adapterAny = adapter as any;
+      if (typeof adapterAny.fetchMessages !== 'function') {
+        return { recoveredCount: 0 };
+      }
+
+      // platformId is the adapter's encoded thread id for non-threaded
+      // platforms (Telegram/WhatsApp use it directly). For threaded
+      // platforms (Discord/Slack), recovery operates per-thread because
+      // fetchMessages takes a thread id, and the host calls this once per
+      // platformId it owns; threaded recovery of every thread inside a
+      // guild is an explicit follow-up if/when the host tracks that level.
+      const threadId = platformId;
+      const cutoffMs = Date.now() - lookbackMs;
+
+      let recoveredCount = 0;
+      let earliestTimestamp: string | undefined;
+
+      try {
+        const result = await adapterAny.fetchMessages(threadId, {
+          limit,
+          direction: 'backward',
+        });
+        const messages = (result?.messages ?? []) as ChatMessage[];
+
+        // chat-sdk returns messages in chronological order (oldest first
+        // within the page). Replay in the same order so seq-based dedup
+        // and inbound.db PK collisions resolve naturally.
+        for (const message of messages) {
+          const sentAt = message.metadata?.dateSent?.getTime?.();
+          if (!sentAt || sentAt < cutoffMs) continue;
+
+          const timestamp = message.metadata.dateSent.toISOString();
+          if (!earliestTimestamp || timestamp < earliestTimestamp) {
+            earliestTimestamp = timestamp;
+          }
+          recoveredCount += 1;
+
+          // We don't know whether the historical message belongs to a
+          // subscribed thread or is a DM at recovery time. Forward through
+          // onInbound with conservative defaults (isMention from the
+          // platform-confirmed flag if present; isGroup undefined so the
+          // router's existing classification path runs). The router's
+          // dedup PK on (session_id, message_id) handles re-routing of
+          // any messages that were already processed before the gap.
+          const channelId = adapter.channelIdFromThreadId(threadId);
+          await setupConfig.onInbound(
+            channelId,
+            threadId,
+            await messageToInbound(message, message.isMention === true),
+          );
+        }
+      } catch (err) {
+        log.warn('recoverMissedMessages threw', {
+          adapter: adapter.name,
+          platformId,
+          err: err instanceof Error ? err.message : String(err),
+        });
+        return { recoveredCount, earliestTimestamp };
+      }
+
+      return { recoveredCount, earliestTimestamp };
+    },
   };
 
   // Only expose openDM when the underlying Chat SDK adapter implements it.
