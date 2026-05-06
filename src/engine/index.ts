@@ -125,5 +125,13 @@ export {
 // platforms the host owns (e.g. channel-bots driving startup-time
 // recoverMissedMessages over every wired chat). Read-only — write
 // surface stays inside the router/setup paths.
-export { getMessagingGroupsByChannel } from '../db/messaging-groups.js';
+export {
+  getMessagingGroup,
+  getMessagingGroupsByChannel,
+} from '../db/messaging-groups.js';
 export type { MessagingGroup } from '../types.js';
+
+// Session row passed to delivery-action handlers via DeliveryActionHandler's
+// second arg. Re-exporting the type here so plugin handler signatures can
+// declare it directly without reaching into engine internals.
+export type { Session } from '../types.js';
