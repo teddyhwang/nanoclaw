@@ -13,6 +13,10 @@
     "./engine": {
       "types": "./dist/engine/index.d.ts",
       "default": "./dist/engine/index.js"
+    },
+    "./engine/paths": {
+      "types": "./dist/engine/paths.d.ts",
+      "default": "./dist/engine/paths.js"
     }
   },
   "scripts": {
