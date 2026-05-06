@@ -135,3 +135,39 @@ export type { MessagingGroup } from '../types.js';
 // second arg. Re-exporting the type here so plugin handler signatures can
 // declare it directly without reaching into engine internals.
 export type { Session } from '../types.js';
+
+// ─── Migration writers (host-side seed surface) ─────────────────────────
+//
+// Hosts that need to seed central + per-session state from a foreign source
+// (Optimus' v1 → v2 importer) reuse the same library functions migrate-v2.sh
+// drives. The writer surface stays narrow — only the constructors/getters
+// migrate-v2 itself touches, plus the connection + migration primitives.
+// Internals like update/delete helpers stay private; if a host needs them,
+// add the export deliberately here, don't widen by reaching into '../db/...'.
+//
+// Read-only convenience getters are co-located so an importer that reuses
+// these can stay in one engine import block.
+
+export { initDb, closeDb } from '../db/connection.js';
+export { runMigrations } from '../db/migrations/index.js';
+export {
+  createAgentGroup,
+  getAgentGroupByFolder,
+  getAllAgentGroups,
+} from '../db/agent-groups.js';
+export {
+  createMessagingGroup,
+  createMessagingGroupAgent,
+  getMessagingGroupByPlatform,
+  getMessagingGroupAgentByPair,
+  getMessagingGroupAgents,
+  getMessagingGroupsByAgentGroup,
+  updateMessagingGroup,
+} from '../db/messaging-groups.js';
+export type { AgentGroup } from '../types.js';
+export type { MessagingGroupAgent } from '../types.js';
+
+// Session lifecycle for importers seeding cold sessions (writes routing +
+// initializes per-session DBs). Hosts that want to enqueue messages into an
+// existing session should keep using the higher-level router instead.
+export { resolveSession, writeSessionRouting } from '../session-manager.js';
