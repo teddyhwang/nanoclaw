@@ -524,7 +524,12 @@ async function buildContainerArgs(
   const imageTag = containerConfig.imageTag || CONTAINER_IMAGE;
   args.push(imageTag);
 
-  args.push('-c', 'exec bun run /app/src/index.ts');
+  // Optimus fork: invoke the in-image wrapper that starts camofox-server
+  // (and any future sidecars) before exec'ing the agent. The wrapper is
+  // baked into apps/agent-runner/Dockerfile.custom and ends with the same
+  // `exec bun run /app/src/index.ts` upstream uses, so signal forwarding
+  // through tini is unchanged.
+  args.push('-c', 'exec /app/start-with-camofox.sh');
 
   return args;
 }
