@@ -28,9 +28,12 @@ import { fileURLToPath } from 'url';
 import { loadConfig } from './config.js';
 import { buildSystemPromptAddendum } from './destinations.js';
 // Providers barrel — each enabled provider self-registers on import.
-// Provider skills append imports to providers/index.ts.
+// Provider skills append imports to providers/index.ts. Hosts that ship
+// providers from outside the submodule register them via
+// `loadProviderPlugins()` (awaited in main() before createProvider).
 import './providers/index.js';
 import { createProvider, type ProviderName } from './providers/factory.js';
+import { loadProviderPlugins } from './engine/provider-plugins.js';
 import { runPollLoop } from './poll-loop.js';
 
 function log(msg: string): void {
@@ -85,6 +88,11 @@ async function main(): Promise<void> {
     mcpServers[name] = serverConfig;
     log(`Additional MCP server: ${name} (${serverConfig.command})`);
   }
+
+  // Host-shipped providers (pi_rpc, codex, etc.) register here via the
+  // /agent/provider-plugins.json manifest. Awaited so the registry is
+  // populated before createProvider() looks the name up.
+  await loadProviderPlugins();
 
   const provider = createProvider(providerName, {
     assistantName: config.assistantName || undefined,
