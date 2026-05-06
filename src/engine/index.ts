@@ -112,7 +112,14 @@ export { registerDeliveryAction, type DeliveryActionHandler } from '../delivery.
 // host-owned and only insert/update task rows via insertTask — direct
 // schema manipulation belongs in the engine.
 export { inboundDbPath, outboundDbPath, openInboundDb } from '../session-manager.js';
-export { insertTask, cancelTask, pauseTask, resumeTask } from '../modules/scheduling/db.js';
+export {
+  insertTask,
+  cancelTask,
+  pauseTask,
+  resumeTask,
+  updateTask,
+  type TaskUpdate,
+} from '../modules/scheduling/db.js';
 
 // Messaging group queries for plugins that need to enumerate which
 // platforms the host owns (e.g. channel-bots driving startup-time
