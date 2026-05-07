@@ -13,7 +13,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb } from './db/connection.js';
 import { getPendingMessages } from './db/messages-in.js';
-import { formatMessages, stripInternalTags } from './formatter.js';
+import { formatMessages, stripInternalTags, extractMessageSender } from './formatter.js';
 import { TIMEZONE } from './timezone.js';
 
 beforeEach(() => {
@@ -163,5 +163,41 @@ describe('stripInternalTags', () => {
     expect(stripInternalTags('<internal>thinking</internal>The answer is 42')).toBe(
       'The answer is 42',
     );
+  });
+});
+
+describe('extractMessageSender', () => {
+  it('returns namespaced sender for chat-sdk content with author.userId', () => {
+    insertMessage('m1', 'chat-sdk', { author: { userId: '123' } });
+    const msgs = getPendingMessages();
+    const m = msgs.find((m) => m.id === 'm1')!;
+    m.channel_type = 'discord';
+    expect(extractMessageSender(m)).toBe('discord:123');
+  });
+
+  it('returns already-namespaced senderId untouched', () => {
+    insertMessage('m1', 'chat', { senderId: 'discord:@me:abc' });
+    const msgs = getPendingMessages();
+    const m = msgs.find((m) => m.id === 'm1')!;
+    expect(extractMessageSender(m)).toBe('discord:@me:abc');
+  });
+
+  it('returns null when no sender info is present', () => {
+    insertMessage('m1', 'chat', { text: 'hi' });
+    const msgs = getPendingMessages();
+    const m = msgs.find((m) => m.id === 'm1')!;
+    expect(extractMessageSender(m)).toBeNull();
+  });
+
+  it('returns null when content is malformed JSON', () => {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, content)
+         VALUES ('m-bad', 'chat', ?, 'pending', 'not-json')`,
+      )
+      .run(new Date().toISOString());
+    const msgs = getPendingMessages();
+    const m = msgs.find((m) => m.id === 'm-bad')!;
+    expect(extractMessageSender(m)).toBeNull();
   });
 });

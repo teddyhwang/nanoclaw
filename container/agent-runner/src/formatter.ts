@@ -78,6 +78,22 @@ export function isRunnerCommand(msg: MessageInRow): boolean {
   return cat === 'admin' || cat === 'passthrough';
 }
 
+/**
+ * Extract a namespaced sender id from a message row. Handles both pre-
+ * namespaced senders (e.g. `discord:@me:123`) and bare platform ids that
+ * need the channel_type prefix added. Returns null when the message has
+ * no author info — most often system rows.
+ */
+export function extractMessageSender(msg: MessageInRow): string | null {
+  let content: unknown;
+  try {
+    content = JSON.parse(msg.content);
+  } catch {
+    return null;
+  }
+  return extractSenderId(msg, content);
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function extractSenderId(msg: MessageInRow, content: any): string | null {
   const raw: string | null = content?.senderId || content?.author?.userId || null;

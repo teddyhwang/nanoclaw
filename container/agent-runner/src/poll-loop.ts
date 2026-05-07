@@ -7,7 +7,7 @@ import {
   migrateLegacyContinuation,
   setContinuation,
 } from './db/session-state.js';
-import { formatMessages, extractRouting, categorizeMessage, isClearCommand, isRunnerCommand, stripInternalTags, type RoutingContext } from './formatter.js';
+import { formatMessages, extractRouting, extractMessageSender, categorizeMessage, isClearCommand, isRunnerCommand, stripInternalTags, type RoutingContext } from './formatter.js';
 import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
 
 const POLL_INTERVAL_MS = 1000;
@@ -160,6 +160,13 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
+    // Capture the active turn's trigger sender. Follow-up messages from a
+    // different sender are deferred (left pending) instead of pushed into
+    // this query — pushing folds both senders' requests into one combined
+    // reply (boysnight 2026-04-27, ported from v1 apps/nanoclaw/src/index.ts).
+    const triggerRow = keep.find((m) => m.trigger === 1) ?? keep[0];
+    const activeSender = extractMessageSender(triggerRow);
+
     const query = config.provider.query({
       prompt,
       continuation,
@@ -171,7 +178,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     const skippedSet = new Set(skipped);
     const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
     try {
-      const result = await processQuery(query, routing, processingIds, config.providerName);
+      const result = await processQuery(query, routing, processingIds, config.providerName, activeSender);
       if (result.continuation && result.continuation !== continuation) {
         continuation = result.continuation;
         setContinuation(config.providerName, continuation);
@@ -250,6 +257,7 @@ async function processQuery(
   routing: RoutingContext,
   initialBatchIds: string[],
   providerName: string,
+  activeSender: string | null,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
@@ -294,8 +302,34 @@ async function processQuery(
         // everything. Filtering on thread_id here caused deadlocks when the
         // initial batch and follow-ups had mismatched thread_ids (e.g. a
         // host-generated welcome trigger with null thread vs a Discord DM reply).
-        const newMessages = pending.filter((m) => m.kind !== 'system');
+        let newMessages = pending.filter((m) => m.kind !== 'system');
         if (newMessages.length === 0) return;
+
+        // Cross-sender deferral: in a shared-session group chat, a trigger from
+        // a different sender than the one currently being answered must NOT
+        // get pushed into the active query — the SDK folds both into one
+        // combined reply. Leave those rows pending; the outer loop re-queries
+        // them after the current turn ends, where they get their own respond_to
+        // marker and native platform reply-threading.
+        if (activeSender) {
+          const sameSender: typeof newMessages = [];
+          const deferred: string[] = [];
+          for (const m of newMessages) {
+            const s = extractMessageSender(m);
+            if (s && s !== activeSender) {
+              deferred.push(m.id);
+            } else {
+              sameSender.push(m);
+            }
+          }
+          if (deferred.length > 0) {
+            log(
+              `Deferring ${deferred.length} cross-sender follow-up(s) — will re-process after active turn`,
+            );
+          }
+          newMessages = sameSender;
+          if (newMessages.length === 0) return;
+        }
 
         const newIds = newMessages.map((m) => m.id);
         markProcessing(newIds);
