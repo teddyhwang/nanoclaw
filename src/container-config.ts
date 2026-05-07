@@ -14,13 +14,34 @@ import path from 'path';
 
 import { GROUPS_DIR } from './config.js';
 
-export interface McpServerConfig {
+/**
+ * MCP server entry inside container.json. Discriminated by `type` so a
+ * single map can carry stdio (process-spawned) and http (remote endpoint)
+ * shapes. Default is stdio for back-compat with configs that omit `type`.
+ *
+ * Mirrors `McpServerConfig` in
+ * container/agent-runner/src/providers/types.ts. Update both together.
+ */
+export type McpServerConfig = McpStdioServerConfig | McpHttpServerConfig;
+
+export interface McpStdioServerConfig {
+  /** Optional discriminant. Omitted = 'stdio' for back-compat. */
+  type?: 'stdio';
   command: string;
   args?: string[];
   env?: Record<string, string>;
   // Optional always-in-context guidance. When set, the host writes the
   // content to `.claude-fragments/mcp-<name>.md` at spawn and imports it
   // into the composed CLAUDE.md.
+  instructions?: string;
+}
+
+export interface McpHttpServerConfig {
+  type: 'http';
+  url: string;
+  /** Optional bearer / custom headers. */
+  headers?: Record<string, string>;
+  /** Same instructions hook as stdio servers. */
   instructions?: string;
 }
 

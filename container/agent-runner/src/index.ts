@@ -33,6 +33,7 @@ import { buildSystemPromptAddendum } from './destinations.js';
 // `loadProviderPlugins()` (awaited in main() before createProvider).
 import './providers/index.js';
 import { createProvider, type ProviderName } from './providers/factory.js';
+import type { McpServerConfig } from './providers/types.js';
 import { loadProviderPlugins } from './engine/provider-plugins.js';
 import { runPollLoop } from './poll-loop.js';
 
@@ -75,8 +76,10 @@ async function main(): Promise<void> {
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   const mcpServerPath = path.join(__dirname, 'mcp-tools', 'index.ts');
 
-  // Build MCP servers config: nanoclaw built-in + any from container.json
-  const mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }> = {
+  // Build MCP servers config: nanoclaw built-in + any from container.json.
+  // The map is a discriminated union (stdio | http) — container.json may
+  // carry either shape, see providers/types.ts:McpServerConfig.
+  const mcpServers: Record<string, McpServerConfig> = {
     nanoclaw: {
       command: 'bun',
       args: ['run', mcpServerPath],
@@ -86,7 +89,11 @@ async function main(): Promise<void> {
 
   for (const [name, serverConfig] of Object.entries(config.mcpServers)) {
     mcpServers[name] = serverConfig;
-    log(`Additional MCP server: ${name} (${serverConfig.command})`);
+    const detail =
+      serverConfig.type === 'http'
+        ? `http ${serverConfig.url}`
+        : `stdio ${serverConfig.command}`;
+    log(`Additional MCP server: ${name} (${detail})`);
   }
 
   // Host-shipped providers (pi_rpc, codex, etc.) register here via the

@@ -49,10 +49,34 @@ export interface QueryInput {
   };
 }
 
-export interface McpServerConfig {
+/**
+ * MCP server configuration. Discriminated by `type` so callers can carry
+ * stdio (process-spawned) or http (remote endpoint) shapes through the
+ * same map. Default is stdio for back-compat with configs that omit
+ * `type` — pre-existing call sites and container.json files keep
+ * working.
+ *
+ * The Anthropic Agent SDK already supports both shapes natively via
+ * `McpServerConfig` in @anthropic-ai/claude-agent-sdk; the agent-runner
+ * just needs to pass each variant through. Non-Claude providers
+ * (pi-mcp-adapter, codex) have their own translation in their provider
+ * module.
+ */
+export type McpServerConfig = McpStdioServerConfig | McpHttpServerConfig;
+
+export interface McpStdioServerConfig {
+  /** Optional discriminant. Omitted = 'stdio' for back-compat. */
+  type?: 'stdio';
   command: string;
   args: string[];
   env: Record<string, string>;
+}
+
+export interface McpHttpServerConfig {
+  type: 'http';
+  url: string;
+  /** Optional bearer token / custom headers (e.g. `Authorization`). */
+  headers?: Record<string, string>;
 }
 
 export interface AgentQuery {
