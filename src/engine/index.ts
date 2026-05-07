@@ -125,16 +125,19 @@ export {
 // platforms the host owns (e.g. channel-bots driving startup-time
 // recoverMissedMessages over every wired chat). Read-only — write
 // surface stays inside the router/setup paths.
-export {
-  getMessagingGroup,
-  getMessagingGroupsByChannel,
-} from '../db/messaging-groups.js';
+export { getMessagingGroup, getMessagingGroupsByChannel } from '../db/messaging-groups.js';
 export type { MessagingGroup } from '../types.js';
 
 // Session row passed to delivery-action handlers via DeliveryActionHandler's
 // second arg. Re-exporting the type here so plugin handler signatures can
 // declare it directly without reaching into engine internals.
 export type { Session } from '../types.js';
+
+// Cross-group sharing — host registers a resolver that, given an agent
+// group (typically a DM), returns the workspace-public groups whose
+// memory + identity should be RO-mounted into the spawning container.
+// See shared-groups.ts for the full contract.
+export { setSharedGroupsResolver, type SharedGroupsResolver, type SharedGroupRef } from '../shared-groups.js';
 
 // ─── Migration writers (host-side seed surface) ─────────────────────────
 //
@@ -150,11 +153,7 @@ export type { Session } from '../types.js';
 
 export { initDb, closeDb } from '../db/connection.js';
 export { runMigrations } from '../db/migrations/index.js';
-export {
-  createAgentGroup,
-  getAgentGroupByFolder,
-  getAllAgentGroups,
-} from '../db/agent-groups.js';
+export { createAgentGroup, getAgentGroupByFolder, getAllAgentGroups } from '../db/agent-groups.js';
 export {
   createMessagingGroup,
   createMessagingGroupAgent,

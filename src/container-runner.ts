@@ -29,6 +29,7 @@ import { emitEngineEvent } from './engine/events.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
+import { resolveSharedGroups } from './shared-groups.js';
 // Provider host-side config barrel — each provider that needs host-side
 // container setup self-registers on import.
 import './providers/index.js';
@@ -353,6 +354,40 @@ function buildMounts(
     mounts.push(...providerContribution.mounts);
   }
 
+  // Cross-group sharing — host plugin resolves which workspace-public groups
+  // this DM container's user is a member of, returns SharedGroupRef[].
+  // Mount their memory + identity RO at /workspace/shared-groups/<folder>/.
+  // Resolver returns [] for non-DM containers and when no host registered.
+  // See packages/nanoclaw/src/shared-groups.ts.
+  const sharedGroups = resolveSharedGroups(agentGroup);
+  for (const shared of sharedGroups) {
+    const sharedDir = path.resolve(GROUPS_DIR, shared.folder);
+    const memoryPath = path.join(sharedDir, 'memory');
+    if (fs.existsSync(memoryPath)) {
+      mounts.push({
+        hostPath: memoryPath,
+        containerPath: `/workspace/shared-groups/${shared.folder}/memory`,
+        readonly: true,
+      });
+    }
+    const identityPath = path.join(sharedDir, 'IDENTITY.md');
+    if (fs.existsSync(identityPath)) {
+      mounts.push({
+        hostPath: identityPath,
+        containerPath: `/workspace/shared-groups/${shared.folder}/IDENTITY.md`,
+        readonly: true,
+      });
+    }
+    const claudeMdPath = path.join(sharedDir, 'CLAUDE.md');
+    if (fs.existsSync(claudeMdPath)) {
+      mounts.push({
+        hostPath: claudeMdPath,
+        containerPath: `/workspace/shared-groups/${shared.folder}/CLAUDE.md`,
+        readonly: true,
+      });
+    }
+  }
+
   return mounts;
 }
 
@@ -460,6 +495,14 @@ async function buildContainerArgs(
   // Environment — only vars read by code we don't own.
   // Everything NanoClaw-specific is in container.json (read by runner at startup).
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // Shared-groups manifest — agent-runner reads this to know which groups
+  // are mounted under /workspace/shared-groups/. Empty array when no host
+  // resolver registered or container is not a DM.
+  const sharedGroups = resolveSharedGroups(agentGroup);
+  if (sharedGroups.length > 0) {
+    args.push('-e', `NANOCLAW_SHARED_GROUPS_JSON=${JSON.stringify(sharedGroups)}`);
+  }
 
   // Provider-contributed env vars (e.g. XDG_DATA_HOME, OPENCODE_*, NO_PROXY).
   if (providerContribution.env) {
