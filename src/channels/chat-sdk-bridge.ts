@@ -150,6 +150,16 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           try {
             const buffer = await att.fetchData();
             entry.data = buffer.toString('base64');
+            // Transcribe voice/audio attachments host-side so the agent
+            // sees text instead of opaque base64. Mirrors v1 behavior
+            // (apps/nanoclaw/src/transcription.ts).
+            if (att.mimeType && att.mimeType.startsWith('audio/')) {
+              const { transcribeAudio } = await import('../media/transcription.js');
+              entry.transcript = await transcribeAudio(buffer, {
+                mimeType: att.mimeType,
+                filename: att.name ?? 'voice.ogg',
+              });
+            }
           } catch (err) {
             log.warn('Failed to download attachment', { type: att.type, err });
           }
@@ -532,11 +542,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           // dedup PK on (session_id, message_id) handles re-routing of
           // any messages that were already processed before the gap.
           const channelId = adapter.channelIdFromThreadId(threadId);
-          await setupConfig.onInbound(
-            channelId,
-            threadId,
-            await messageToInbound(message, message.isMention === true),
-          );
+          await setupConfig.onInbound(channelId, threadId, await messageToInbound(message, message.isMention === true));
         }
       } catch (err) {
         log.warn('recoverMissedMessages threw', {
