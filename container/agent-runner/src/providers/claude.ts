@@ -279,6 +279,14 @@ export class ClaudeProvider implements AgentProvider {
 
     const instructions = input.systemContext?.instructions;
 
+    // Per-spawn model override. Set by the host via container env when a
+    // plugin (e.g. Optimus' maintenance-task) wants the SDK to run on a
+    // different model than the SDK default — typically a cheaper "dream
+    // model" for nightly maintenance work. NANOCLAW_AGENT_MODEL is the
+    // host-controlled name; the SDK also reads ANTHROPIC_MODEL natively
+    // so we accept either, preferring ours.
+    const modelOverride = process.env.NANOCLAW_AGENT_MODEL || process.env.ANTHROPIC_MODEL;
+
     const sdkResult = sdkQuery({
       prompt: stream,
       options: {
@@ -292,6 +300,7 @@ export class ClaudeProvider implements AgentProvider {
           ...Object.keys(this.mcpServers).map(mcpAllowPattern),
         ],
         disallowedTools: SDK_DISALLOWED_TOOLS,
+        ...(modelOverride ? { model: modelOverride } : {}),
         env: this.env,
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
