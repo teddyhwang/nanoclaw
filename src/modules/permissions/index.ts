@@ -22,11 +22,11 @@ import {
   routeInbound,
   setAccessGate,
   setChannelRequestGate,
-  setMessageInterceptor,
   setSenderResolver,
   setSenderScopeGate,
   type AccessGateResult,
 } from '../../router.js';
+import { addMessageInterceptor } from '../../engine/router-hooks.js';
 import type { InboundEvent } from '../../channels/adapter.js';
 import { registerResponseHandler, type ResponsePayload } from '../../response-registry.js';
 import { getDeliveryAdapter } from '../../delivery.js';
@@ -505,8 +505,17 @@ registerResponseHandler(handleChannelApprovalResponse);
 // ── Free-text name interceptor ──
 // Captures the next DM from an approver who clicked "Create new agent",
 // creates the agent immediately, wires the channel, and replays.
+//
+// Uses `addMessageInterceptor` (from engine/router-hooks) instead of the
+// router's raw `setMessageInterceptor`. The raw setter is a single-slot
+// overwrite — last writer wins. This module loads at import time, so any
+// host plugin that later calls `addMessageInterceptor` (dev-bridge,
+// bot-guard, repeat-workflow, …) would silently lose its registration
+// because the engine's stacking wrapper was already overwritten by the
+// permissions module's direct setter call. addMessageInterceptor
+// composes via the engine, so all callers stack cleanly.
 
-setMessageInterceptor(async (event: InboundEvent): Promise<boolean> => {
+addMessageInterceptor(async (event: InboundEvent): Promise<boolean> => {
   const userId = extractAndUpsertUser(event);
   if (!userId) return false;
 
