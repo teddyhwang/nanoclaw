@@ -279,6 +279,17 @@ function buildMounts(
     ? path.resolve(process.env.NANOCLAW_PROJECT_ROOT)
     : process.cwd();
 
+  // NANOCLAW_CONTAINER_SOURCE_DIR lets embedded hosts override where the
+  // `container/` directory (CLAUDE.md, agent-runner/, skills/) lives —
+  // standalone NanoClaw keeps it at `<projectRoot>/container/`, but
+  // embedded forks like Optimus carry it inside their submodule (e.g.
+  // `<projectRoot>/packages/nanoclaw/container/`). Same pattern as
+  // NANOCLAW_DATA_DIR / NANOCLAW_GROUPS_DIR — env var first, projectRoot
+  // default second.
+  const containerSourceDir = process.env.NANOCLAW_CONTAINER_SOURCE_DIR
+    ? path.resolve(process.env.NANOCLAW_CONTAINER_SOURCE_DIR)
+    : path.join(projectRoot, 'container');
+
   // Per-group filesystem state lives forever after first creation. Init is
   // idempotent: it only writes paths that don't already exist, so this call
   // is a no-op for groups that have spawned before.
@@ -333,7 +344,7 @@ function buildMounts(
 
   // Shared CLAUDE.md — read-only, imported by the composed entry point via
   // the `.claude-shared.md` symlink inside the group dir.
-  const sharedClaudeMd = path.join(projectRoot, 'container', 'CLAUDE.md');
+  const sharedClaudeMd = path.join(containerSourceDir, 'CLAUDE.md');
   if (fs.existsSync(sharedClaudeMd)) {
     mounts.push({ hostPath: sharedClaudeMd, containerPath: '/app/CLAUDE.md', readonly: true });
   }
@@ -349,11 +360,11 @@ function buildMounts(
   // `<root>/container -> packages/<sub>/container` would mount an empty
   // dir without realpath. Standalone NanoClaw is unaffected since
   // `<root>/container` is already a real dir.
-  const agentRunnerSrc = fs.realpathSync(path.join(projectRoot, 'container', 'agent-runner', 'src'));
+  const agentRunnerSrc = fs.realpathSync(path.join(containerSourceDir, 'agent-runner', 'src'));
   mounts.push({ hostPath: agentRunnerSrc, containerPath: '/app/src', readonly: true });
 
   // Shared skills — read-only, symlinks in .claude-shared/skills/ point here.
-  const skillsSrc = path.join(projectRoot, 'container', 'skills');
+  const skillsSrc = path.join(containerSourceDir, 'skills');
   if (fs.existsSync(skillsSrc)) {
     mounts.push({ hostPath: fs.realpathSync(skillsSrc), containerPath: '/app/skills', readonly: true });
   }
@@ -420,10 +431,15 @@ function syncSkillSymlinks(claudeDir: string, containerConfig: import('./contain
   }
 
   // Determine desired skill set
-  const projectRoot = process.env.NANOCLAW_PROJECT_ROOT
-    ? path.resolve(process.env.NANOCLAW_PROJECT_ROOT)
-    : process.cwd();
-  const sharedSkillsDir = path.join(projectRoot, 'container', 'skills');
+  const containerSourceDir = process.env.NANOCLAW_CONTAINER_SOURCE_DIR
+    ? path.resolve(process.env.NANOCLAW_CONTAINER_SOURCE_DIR)
+    : path.join(
+        process.env.NANOCLAW_PROJECT_ROOT
+          ? path.resolve(process.env.NANOCLAW_PROJECT_ROOT)
+          : process.cwd(),
+        'container',
+      );
+  const sharedSkillsDir = path.join(containerSourceDir, 'skills');
   let desired: string[];
   if (containerConfig.skills === 'all') {
     // Recompute from shared dir — newly-added upstream skills appear automatically
