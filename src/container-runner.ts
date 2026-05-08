@@ -562,6 +562,15 @@ async function buildContainerArgs(
   // Host gateway
   args.push(...hostGatewayArgs());
 
+  // Bypass the OneCLI HTTP proxy for internal MCP / dashboard / qmd
+  // traffic. The proxy is for credential injection on outbound calls
+  // to public APIs (api.anthropic.com etc); without NO_PROXY, Node's
+  // undici routes ALL HTTP through it and silently breaks every MCP
+  // server hosted on the embedding host. Symptom is the agent saying
+  // "MCP offline" and tools mysteriously disappearing.
+  args.push('-e', 'NO_PROXY=host.docker.internal,localhost,127.0.0.1');
+  args.push('-e', 'no_proxy=host.docker.internal,localhost,127.0.0.1');
+
   // User mapping
   const hostUid = process.getuid?.();
   const hostGid = process.getgid?.();
