@@ -362,6 +362,18 @@ async function processQuery(
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
         query.push(prompt);
         markCompleted(keptIds);
+        // Refresh routing.inReplyTo so subsequent outbound rows reply to the
+        // most recent triggering message, not the one captured when this
+        // processQuery turn started. Without this, all outbound writes in a
+        // long-lived turn (subsequent dispatchResultText calls or single-
+        // destination shortcut writes) point at the original first inbound,
+        // rendering Discord's reply pill against the oldest message in the
+        // chain rather than the last @mention/reply that the agent is
+        // actually responding to.
+        const newest = keep[0]; // formatMessages doesn't reorder; keep mirrors getRecent's seq DESC
+        if (newest?.id) {
+          routing.inReplyTo = newest.id;
+        }
       } catch (err) {
         // Without this catch the rejection escapes the void IIFE and Node
         // terminates the container on unhandled-rejection. The initial-batch

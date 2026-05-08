@@ -378,8 +378,7 @@ async function deliverMessage(
   let inReplyTo: string | null = msg.in_reply_to;
   if (inReplyTo && session.messaging_group_id) {
     const wiring = getMessagingGroupAgentByPair(session.messaging_group_id, session.agent_group_id);
-    const triggerRequired =
-      wiring?.engage_mode === 'mention' || wiring?.engage_mode === 'mention-sticky';
+    const triggerRequired = wiring?.engage_mode === 'mention' || wiring?.engage_mode === 'mention-sticky';
     if (!triggerRequired) inReplyTo = null;
   } else if (inReplyTo && !session.messaging_group_id) {
     // No messaging_group → no wiring lookup possible; default to no pill.

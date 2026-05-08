@@ -305,10 +305,13 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     // Loopback short-circuit: bot's own message bouncing back never engages,
     // regardless of the wiring's engage_mode. The accumulate branch below
     // still stores the message so the agent retains self-context.
-    const isReplyToBot = !isBotLoopback && replyToMessageId
-      ? isReplyToOurBot(agent.agent_group_id, mg.id, event.threadId, replyToMessageId)
-      : false;
-    const engages = isBotLoopback ? false : evaluateEngage(agent, messageText, isMention, isReplyToBot, mg, event.threadId);
+    const isReplyToBot =
+      !isBotLoopback && replyToMessageId
+        ? isReplyToOurBot(agent.agent_group_id, mg.id, event.threadId, replyToMessageId)
+        : false;
+    const engages = isBotLoopback
+      ? false
+      : evaluateEngage(agent, messageText, isMention, isReplyToBot, mg, event.threadId);
 
     const accessOk = engages && (!accessGate || accessGate(event, userId, mg, agent.agent_group_id).allowed);
     const scopeOk = engages && (!senderScopeGate || senderScopeGate(event, userId, mg, agent).allowed);
