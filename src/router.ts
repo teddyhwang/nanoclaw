@@ -28,9 +28,10 @@ import {
   getMessagingGroupWithAgentCount,
 } from './db/messaging-groups.js';
 import { findSessionForAgent } from './db/sessions.js';
+import { wasDeliveredByBot } from './db/session-db.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
-import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
+import { resolveSession, writeSessionMessage, writeOutboundDirect, openInboundDb } from './session-manager.js';
 import { wakeContainer } from './container-runner.js';
 import { getSession } from './db/sessions.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent } from './types.js';
@@ -282,6 +283,16 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   //    avoids the extra await).
   const parsed = safeParseContent(event.message.content);
   const messageText = parsed.text ?? '';
+  // Reply-to-bot detection: if the inbound carries a parent platform_message_id
+  // (extracted by the channel adapter's extractReplyContext hook), check
+  // whether that message was a prior bot outbound for this agent group.
+  // Drives v1's `requires_trigger` parity in evaluateEngage — replying to a
+  // bot message counts as a trigger in mention / mention-sticky modes even
+  // without an @mention.
+  const replyToMessageId =
+    typeof (parsed as { replyTo?: { messageId?: string } }).replyTo?.messageId === 'string'
+      ? ((parsed as { replyTo: { messageId: string } }).replyTo.messageId as string)
+      : null;
 
   let engagedCount = 0;
   let accumulatedCount = 0;
@@ -294,7 +305,10 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     // Loopback short-circuit: bot's own message bouncing back never engages,
     // regardless of the wiring's engage_mode. The accumulate branch below
     // still stores the message so the agent retains self-context.
-    const engages = isBotLoopback ? false : evaluateEngage(agent, messageText, isMention, mg, event.threadId);
+    const isReplyToBot = !isBotLoopback && replyToMessageId
+      ? isReplyToOurBot(agent.agent_group_id, mg.id, event.threadId, replyToMessageId)
+      : false;
+    const engages = isBotLoopback ? false : evaluateEngage(agent, messageText, isMention, isReplyToBot, mg, event.threadId);
 
     const accessOk = engages && (!accessGate || accessGate(event, userId, mg, agent.agent_group_id).allowed);
     const scopeOk = engages && (!senderScopeGate || senderScopeGate(event, userId, mg, agent).allowed);
@@ -383,10 +397,34 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
  *                      a thread has engaged us once, follow-ups arrive
  *                      with no mention and should still fire.
  */
+/**
+ * Check whether `platformMessageId` was a prior bot outbound for the active
+ * session of (agent_group, messaging_group, thread). Returns false if no
+ * active session, the session DB doesn't exist, or the message id wasn't
+ * one of ours. Used by evaluateEngage to support v1's `requires_trigger`
+ * reply-to-bot trigger semantics.
+ */
+function isReplyToOurBot(
+  agentGroupId: string,
+  messagingGroupId: string,
+  threadId: string | null,
+  platformMessageId: string,
+): boolean {
+  const session = findSessionForAgent(agentGroupId, messagingGroupId, threadId);
+  if (!session) return false;
+  try {
+    const db = openInboundDb(agentGroupId, session.id);
+    return wasDeliveredByBot(db, platformMessageId);
+  } catch {
+    return false;
+  }
+}
+
 function evaluateEngage(
   agent: MessagingGroupAgent,
   text: string,
   isMention: boolean,
+  isReplyToBot: boolean,
   mg: MessagingGroup,
   threadId: string | null,
 ): boolean {
@@ -402,9 +440,13 @@ function evaluateEngage(
       }
     }
     case 'mention':
-      return isMention;
+      // v1 `requires_trigger` parity: @mention OR reply to a prior bot
+      // message both count as triggers. extractReplyContext on the channel
+      // adapter populates the parent message id; isReplyToOurBot confirms
+      // the parent was one of our deliveries before letting it engage.
+      return isMention || isReplyToBot;
     case 'mention-sticky': {
-      if (isMention) return true;
+      if (isMention || isReplyToBot) return true;
       // Sticky follow-up: session already exists for this (agent, mg, thread)
       // — the thread was activated before, keep firing.
       if (mg.is_group === 0) return false; // DMs never use mention-sticky sensibly

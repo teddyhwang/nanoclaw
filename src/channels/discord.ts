@@ -15,6 +15,7 @@ function extractReplyContext(raw: Record<string, any>): ReplyContext | null {
   return {
     text: reply.content || '',
     sender: reply.author?.global_name || reply.author?.username || 'Unknown',
+    messageId: typeof reply.id === 'string' ? reply.id : undefined,
   };
 }
 

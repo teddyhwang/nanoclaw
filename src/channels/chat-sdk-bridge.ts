@@ -37,6 +37,13 @@ interface GatewayAdapter extends Adapter {
 export interface ReplyContext {
   text: string;
   sender: string;
+  /**
+   * Platform message id of the parent (the message being replied to). The
+   * router uses this to engage on reply-to-bot in `mention` / `mention-sticky`
+   * modes — matching v1's `requires_trigger` behavior where a reply to the
+   * bot's prior message counts as a trigger even without an @mention.
+   */
+  messageId?: string;
 }
 
 /** Extract reply context from a platform-specific raw message. Return null if no reply. */

@@ -264,6 +264,19 @@ export function getDeliveredIds(db: Database.Database): Set<string> {
   );
 }
 
+/**
+ * True if `platformMessageId` was delivered by us as a bot outbound for this
+ * session. Used by the router to detect "user replied to a bot message" and
+ * fire engagement in mention / mention-sticky modes — matches v1's
+ * `requires_trigger` behavior where reply-to-bot is a valid trigger.
+ */
+export function wasDeliveredByBot(db: Database.Database, platformMessageId: string): boolean {
+  const row = db
+    .prepare("SELECT 1 FROM delivered WHERE platform_message_id = ? AND status = 'delivered' LIMIT 1")
+    .get(platformMessageId) as { '1': number } | undefined;
+  return row !== undefined;
+}
+
 export function markDelivered(db: Database.Database, messageOutId: string, platformMessageId: string | null): void {
   db.prepare(
     "INSERT OR IGNORE INTO delivered (message_out_id, platform_message_id, status, delivered_at) VALUES (?, ?, 'delivered', datetime('now'))",

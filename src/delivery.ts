@@ -12,7 +12,7 @@ import type Database from 'better-sqlite3';
 import { getRunningSessions, getActiveSessions, createPendingQuestion } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
-import { getMessagingGroupByPlatform } from './db/messaging-groups.js';
+import { getMessagingGroupByPlatform, getMessagingGroupAgentByPair } from './db/messaging-groups.js';
 import {
   getDueOutboundMessages,
   getDeliveredIds,
@@ -368,6 +368,24 @@ async function deliverMessage(
       ? readOutboxFiles(session.agent_group_id, session.id, msg.id, content.files as string[])
       : undefined;
 
+  // Gate the native reply pill on engage_mode. Only trigger-required wirings
+  // (mention / mention-sticky — v1's `requires_trigger=true` equivalent)
+  // should render a reply chain on outbound. Always-engaged wirings (engage
+  // mode `pattern`, including DMs with the catch-all `.` pattern) post
+  // flat — replying with a pill on every DM message is visual noise.
+  // agent-runner stamps in_reply_to on every outbound regardless, so we drop
+  // it here when the wiring isn't trigger-required.
+  let inReplyTo: string | null = msg.in_reply_to;
+  if (inReplyTo && session.messaging_group_id) {
+    const wiring = getMessagingGroupAgentByPair(session.messaging_group_id, session.agent_group_id);
+    const triggerRequired =
+      wiring?.engage_mode === 'mention' || wiring?.engage_mode === 'mention-sticky';
+    if (!triggerRequired) inReplyTo = null;
+  } else if (inReplyTo && !session.messaging_group_id) {
+    // No messaging_group → no wiring lookup possible; default to no pill.
+    inReplyTo = null;
+  }
+
   const platformMsgId = await deliveryAdapter.deliver(
     msg.channel_type,
     msg.platform_id,
@@ -375,7 +393,7 @@ async function deliverMessage(
     msg.kind,
     msg.content,
     files,
-    msg.in_reply_to,
+    inReplyTo,
   );
   log.info('Message delivered', {
     id: msg.id,
