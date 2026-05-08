@@ -61,44 +61,87 @@ function resolveAuthDir(): string {
 }
 
 /**
- * Resolve a message-content lookup db. Optimus (and other v2 hosts that
- * archive every WhatsApp message host-side) write to
- * `<dataDir>/messages.db` with a `messages(id, chat_jid, content)` table.
- * Returning a getter lets `getMessage` recover content for Baileys'
- * encrypt-retry path — without this fallback, peers see indefinite
- * "Waiting for this message" prompts when WhatsApp asks us to re-send a
- * message whose proto we no longer hold in memory. Lazy-open + cache so
- * every retry doesn't reopen the file.
+ * Look up the text of a previously-sent WhatsApp message by Baileys'
+ * `key.id` and the chat's JID. Used by Baileys' `getMessage` callback when
+ * a peer asks us to re-encrypt a message — without a content fallback,
+ * recipients see indefinite "Waiting for this message" prompts when the
+ * in-memory `sentMessageCache` has aged out (or when sender-key state was
+ * stale on the recipient at original-send time, common after a re-pair).
+ *
+ * Source of truth in v2: per-session SQLite under
+ * `<dataDir>/v2-sessions/<agentGroupId>/<sessionId>/{inbound,outbound}.db`.
+ *   - `inbound.db.delivered(message_out_id, platform_message_id)` —
+ *     records Baileys' `key.id` next to our internal id at delivery time.
+ *   - `outbound.db.messages_out(id, platform_id, content)` — the message
+ *     proto's text, indexed by chat JID for disambiguation.
+ *
+ * Strategy: scan the v2-sessions tree, opening each `inbound.db` once
+ * (cached read-only handle) to find the row whose `platform_message_id`
+ * matches `key.id`. Hits are rare (only fire on retry-request), so the
+ * fan-out is acceptable. For hits, look up the content in the matching
+ * session's `outbound.db` filtered by `platform_id = chat JID` (rules out
+ * the rare cross-session id collision).
  */
-let _messagesDb: import('better-sqlite3').Database | null | undefined;
-function getMessageContentLookup(): ((id: string, jid: string) => string | undefined) | null {
-  if (_messagesDb === null) return null; // probed and absent
-  if (_messagesDb === undefined) {
-    const dbPath = path.join(getEnginePaths().dataDir, 'messages.db');
-    if (!fs.existsSync(dbPath)) {
-      _messagesDb = null;
-      return null;
-    }
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
-      const Database = require('better-sqlite3');
-      _messagesDb = new Database(dbPath, { readonly: true, fileMustExist: true });
-    } catch {
-      _messagesDb = null;
-      return null;
+type Db = import('better-sqlite3').Database;
+const _sessionDbHandles = new Map<string, { inbound: Db; outbound: Db }>();
+function getSessionDirs(): string[] {
+  const root = path.join(getEnginePaths().dataDir, 'v2-sessions');
+  if (!fs.existsSync(root)) return [];
+  const dirs: string[] = [];
+  for (const agentGroup of fs.readdirSync(root)) {
+    const agentDir = path.join(root, agentGroup);
+    if (!fs.statSync(agentDir).isDirectory()) continue;
+    for (const session of fs.readdirSync(agentDir)) {
+      const sessionDir = path.join(agentDir, session);
+      const inDb = path.join(sessionDir, 'inbound.db');
+      const outDb = path.join(sessionDir, 'outbound.db');
+      if (fs.existsSync(inDb) && fs.existsSync(outDb)) dirs.push(sessionDir);
     }
   }
-  const db = _messagesDb;
-  if (!db) return null;
-  return (id, jid) => {
-    try {
-      const row = db.prepare('SELECT content FROM messages WHERE id = ? AND chat_jid = ? LIMIT 1').get(id, jid) as
-        | { content: string }
-        | undefined;
-      return row?.content;
-    } catch {
-      return undefined;
+  return dirs;
+}
+function openSessionDbs(sessionDir: string): { inbound: Db; outbound: Db } | null {
+  const cached = _sessionDbHandles.get(sessionDir);
+  if (cached) return cached;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+    const Database = require('better-sqlite3');
+    const inbound = new Database(path.join(sessionDir, 'inbound.db'), { readonly: true, fileMustExist: true });
+    const outbound = new Database(path.join(sessionDir, 'outbound.db'), { readonly: true, fileMustExist: true });
+    const handles = { inbound, outbound };
+    _sessionDbHandles.set(sessionDir, handles);
+    return handles;
+  } catch {
+    return null;
+  }
+}
+function getMessageContentLookup(): ((id: string, jid: string) => string | undefined) | null {
+  return (platformMessageId, chatJid) => {
+    for (const sessionDir of getSessionDirs()) {
+      const dbs = openSessionDbs(sessionDir);
+      if (!dbs) continue;
+      try {
+        const deliveredRow = dbs.inbound
+          .prepare('SELECT message_out_id FROM delivered WHERE platform_message_id = ? LIMIT 1')
+          .get(platformMessageId) as { message_out_id: string } | undefined;
+        if (!deliveredRow) continue;
+        const outRow = dbs.outbound
+          .prepare('SELECT content FROM messages_out WHERE id = ? AND platform_id = ? LIMIT 1')
+          .get(deliveredRow.message_out_id, chatJid) as { content: string } | undefined;
+        if (!outRow?.content) continue;
+        try {
+          const parsed = JSON.parse(outRow.content) as { text?: string; markdown?: string };
+          const text = parsed.markdown || parsed.text;
+          if (text) return text;
+        } catch {
+          // content not JSON — return raw
+          return outRow.content;
+        }
+      } catch {
+        continue;
+      }
     }
+    return undefined;
   };
 }
 const GROUP_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24h
@@ -416,18 +459,23 @@ registerChannelAdapter('whatsapp', {
         keepAliveIntervalMs: 30_000,
         cachedGroupMetadata: async (jid: string) => getNormalizedGroupMetadata(jid),
         getMessage: async (key: WAMessageKey) => {
-          // Check in-memory cache first (recently sent messages)
+          // Check in-memory cache first (recently sent messages).
           const cached = sentMessageCache.get(key.id || '');
           if (cached) return cached;
-          // Fall back to a host-archived message DB if available
-          // (`<projectRoot>/store/messages.db`). Without this, peers see
-          // "Waiting for this message" indefinitely when WhatsApp asks
-          // us to re-encrypt a message whose proto we no longer hold —
-          // worst with self-chats and other linked-device-only flows.
+          // Fall back to per-session outbound.db so retries survive after the
+          // in-memory cache ages out or the host restarts. Must apply the
+          // same formatWhatsApp + assistant prefix transformation that
+          // `sendRawMessage` applied at original-send time, otherwise the
+          // re-encrypted content won't match the original ciphertext and
+          // peers will reject the retry.
           const lookup = getMessageContentLookup();
           if (lookup && key.id && key.remoteJid) {
-            const content = lookup(key.id, key.remoteJid);
-            if (content) return proto.Message.fromObject({ conversation: content });
+            const rawText = lookup(key.id, key.remoteJid);
+            if (rawText) {
+              const formatted = formatWhatsApp(rawText);
+              const prefixed = ASSISTANT_HAS_OWN_NUMBER ? formatted : `${ASSISTANT_NAME}: ${formatted}`;
+              return proto.Message.fromObject({ conversation: prefixed });
+            }
           }
           // Return empty message rather than undefined to prevent the
           // protocol getting stuck — peers fall back to "this message
