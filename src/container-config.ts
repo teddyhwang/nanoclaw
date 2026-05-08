@@ -64,6 +64,13 @@ export interface ContainerConfig {
   groupName?: string;
   /** Assistant display name (used in system prompt / responses). */
   assistantName?: string;
+  /**
+   * Separator placed between the assistant name and the message body in
+   * shared-number channel adapters (currently WhatsApp). Defaults to `": "`
+   * to match the long-standing `Name: text` convention. Set to `" "` for
+   * emoji-only marks (`🤖 text`) or `""` to drop entirely.
+   */
+  assistantPrefixSeparator?: string;
   /** Agent group ID — set by the host, read by the runner. */
   agentGroupId?: string;
   /** Max messages per prompt. Falls back to code default if unset. */
@@ -106,6 +113,7 @@ export function readContainerConfig(group: GroupRef): ContainerConfig {
       provider: raw.provider,
       groupName: raw.groupName,
       assistantName: raw.assistantName,
+      assistantPrefixSeparator: raw.assistantPrefixSeparator,
       agentGroupId: raw.agentGroupId,
       maxMessagesPerPrompt: raw.maxMessagesPerPrompt,
     };

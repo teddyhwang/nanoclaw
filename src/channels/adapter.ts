@@ -124,6 +124,11 @@ export interface OutboundMessage {
    * Optional — adapters that don't prefix can ignore it.
    */
   assistantName?: string;
+  /**
+   * Separator between assistantName and message body. Defaults to `": "`
+   * when undefined. Adapters that don't prefix can ignore it.
+   */
+  assistantPrefixSeparator?: string;
 }
 
 /** Discovered conversation info (from syncConversations). */

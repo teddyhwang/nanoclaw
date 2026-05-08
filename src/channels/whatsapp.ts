@@ -124,6 +124,8 @@ interface SentLookupResult {
    * ASSISTANT_NAME has changed.
    */
   assistantName?: string;
+  /** Separator between assistantName and message body (default `": "`). */
+  assistantPrefixSeparator?: string;
 }
 function getMessageContentLookup(): ((id: string, jid: string) => SentLookupResult | undefined) | null {
   return (platformMessageId, chatJid) => {
@@ -146,13 +148,18 @@ function getMessageContentLookup(): ((id: string, jid: string) => SentLookupResu
         // retry path.
         const agentGroupId = path.basename(path.dirname(sessionDir));
         let assistantName: string | undefined;
+        let assistantPrefixSeparator: string | undefined;
         try {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { getAgentGroup } = require('../db/agent-groups.js') as typeof import('../db/agent-groups.js');
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { readContainerConfig } = require('../container-config.js') as typeof import('../container-config.js');
           const ag = getAgentGroup(agentGroupId);
-          if (ag) assistantName = readContainerConfig(ag).assistantName;
+          if (ag) {
+            const cfg = readContainerConfig(ag);
+            assistantName = cfg.assistantName;
+            assistantPrefixSeparator = cfg.assistantPrefixSeparator;
+          }
         } catch {
           // host DB / container-config unavailable in this context —
           // caller will fall back to env-level ASSISTANT_NAME.
@@ -164,7 +171,7 @@ function getMessageContentLookup(): ((id: string, jid: string) => SentLookupResu
         } catch {
           text = outRow.content;
         }
-        return { text, assistantName };
+        return { text, assistantName, assistantPrefixSeparator };
       } catch {
         continue;
       }
@@ -502,7 +509,8 @@ registerChannelAdapter('whatsapp', {
             if (hit) {
               const formatted = formatWhatsApp(hit.text);
               const name = hit.assistantName ?? ASSISTANT_NAME;
-              const prefixed = ASSISTANT_HAS_OWN_NUMBER ? formatted : `${name}: ${formatted}`;
+              const sep = hit.assistantPrefixSeparator ?? ': ';
+              const prefixed = ASSISTANT_HAS_OWN_NUMBER ? formatted : `${name}${sep}${formatted}`;
               return proto.Message.fromObject({ conversation: prefixed });
             }
           }
@@ -839,7 +847,8 @@ registerChannelAdapter('whatsapp', {
         if (text) {
           const formatted = formatWhatsApp(text);
           const name = message.assistantName ?? ASSISTANT_NAME;
-          const prefixed = ASSISTANT_HAS_OWN_NUMBER ? formatted : `${name}: ${formatted}`;
+          const sep = message.assistantPrefixSeparator ?? ': ';
+          const prefixed = ASSISTANT_HAS_OWN_NUMBER ? formatted : `${name}${sep}${formatted}`;
           return sendRawMessage(platformId, prefixed);
         }
       },

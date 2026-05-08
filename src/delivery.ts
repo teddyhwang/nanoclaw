@@ -67,6 +67,11 @@ export interface ChannelDeliveryAdapter {
      * itself independently. Optional — undefined falls back to the env.
      */
     assistantName?: string,
+    /**
+     * Separator between the assistant name and the message body. Defaults
+     * to `": "` when undefined. Operator-controlled per group.
+     */
+    assistantPrefixSeparator?: string,
   ): Promise<string | undefined>;
   setTyping?(channelType: string, platformId: string, threadId: string | null): Promise<void>;
 }
@@ -398,10 +403,13 @@ async function deliverMessage(
   // shared-number) use this in place of the host-wide ASSISTANT_NAME so
   // each group brands itself independently.
   let assistantName: string | undefined;
+  let assistantPrefixSeparator: string | undefined;
   try {
     const agentGroup = getAgentGroup(session.agent_group_id);
     if (agentGroup) {
-      assistantName = readContainerConfig(agentGroup).assistantName;
+      const cfg = readContainerConfig(agentGroup);
+      assistantName = cfg.assistantName;
+      assistantPrefixSeparator = cfg.assistantPrefixSeparator;
     }
   } catch (err) {
     log.debug('Failed to resolve per-session assistantName', { err, sessionId: session.id });
@@ -416,6 +424,7 @@ async function deliverMessage(
     files,
     inReplyTo,
     assistantName,
+    assistantPrefixSeparator,
   );
   log.info('Message delivered', {
     id: msg.id,

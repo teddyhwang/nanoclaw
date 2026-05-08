@@ -137,6 +137,7 @@ export async function _bootForHost(opts: { managedSignals: boolean }): Promise<v
       files?: import('../channels/adapter.js').OutboundFile[],
       inReplyTo?: string | null,
       assistantName?: string,
+      assistantPrefixSeparator?: string,
     ): Promise<string | undefined> {
       const adapter = getChannelAdapter(channelType);
       if (!adapter) {
@@ -149,6 +150,7 @@ export async function _bootForHost(opts: { managedSignals: boolean }): Promise<v
         files,
         inReplyTo,
         assistantName,
+        assistantPrefixSeparator,
       });
     },
     async setTyping(channelType: string, platformId: string, threadId: string | null): Promise<void> {
