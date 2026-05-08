@@ -1,8 +1,9 @@
 import fs from 'fs';
 import path from 'path';
 
-import { DATA_DIR, GROUPS_DIR } from './config.js';
+import { DATA_DIR } from './config.js';
 import { initContainerConfig } from './container-config.js';
+import { resolveGroupDir } from './engine/paths.js';
 import { log } from './log.js';
 import type { AgentGroup } from './types.js';
 
@@ -38,7 +39,7 @@ export function initGroupFilesystem(group: AgentGroup, opts?: { instructions?: s
   const initialized: string[] = [];
 
   // 1. groups/<folder>/ — group memory + working dir
-  const groupDir = path.resolve(GROUPS_DIR, group.folder);
+  const groupDir = resolveGroupDir(group);
   if (!fs.existsSync(groupDir)) {
     fs.mkdirSync(groupDir, { recursive: true });
     initialized.push('groupDir');
@@ -56,7 +57,7 @@ export function initGroupFilesystem(group: AgentGroup, opts?: { instructions?: s
   // groups/<folder>/container.json — empty container config, replaces the
   // former agent_groups.container_config DB column. Self-modification flows
   // read and write this file directly.
-  if (initContainerConfig(group.folder)) {
+  if (initContainerConfig(group)) {
     initialized.push('container.json');
   }
 

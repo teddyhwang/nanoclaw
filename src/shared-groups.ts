@@ -16,6 +16,13 @@
 import type { AgentGroup } from './types.js';
 
 export interface SharedGroupRef {
+  /**
+   * Agent group ID — used by workspace-aware GroupDirResolver hooks to
+   * resolve `<groupsDir>/<workspace>/<folder>` instead of flat
+   * `<groupsDir>/<folder>`. Optional for back-compat: standalone
+   * NanoClaw never registers a resolver and only needs `folder`.
+   */
+  id?: string;
   /** Group folder under <projectRoot>/groups/. */
   folder: string;
   /** Display name, surfaced in NANOCLAW_SHARED_GROUPS_JSON. */

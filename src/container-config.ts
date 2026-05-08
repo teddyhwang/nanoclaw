@@ -12,7 +12,7 @@
 import fs from 'fs';
 import path from 'path';
 
-import { GROUPS_DIR } from './config.js';
+import { resolveGroupDir, type GroupRef } from './engine/paths.js';
 
 /**
  * MCP server entry inside container.json. Discriminated by `type` so a
@@ -79,8 +79,8 @@ function emptyConfig(): ContainerConfig {
   };
 }
 
-function configPath(folder: string): string {
-  return path.join(GROUPS_DIR, folder, 'container.json');
+function configPath(group: GroupRef): string {
+  return path.join(resolveGroupDir(group), 'container.json');
 }
 
 /**
@@ -89,8 +89,8 @@ function configPath(folder: string): string {
  * Never throws for missing / malformed files — corruption logs a warning
  * via console.error and falls back to empty.
  */
-export function readContainerConfig(folder: string): ContainerConfig {
-  const p = configPath(folder);
+export function readContainerConfig(group: GroupRef): ContainerConfig {
+  const p = configPath(group);
   if (!fs.existsSync(p)) return emptyConfig();
   try {
     const raw = JSON.parse(fs.readFileSync(p, 'utf8')) as Partial<ContainerConfig>;
@@ -120,8 +120,8 @@ export function readContainerConfig(folder: string): ContainerConfig {
  * directory if necessary. Pretty-printed JSON so diffs in the activation
  * flow are reviewable.
  */
-export function writeContainerConfig(folder: string, config: ContainerConfig): void {
-  const p = configPath(folder);
+export function writeContainerConfig(group: GroupRef, config: ContainerConfig): void {
+  const p = configPath(group);
   const dir = path.dirname(p);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(p, JSON.stringify(config, null, 2) + '\n');
@@ -132,10 +132,10 @@ export function writeContainerConfig(folder: string, config: ContainerConfig): v
  * result. Convenient for append-style changes like `install_packages` and
  * `add_mcp_server` handlers.
  */
-export function updateContainerConfig(folder: string, mutate: (config: ContainerConfig) => void): ContainerConfig {
-  const config = readContainerConfig(folder);
+export function updateContainerConfig(group: GroupRef, mutate: (config: ContainerConfig) => void): ContainerConfig {
+  const config = readContainerConfig(group);
   mutate(config);
-  writeContainerConfig(folder, config);
+  writeContainerConfig(group, config);
   return config;
 }
 
@@ -143,9 +143,9 @@ export function updateContainerConfig(folder: string, mutate: (config: Container
  * Initialize an empty container.json for a group if one doesn't already
  * exist. Idempotent — used from `group-init.ts`.
  */
-export function initContainerConfig(folder: string): boolean {
-  const p = configPath(folder);
+export function initContainerConfig(group: GroupRef): boolean {
+  const p = configPath(group);
   if (fs.existsSync(p)) return false;
-  writeContainerConfig(folder, emptyConfig());
+  writeContainerConfig(group, emptyConfig());
   return true;
 }

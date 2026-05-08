@@ -16,6 +16,31 @@
 import os from 'os';
 import path from 'path';
 
+/**
+ * A minimal shape we accept for resolving an agent-group's on-disk dir.
+ * Defined here (not imported from db/) so this leaf has no internal deps.
+ */
+export interface GroupRef {
+  id: string;
+  folder: string;
+}
+
+/**
+ * Optional resolver hook: given a group, return its on-disk dir
+ * (absolute path). Standalone NanoClaw leaves this unset and every
+ * group resolves to `<groupsDir>/<folder>`. Embedded hosts (e.g.
+ * Optimus, which nests groups under workspace slugs) install a hook to
+ * return `<groupsDir>/<workspace_slug>/<folder>` instead.
+ *
+ * Synchronous on purpose — path resolution happens on hot paths
+ * (container spawn, claude-md compose, message routing) where async
+ * boundaries would cascade. Hosts pre-load any DB lookups into an
+ * in-memory map and answer from cache.
+ *
+ * Returning `null`/`undefined` falls back to the default resolution.
+ */
+export type GroupDirResolver = (group: GroupRef) => string | null | undefined;
+
 export interface EnginePaths {
   /** Project / install root. Defaults to `process.cwd()`. */
   projectRoot: string;
@@ -33,6 +58,11 @@ export interface EnginePaths {
   envFile: string;
   /** Container source mounts: `<projectRoot>/container`. */
   containerSourceDir: string;
+  /**
+   * Optional override for resolving a group's on-disk directory.
+   * See {@link GroupDirResolver}.
+   */
+  groupDirResolver?: GroupDirResolver;
 }
 
 function defaultPaths(): EnginePaths {
@@ -66,22 +96,55 @@ export interface EnginePathOverrides {
   senderAllowlistPath?: string;
   envFile?: string;
   containerSourceDir?: string;
+  groupDirResolver?: GroupDirResolver;
 }
 
 /**
- * Apply path overrides. Missing fields fall back to the defaults derived from
- * `projectRoot` (or the current `process.cwd()` if `projectRoot` is also
- * absent). Idempotent — call once at boot, before initDb.
+ * Resolve a group's on-disk directory. Consults the registered
+ * {@link GroupDirResolver} first; falls back to `<groupsDir>/<folder>`.
+ * Always returns an absolute path.
+ *
+ * This is the single seam every engine callsite that builds a group
+ * path should use. Direct `path.resolve(GROUPS_DIR, folder)` skips the
+ * hook and breaks workspace-aware embedded hosts.
+ */
+export function resolveGroupDir(group: GroupRef): string {
+  const paths = getEnginePaths();
+  const fromHook = paths.groupDirResolver?.(group);
+  if (fromHook) return path.resolve(fromHook);
+  return path.resolve(paths.groupsDir, group.folder);
+}
+
+/**
+ * Apply path overrides. Merges with the current registry state so callers
+ * can layer overrides at boot:
+ *   - bootstrap.ts sets projectRoot + dataDir
+ *   - host plugin (later, once cybertron DB is open) installs groupDirResolver
+ * Missing fields fall back to current registry values (or the standalone
+ * `process.cwd()`-derived defaults if the registry is unset).
+ *
+ * If `projectRoot` is supplied, the path children (dataDir, groupsDir,
+ * storeDir, envFile, containerSourceDir) are re-derived from it before
+ * applying explicit overrides — ensures `setEnginePaths({ projectRoot: X })`
+ * by itself produces a self-consistent layout.
  */
 export function setEnginePaths(overrides: EnginePathOverrides): EnginePaths {
-  const base = overrides.projectRoot ? { ...defaultPaths(), projectRoot: overrides.projectRoot } : defaultPaths();
-  // Re-derive children from the supplied projectRoot if provided.
+  const current = _paths ?? defaultPaths();
+  let base: EnginePaths;
   if (overrides.projectRoot) {
-    base.dataDir = path.resolve(overrides.projectRoot, 'data');
-    base.groupsDir = path.resolve(overrides.projectRoot, 'groups');
-    base.storeDir = path.resolve(overrides.projectRoot, 'store');
-    base.envFile = path.join(overrides.projectRoot, '.env');
-    base.containerSourceDir = path.join(overrides.projectRoot, 'container');
+    // Re-derive path children from the supplied projectRoot. Hook fields
+    // (groupDirResolver) survive the rederive — they aren't path-derived.
+    base = {
+      ...current,
+      projectRoot: overrides.projectRoot,
+      dataDir: path.resolve(overrides.projectRoot, 'data'),
+      groupsDir: path.resolve(overrides.projectRoot, 'groups'),
+      storeDir: path.resolve(overrides.projectRoot, 'store'),
+      envFile: path.join(overrides.projectRoot, '.env'),
+      containerSourceDir: path.join(overrides.projectRoot, 'container'),
+    };
+  } else {
+    base = current;
   }
   _paths = { ...base, ...stripUndefined(overrides) };
   return _paths;

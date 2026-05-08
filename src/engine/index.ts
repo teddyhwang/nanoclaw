@@ -11,7 +11,15 @@ export type { NanoClawPlugin, PluginContext } from './plugin.js';
 
 export { engineEvents, type EngineEventBus, type EngineEventMap, type EngineEventName } from './events.js';
 
-export { setEnginePaths, getEnginePaths, type EnginePaths, type EnginePathOverrides } from './paths.js';
+export {
+  setEnginePaths,
+  getEnginePaths,
+  resolveGroupDir,
+  type EnginePaths,
+  type EnginePathOverrides,
+  type GroupRef,
+  type GroupDirResolver,
+} from './paths.js';
 
 export {
   setCredentialProvider,

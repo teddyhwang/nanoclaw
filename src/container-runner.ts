@@ -26,6 +26,7 @@ import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
 import { initGroupFilesystem } from './group-init.js';
 import { emitEngineEvent } from './engine/events.js';
+import { resolveGroupDir } from './engine/paths.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
@@ -123,7 +124,7 @@ async function spawnContainer(session: Session): Promise<void> {
 
   // Read container config once — threaded through provider resolution,
   // buildMounts, and buildContainerArgs so we don't re-read the file.
-  const containerConfig = readContainerConfig(agentGroup.folder);
+  const containerConfig = readContainerConfig(agentGroup);
 
   // Ensure container.json has the agent group identity fields the runner needs.
   // Written at spawn time so the runner can read them from the RO mount.
@@ -293,7 +294,7 @@ function buildMounts(
 
   const mounts: VolumeMount[] = [];
   const sessDir = sessionDir(agentGroup.id, session.id);
-  const groupDir = path.resolve(GROUPS_DIR, agentGroup.folder);
+  const groupDir = resolveGroupDir(agentGroup);
 
   // Session folder at /workspace (contains inbound.db, outbound.db, outbox/, .claude/)
   mounts.push({ hostPath: sessDir, containerPath: '/workspace', readonly: false });
@@ -375,7 +376,9 @@ function buildMounts(
   // See packages/nanoclaw/src/shared-groups.ts.
   const sharedGroups = resolveSharedGroups(agentGroup);
   for (const shared of sharedGroups) {
-    const sharedDir = path.resolve(GROUPS_DIR, shared.folder);
+    // Falls back to flat <groupsDir>/<folder> when shared.id is absent
+    // or the resolver returns null — matches standalone NanoClaw layout.
+    const sharedDir = resolveGroupDir({ id: shared.id ?? '', folder: shared.folder });
     const memoryPath = path.join(sharedDir, 'memory');
     if (fs.existsSync(memoryPath)) {
       mounts.push({
@@ -493,7 +496,7 @@ function ensureRuntimeFields(
     dirty = true;
   }
   if (dirty) {
-    writeContainerConfig(agentGroup.folder, containerConfig);
+    writeContainerConfig(agentGroup, containerConfig);
   }
 }
 
@@ -598,7 +601,7 @@ export async function buildAgentGroupImage(agentGroupId: string): Promise<void> 
   const agentGroup = getAgentGroup(agentGroupId);
   if (!agentGroup) throw new Error('Agent group not found');
 
-  const containerConfig = readContainerConfig(agentGroup.folder);
+  const containerConfig = readContainerConfig(agentGroup);
   const aptPackages = containerConfig.packages.apt;
   const npmPackages = containerConfig.packages.npm;
 
@@ -639,7 +642,7 @@ export async function buildAgentGroupImage(agentGroupId: string): Promise<void> 
 
   // Store the image tag in groups/<folder>/container.json
   containerConfig.imageTag = imageTag;
-  writeContainerConfig(agentGroup.folder, containerConfig);
+  writeContainerConfig(agentGroup, containerConfig);
 
   log.info('Per-agent-group image built', { agentGroupId, imageTag });
 }
