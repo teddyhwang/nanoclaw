@@ -557,6 +557,18 @@ async function buildContainerArgs(
   if (!onecliApplied) {
     throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
   }
+  // OneCLI injects ANTHROPIC_API_KEY=placeholder, which the Claude SDK turns
+  // into an `x-api-key` header. Anthropic prefers `x-api-key` over
+  // `Authorization` when both are present, so the proxy's Bearer-token
+  // injection (required for OAuth tokens, sk-ant-oat01-...) is ignored and
+  // the literal "placeholder" reaches Anthropic, which rejects it with
+  // `invalid x-api-key`. Swap to ANTHROPIC_AUTH_TOKEN so the SDK emits
+  // `Authorization: Bearer placeholder` instead, which the proxy replaces.
+  for (let i = 0; i < args.length - 1; i++) {
+    if (args[i] === '-e' && args[i + 1] === 'ANTHROPIC_API_KEY=placeholder') {
+      args[i + 1] = 'ANTHROPIC_AUTH_TOKEN=placeholder';
+    }
+  }
   log.info('OneCLI gateway applied', { containerName });
 
   // Host gateway
