@@ -117,6 +117,13 @@ export interface OutboundMessage {
   content: unknown; // parsed JSON from messages_out
   files?: OutboundFile[]; // file attachments from the session outbox
   inReplyTo?: string | null; // platform message id we're replying to (for native reply chains)
+  /**
+   * Per-session assistant name resolved from the agent group's
+   * container.json. Adapters that prefix outbound text (WhatsApp
+   * shared-number) substitute this for the host-wide ASSISTANT_NAME.
+   * Optional — adapters that don't prefix can ignore it.
+   */
+  assistantName?: string;
 }
 
 /** Discovered conversation info (from syncConversations). */

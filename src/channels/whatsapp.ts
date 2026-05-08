@@ -115,7 +115,17 @@ function openSessionDbs(sessionDir: string): { inbound: Db; outbound: Db } | nul
     return null;
   }
 }
-function getMessageContentLookup(): ((id: string, jid: string) => string | undefined) | null {
+interface SentLookupResult {
+  text: string;
+  /**
+   * The assistant name that was used as a prefix at original-send time.
+   * Resolved from the owning agent group's container.json so retry-encrypt
+   * matches the original ciphertext even when the host-wide
+   * ASSISTANT_NAME has changed.
+   */
+  assistantName?: string;
+}
+function getMessageContentLookup(): ((id: string, jid: string) => SentLookupResult | undefined) | null {
   return (platformMessageId, chatJid) => {
     for (const sessionDir of getSessionDirs()) {
       const dbs = openSessionDbs(sessionDir);
@@ -129,14 +139,32 @@ function getMessageContentLookup(): ((id: string, jid: string) => string | undef
           .prepare('SELECT content FROM messages_out WHERE id = ? AND platform_id = ? LIMIT 1')
           .get(deliveredRow.message_out_id, chatJid) as { content: string } | undefined;
         if (!outRow?.content) continue;
+        // sessionDir layout: <dataDir>/v2-sessions/<agent_group_id>/<session_id>
+        // Resolve the per-group assistantName via the host's normal lookup
+        // path: agent_groups DB row → on-disk container.json. Imported
+        // lazily here because the lookup is exercised only on the rare
+        // retry path.
+        const agentGroupId = path.basename(path.dirname(sessionDir));
+        let assistantName: string | undefined;
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { getAgentGroup } = require('../db/agent-groups.js') as typeof import('../db/agent-groups.js');
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { readContainerConfig } = require('../container-config.js') as typeof import('../container-config.js');
+          const ag = getAgentGroup(agentGroupId);
+          if (ag) assistantName = readContainerConfig(ag).assistantName;
+        } catch {
+          // host DB / container-config unavailable in this context —
+          // caller will fall back to env-level ASSISTANT_NAME.
+        }
+        let text: string;
         try {
           const parsed = JSON.parse(outRow.content) as { text?: string; markdown?: string };
-          const text = parsed.markdown || parsed.text;
-          if (text) return text;
+          text = parsed.markdown || parsed.text || outRow.content;
         } catch {
-          // content not JSON — return raw
-          return outRow.content;
+          text = outRow.content;
         }
+        return { text, assistantName };
       } catch {
         continue;
       }
@@ -470,10 +498,11 @@ registerChannelAdapter('whatsapp', {
           // peers will reject the retry.
           const lookup = getMessageContentLookup();
           if (lookup && key.id && key.remoteJid) {
-            const rawText = lookup(key.id, key.remoteJid);
-            if (rawText) {
-              const formatted = formatWhatsApp(rawText);
-              const prefixed = ASSISTANT_HAS_OWN_NUMBER ? formatted : `${ASSISTANT_NAME}: ${formatted}`;
+            const hit = lookup(key.id, key.remoteJid);
+            if (hit) {
+              const formatted = formatWhatsApp(hit.text);
+              const name = hit.assistantName ?? ASSISTANT_NAME;
+              const prefixed = ASSISTANT_HAS_OWN_NUMBER ? formatted : `${name}: ${formatted}`;
               return proto.Message.fromObject({ conversation: prefixed });
             }
           }
@@ -809,7 +838,8 @@ registerChannelAdapter('whatsapp', {
 
         if (text) {
           const formatted = formatWhatsApp(text);
-          const prefixed = ASSISTANT_HAS_OWN_NUMBER ? formatted : `${ASSISTANT_NAME}: ${formatted}`;
+          const name = message.assistantName ?? ASSISTANT_NAME;
+          const prefixed = ASSISTANT_HAS_OWN_NUMBER ? formatted : `${name}: ${formatted}`;
           return sendRawMessage(platformId, prefixed);
         }
       },

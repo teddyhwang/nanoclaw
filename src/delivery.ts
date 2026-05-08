@@ -11,6 +11,7 @@ import type Database from 'better-sqlite3';
 
 import { getRunningSessions, getActiveSessions, createPendingQuestion } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
+import { readContainerConfig } from './container-config.js';
 import { getDb, hasTable } from './db/connection.js';
 import { getMessagingGroupByPlatform, getMessagingGroupAgentByPair } from './db/messaging-groups.js';
 import {
@@ -59,6 +60,13 @@ export interface ChannelDeliveryAdapter {
     content: string,
     files?: OutboundFile[],
     inReplyTo?: string | null,
+    /**
+     * Per-session assistant name from the agent group's container.json.
+     * Adapters that prefix outbound text (WhatsApp shared-number) use this
+     * over the host-wide `ASSISTANT_NAME` env so each group can brand
+     * itself independently. Optional — undefined falls back to the env.
+     */
+    assistantName?: string,
   ): Promise<string | undefined>;
   setTyping?(channelType: string, platformId: string, threadId: string | null): Promise<void>;
 }
@@ -385,6 +393,20 @@ async function deliverMessage(
     inReplyTo = null;
   }
 
+  // Resolve per-session assistant brand from the agent group's
+  // container.json. Adapters that prefix outbound text (WhatsApp
+  // shared-number) use this in place of the host-wide ASSISTANT_NAME so
+  // each group brands itself independently.
+  let assistantName: string | undefined;
+  try {
+    const agentGroup = getAgentGroup(session.agent_group_id);
+    if (agentGroup) {
+      assistantName = readContainerConfig(agentGroup).assistantName;
+    }
+  } catch (err) {
+    log.debug('Failed to resolve per-session assistantName', { err, sessionId: session.id });
+  }
+
   const platformMsgId = await deliveryAdapter.deliver(
     msg.channel_type,
     msg.platform_id,
@@ -393,6 +415,7 @@ async function deliverMessage(
     msg.content,
     files,
     inReplyTo,
+    assistantName,
   );
   log.info('Message delivered', {
     id: msg.id,
