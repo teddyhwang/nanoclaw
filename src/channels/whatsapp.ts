@@ -542,12 +542,25 @@ registerChannelAdapter('whatsapp', {
             const sender = msg.key.participant || msg.key.remoteJid || '';
             const senderName = msg.pushName || sender.split('@')[0];
             const fromMe = msg.key.fromMe || false;
-            // Filter bot's own messages to prevent echo loops.
-            // fromMe is always true for messages sent from this linked device,
-            // regardless of ASSISTANT_HAS_OWN_NUMBER mode.
-            if (fromMe) continue;
+            // fromMe semantics differ between deployment modes:
+            //
+            //   - ASSISTANT_HAS_OWN_NUMBER=true (Optimus has its own
+            //     WhatsApp number): fromMe means the bot itself sent it.
+            //     Drop to prevent echo loop.
+            //   - ASSISTANT_HAS_OWN_NUMBER=false (shared-number, the
+            //     assistant runs on the human's linked device):
+            //     EVERY message the human sends is fromMe because
+            //     Baileys sees the link from the human's phone. We
+            //     can't drop, or the bot never hears its operator.
+            //     The bot's own outbound messages get a sentinel prefix
+            //     (`${ASSISTANT_NAME}:` or 🤖) which `isBotMessage`
+            //     below catches; downstream router uses that flag to
+            //     prevent echoes.
+            if (fromMe && ASSISTANT_HAS_OWN_NUMBER) continue;
 
-            const isBotMessage = ASSISTANT_HAS_OWN_NUMBER ? false : content.startsWith(`${ASSISTANT_NAME}:`);
+            const isBotMessage = ASSISTANT_HAS_OWN_NUMBER
+              ? fromMe
+              : content.startsWith(`${ASSISTANT_NAME}:`) || content.startsWith('🤖');
 
             // Check if this reply answers a pending question via slash command
             const pending = pendingQuestions.get(chatJid);
