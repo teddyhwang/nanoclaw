@@ -58,6 +58,7 @@ export interface ChannelDeliveryAdapter {
     kind: string,
     content: string,
     files?: OutboundFile[],
+    inReplyTo?: string | null,
   ): Promise<string | undefined>;
   setTyping?(channelType: string, platformId: string, threadId: string | null): Promise<void>;
 }
@@ -253,6 +254,7 @@ async function deliverMessage(
     channel_type: string | null;
     thread_id: string | null;
     content: string;
+    in_reply_to: string | null;
   },
   session: Session,
   inDb: Database.Database,
@@ -373,6 +375,7 @@ async function deliverMessage(
     msg.kind,
     msg.content,
     files,
+    msg.in_reply_to,
   );
   log.info('Message delivered', {
     id: msg.id,

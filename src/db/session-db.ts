@@ -239,6 +239,7 @@ export interface OutboundMessage {
   channel_type: string | null;
   thread_id: string | null;
   content: string;
+  in_reply_to: string | null;
 }
 
 export function getDueOutboundMessages(db: Database.Database): OutboundMessage[] {

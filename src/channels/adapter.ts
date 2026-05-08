@@ -116,6 +116,7 @@ export interface OutboundMessage {
   kind: string;
   content: unknown; // parsed JSON from messages_out
   files?: OutboundFile[]; // file attachments from the session outbox
+  inReplyTo?: string | null; // platform message id we're replying to (for native reply chains)
 }
 
 /** Discovered conversation info (from syncConversations). */

@@ -363,6 +363,13 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // "discord:guildId:channelId") — use it directly as the thread ID
       const tid = threadId ?? platformId;
       const content = message.content as Record<string, unknown>;
+      // inReplyTo carries the inbound message id we're replying to. Router
+      // namespaces messages_in.id as `<platform-msg-id>:<agent-group-id>`
+      // (see router.messageIdForAgent) — strip that suffix so the adapter
+      // gets the raw platform message id Discord/etc. expect for native
+      // reply chains. Empty/null → no reply pill.
+      const replyToRaw = message.inReplyTo ?? null;
+      const replyTo = replyToRaw ? replyToRaw.split(':')[0] || null : null;
 
       if (content.operation === 'edit' && content.messageId) {
         await adapter.editMessage(tid, content.messageId as string, {
@@ -438,10 +445,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         for (let i = 0; i < chunks.length; i++) {
           const chunk = chunks[i];
           const attachFiles = i === 0 && fileUploads && fileUploads.length > 0;
-          const result = await adapter.postMessage(
-            tid,
-            attachFiles ? { markdown: chunk, files: fileUploads } : { markdown: chunk },
-          );
+          // Reply pill goes on the first chunk only — subsequent chunks are
+          // contiguous follow-ups, not separate replies to the same parent.
+          const replyForChunk = i === 0 ? replyTo : null;
+          const post = attachFiles ? { markdown: chunk, files: fileUploads } : { markdown: chunk };
+          if (replyForChunk) (post as Record<string, unknown>).replyTo = replyForChunk;
+          const result = await adapter.postMessage(tid, post);
           if (i === 0) firstId = result?.id;
         }
         return firstId;
@@ -451,7 +460,9 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           data: f.data,
           filename: f.filename,
         }));
-        const result = await adapter.postMessage(tid, { markdown: '', files: fileUploads });
+        const post: Record<string, unknown> = { markdown: '', files: fileUploads };
+        if (replyTo) post.replyTo = replyTo;
+        const result = await adapter.postMessage(tid, post as never);
         return result?.id;
       }
     },
