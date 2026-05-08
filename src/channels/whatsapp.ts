@@ -1,8 +1,8 @@
 /**
- * WhatsApp channel adapter (v2) — native Baileys v6 implementation.
+ * WhatsApp channel adapter (v2) — native Baileys v7 implementation.
  *
  * Implements ChannelAdapter directly (no Chat SDK bridge) using
- * @whiskeysockets/baileys v6 (stable). Ports proven v1 infrastructure:
+ * @whiskeysockets/baileys v7. Ports proven v1 infrastructure:
  * getMessage fallback, outgoing queue, group metadata cache, LID mapping,
  * reconnection with backoff.
  *
@@ -41,26 +41,10 @@ import { registerChannelAdapter } from './channel-registry.js';
 import { normalizeOptions, type NormalizedOption } from './ask-question.js';
 import type { ChannelAdapter, ChannelSetup, ConversationInfo, InboundMessage, OutboundMessage } from './adapter.js';
 
-// Baileys v6 bug: getPlatformId sends charCode (49) instead of enum value (1).
-// Fixed in Baileys 7.x but not backported. Without this, pairing codes fail with
-// "couldn't link device" because WhatsApp receives an invalid platform ID.
-// Must use createRequire — ESM `import *` creates a read-only namespace.
 // proto is not available as a named ESM export — use createRequire (same as v1)
 import { createRequire } from 'module';
 const _require = createRequire(import.meta.url);
 const { proto } = _require('@whiskeysockets/baileys') as { proto: any };
-try {
-  const _generics = _require('@whiskeysockets/baileys/lib/Utils/generics') as Record<string, unknown>;
-  _generics.getPlatformId = (browser: string): string => {
-    const platformType =
-      proto.DeviceProps.PlatformType[browser.toUpperCase() as keyof typeof proto.DeviceProps.PlatformType];
-    return platformType ? platformType.toString() : '1';
-  };
-} catch {
-  // If CJS require fails (Node version mismatch), pairing codes may not work
-  // but QR auth will still function fine.
-  log.warn('Could not patch getPlatformId — pairing code auth may fail');
-}
 
 const baileysLogger = pino({ level: 'silent' });
 
@@ -108,9 +92,9 @@ function getMessageContentLookup(): ((id: string, jid: string) => string | undef
   if (!db) return null;
   return (id, jid) => {
     try {
-      const row = db
-        .prepare('SELECT content FROM messages WHERE id = ? AND chat_jid = ? LIMIT 1')
-        .get(id, jid) as { content: string } | undefined;
+      const row = db.prepare('SELECT content FROM messages WHERE id = ? AND chat_jid = ? LIMIT 1').get(id, jid) as
+        | { content: string }
+        | undefined;
       return row?.content;
     } catch {
       return undefined;
