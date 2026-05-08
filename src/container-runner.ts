@@ -268,7 +268,15 @@ function buildMounts(
   containerConfig: import('./container-config.js').ContainerConfig,
   providerContribution: ProviderContainerContribution,
 ): VolumeMount[] {
-  const projectRoot = process.cwd();
+  // NANOCLAW_PROJECT_ROOT lets embedded hosts (e.g. Optimus) declare the
+  // checkout root explicitly. Without it we fall back to process.cwd(),
+  // which is the standalone-NanoClaw assumption — but hosts that chdir
+  // away (Optimus chdirs to dataDir so channel adapters read the right
+  // .env) would otherwise resolve mount sources under the data dir and
+  // fail with "Module not found /app/src/index.ts".
+  const projectRoot = process.env.NANOCLAW_PROJECT_ROOT
+    ? path.resolve(process.env.NANOCLAW_PROJECT_ROOT)
+    : process.cwd();
 
   // Per-group filesystem state lives forever after first creation. Init is
   // idempotent: it only writes paths that don't already exist, so this call
@@ -324,7 +332,7 @@ function buildMounts(
 
   // Shared CLAUDE.md — read-only, imported by the composed entry point via
   // the `.claude-shared.md` symlink inside the group dir.
-  const sharedClaudeMd = path.join(process.cwd(), 'container', 'CLAUDE.md');
+  const sharedClaudeMd = path.join(projectRoot, 'container', 'CLAUDE.md');
   if (fs.existsSync(sharedClaudeMd)) {
     mounts.push({ hostPath: sharedClaudeMd, containerPath: '/app/CLAUDE.md', readonly: true });
   }
@@ -409,7 +417,9 @@ function syncSkillSymlinks(claudeDir: string, containerConfig: import('./contain
   }
 
   // Determine desired skill set
-  const projectRoot = process.cwd();
+  const projectRoot = process.env.NANOCLAW_PROJECT_ROOT
+    ? path.resolve(process.env.NANOCLAW_PROJECT_ROOT)
+    : process.cwd();
   const sharedSkillsDir = path.join(projectRoot, 'container', 'skills');
   let desired: string[];
   if (containerConfig.skills === 'all') {
