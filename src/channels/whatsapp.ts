@@ -427,6 +427,9 @@ registerChannelAdapter('whatsapp', {
         printQRInTerminal: false,
         logger: baileysLogger,
         browser: Browsers.macOS('Chrome'),
+        defaultQueryTimeoutMs: 60_000,
+        connectTimeoutMs: 20_000,
+        keepAliveIntervalMs: 30_000,
         cachedGroupMetadata: async (jid: string) => getNormalizedGroupMetadata(jid),
         getMessage: async (key: WAMessageKey) => {
           // Check in-memory cache first (recently sent messages)
@@ -558,12 +561,6 @@ registerChannelAdapter('whatsapp', {
       });
 
       sock.ev.on('creds.update', saveCreds);
-
-      // Phone number sharing events — update LID mapping
-      sock.ev.on('chats.phoneNumberShare', ({ lid, jid }) => {
-        const lidUser = lid?.split('@')[0].split(':')[0];
-        if (lidUser && jid) setLidPhoneMapping(lidUser, jid);
-      });
 
       // Inbound messages
       sock.ev.on('messages.upsert', async ({ messages }) => {
