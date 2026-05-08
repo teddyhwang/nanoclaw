@@ -434,9 +434,7 @@ function syncSkillSymlinks(claudeDir: string, containerConfig: import('./contain
   const containerSourceDir = process.env.NANOCLAW_CONTAINER_SOURCE_DIR
     ? path.resolve(process.env.NANOCLAW_CONTAINER_SOURCE_DIR)
     : path.join(
-        process.env.NANOCLAW_PROJECT_ROOT
-          ? path.resolve(process.env.NANOCLAW_PROJECT_ROOT)
-          : process.cwd(),
+        process.env.NANOCLAW_PROJECT_ROOT ? path.resolve(process.env.NANOCLAW_PROJECT_ROOT) : process.cwd(),
         'container',
       );
   const sharedSkillsDir = path.join(containerSourceDir, 'skills');
@@ -507,10 +505,10 @@ function ensureRuntimeFields(
     containerConfig.groupName = agentGroup.name;
     dirty = true;
   }
-  if (containerConfig.assistantName !== agentGroup.name) {
-    containerConfig.assistantName = agentGroup.name;
-    dirty = true;
-  }
+  // assistantName is operator-controlled — do NOT auto-overwrite from
+  // agentGroup.name. The on-disk container.json value is authoritative so
+  // operators can keep a consistent brand (e.g. "Optimus") across groups
+  // even when each group has its own descriptive name.
   if (dirty) {
     writeContainerConfig(agentGroup, containerConfig);
   }
