@@ -34,6 +34,7 @@ import type { GroupMetadata, WAMessageKey, WAMessage, WASocket } from '@whiskeys
 
 import { isSafeAttachmentName } from '../attachment-safety.js';
 import { ASSISTANT_HAS_OWN_NUMBER, ASSISTANT_NAME, DATA_DIR } from '../config.js';
+import { getEnginePaths } from '../engine/paths.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 import { registerChannelAdapter } from './channel-registry.js';
@@ -63,7 +64,17 @@ try {
 
 const baileysLogger = pino({ level: 'silent' });
 
-const AUTH_DIR = path.join(process.cwd(), 'store', 'auth');
+/**
+ * Resolve the WhatsApp auth dir. v2 hosts route this under the install's
+ * data dir (`<dataDir>/whatsapp/auth`) so each install has its own
+ * Baileys credential store, not a process-cwd-relative `store/auth`
+ * symlink shared with v1. `getEnginePaths()` returns sensible defaults
+ * when no host has called `setEnginePaths`, so this stays safe in
+ * standalone runs too.
+ */
+function resolveAuthDir(): string {
+  return path.join(getEnginePaths().dataDir, 'whatsapp', 'auth');
+}
 const GROUP_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24h
 const GROUP_METADATA_CACHE_TTL_MS = 60_000; // 1 min for outbound sends
 const SENT_MESSAGE_CACHE_MAX = 256;
@@ -150,7 +161,7 @@ registerChannelAdapter('whatsapp', {
   factory: () => {
     const env = readEnvFile(['WHATSAPP_PHONE_NUMBER', 'WHATSAPP_ENABLED']);
     const phoneNumber = env.WHATSAPP_PHONE_NUMBER;
-    const authDir = AUTH_DIR;
+    const authDir = resolveAuthDir();
 
     // Skip if no existing auth, no phone number for pairing, and not explicitly enabled (QR mode)
     const hasAuth = fs.existsSync(path.join(authDir, 'creds.json'));
