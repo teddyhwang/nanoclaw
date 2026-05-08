@@ -77,3 +77,14 @@ export function setContinuation(providerName: string, id: string): void {
 export function clearContinuation(providerName: string): void {
   deleteValue(continuationKey(providerName));
 }
+
+/**
+ * Clear every provider's continuation row at once. Used by the
+ * `rotate_session` MCP tool to wipe the conversation handle so the
+ * next turn starts a fresh provider conversation across all providers,
+ * not just the currently-active one.
+ */
+export function clearAllContinuations(): number {
+  const result = getOutboundDb().prepare("DELETE FROM session_state WHERE key LIKE 'continuation:%'").run();
+  return result.changes;
+}

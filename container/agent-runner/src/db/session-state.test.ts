@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, test } from 'bun:test';
 
 import { getOutboundDb, initTestSessionDb } from './connection.js';
 import {
+  clearAllContinuations,
   clearContinuation,
   getContinuation,
   migrateLegacyContinuation,
@@ -46,6 +47,28 @@ describe('session-state — per-provider continuations', () => {
 
   test('unknown provider returns undefined', () => {
     expect(getContinuation('never-used')).toBeUndefined();
+  });
+
+  test('clearAllContinuations wipes every provider, leaves other state', () => {
+    setContinuation('claude', 'c-1');
+    setContinuation('codex', 'x-1');
+    getOutboundDb()
+      .prepare('INSERT INTO session_state (key, value, updated_at) VALUES (?, ?, ?)')
+      .run('last_user_seen', '2026-05-07', new Date().toISOString());
+
+    const cleared = clearAllContinuations();
+
+    expect(cleared).toBe(2);
+    expect(getContinuation('claude')).toBeUndefined();
+    expect(getContinuation('codex')).toBeUndefined();
+    const remaining = getOutboundDb()
+      .prepare('SELECT key FROM session_state ORDER BY key')
+      .all() as { key: string }[];
+    expect(remaining.map((r) => r.key)).toEqual(['last_user_seen']);
+  });
+
+  test('clearAllContinuations is a no-op on an empty session', () => {
+    expect(clearAllContinuations()).toBe(0);
   });
 });
 
