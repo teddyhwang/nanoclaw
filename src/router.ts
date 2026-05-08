@@ -169,6 +169,14 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   }
 
   const isMention = event.message.isMention === true;
+  // Loopback gate. Shared-number platforms (and any adapter that can't
+  // distinguish "bot's own message bouncing back" at the wire level) flag
+  // self-replies via `isBotMessage`. The router stores the message so the
+  // agent has self-context, but skips engagement so the bot does not reply
+  // to itself in a tight loop — see bug investigated 2026-05-08 where
+  // shared-number WhatsApp DMs spammed the user when the agent's own
+  // outbound came back as inbound.
+  const isBotLoopback = event.message.isBotMessage === true;
 
   // 1. Combined lookup: messaging_group row + count of wired agents in a
   //    single query. Cheap short-circuit for the common "unwired channel"
@@ -182,7 +190,9 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     // No messaging_groups row. Auto-create only when the message warrants
     // attention (the bot was addressed — @mention or DM). Plain chatter in
     // channels we merely sit in stays silent — no row, no DB writes.
-    if (!isMention) return;
+    // Loopback also stays silent: a bot self-reply on an unwired channel
+    // shouldn't spawn a row.
+    if (!isMention || isBotLoopback) return;
     const mgId = `mg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     mg = {
       id: mgId,
@@ -207,9 +217,10 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   }
 
   // 1b. No wirings — either silent drop (plain chatter / denied channel) or
-  //     escalate to owner for channel-registration approval.
+  //     escalate to owner for channel-registration approval. Loopback never
+  //     escalates — the bot's own reply isn't a registration request.
   if (agentCount === 0) {
-    if (!isMention) return;
+    if (!isMention || isBotLoopback) return;
     if (mg.denied_at) {
       log.debug('Message dropped — channel was denied by owner', {
         messagingGroupId: mg.id,
@@ -280,7 +291,10 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     const agentGroup = getAgentGroup(agent.agent_group_id);
     if (!agentGroup) continue;
 
-    const engages = evaluateEngage(agent, messageText, isMention, mg, event.threadId);
+    // Loopback short-circuit: bot's own message bouncing back never engages,
+    // regardless of the wiring's engage_mode. The accumulate branch below
+    // still stores the message so the agent retains self-context.
+    const engages = isBotLoopback ? false : evaluateEngage(agent, messageText, isMention, mg, event.threadId);
 
     const accessOk = engages && (!accessGate || accessGate(event, userId, mg, agent.agent_group_id).allowed);
     const scopeOk = engages && (!senderScopeGate || senderScopeGate(event, userId, mg, agent).allowed);

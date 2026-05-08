@@ -462,6 +462,58 @@ describe('router', () => {
     expect(getMessagingGroupByPlatform('slack', 'C-MENTIONED')).toBeDefined();
   });
 
+  it('does not engage when the inbound is a bot loopback (shared-number self-reply)', async () => {
+    // Shared-number WhatsApp loops the bot's own outbound back as inbound.
+    // The router must store the message (so the agent has self-context next
+    // turn) but skip engagement — without this gate, the bot replies to its
+    // own reply and spins until the API rate-limits or auth fails (see
+    // 2026-05-08 incident).
+    const { routeInbound } = await import('./router.js');
+    const { wakeContainer } = await import('./container-runner.js');
+    const wakeMock = wakeContainer as ReturnType<typeof vi.fn>;
+    wakeMock.mockClear();
+
+    await routeInbound({
+      channelType: 'discord',
+      platformId: 'chan-123',
+      threadId: null,
+      message: {
+        id: 'msg-loopback-1',
+        kind: 'chat',
+        content: JSON.stringify({ sender: 'Bot', text: 'Optimus: I am replying' }),
+        timestamp: now(),
+        isBotMessage: true,
+      },
+    });
+
+    // Container should NOT have been woken — engagement was skipped.
+    expect(wakeMock).not.toHaveBeenCalled();
+  });
+
+  it('skips auto-create when the unwired channel sees only a bot loopback', async () => {
+    // A bot self-reply on an unknown channel should never spawn a row. v2
+    // auto-creates messaging_groups on @mention; a loopback can carry the
+    // mention text trivially (the bot quoted itself), so the gate must
+    // include isBotMessage.
+    const { routeInbound } = await import('./router.js');
+    const { getMessagingGroupByPlatform } = await import('./db/messaging-groups.js');
+
+    await routeInbound({
+      channelType: 'slack',
+      platformId: 'C-LOOPBACK',
+      threadId: null,
+      message: {
+        id: 'msg-loopback-mg',
+        kind: 'chat',
+        content: JSON.stringify({ sender: 'Bot', text: '@bot self' }),
+        timestamp: now(),
+        isMention: true,
+        isBotMessage: true,
+      },
+    });
+    expect(getMessagingGroupByPlatform('slack', 'C-LOOPBACK')).toBeUndefined();
+  });
+
   it('should route multiple messages to the same session', async () => {
     const { routeInbound } = await import('./router.js');
 

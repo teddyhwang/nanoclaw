@@ -595,6 +595,12 @@ registerChannelAdapter('whatsapp', {
                 chatJid,
               },
               timestamp,
+              // Hoist isBotMessage to the top-level InboundMessage so the
+              // router can gate engagement without parsing content. Same
+              // value as the nested copy — kept in both places because
+              // existing readers expect content.isBotMessage.
+              isBotMessage,
+              isGroup,
             };
 
             // WhatsApp doesn't use threads — threadId is null

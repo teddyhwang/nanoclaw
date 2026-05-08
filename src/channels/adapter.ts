@@ -58,6 +58,17 @@ export interface InboundEvent {
     isMention?: boolean;
     /** True when the source is a group/channel thread, false for DMs. */
     isGroup?: boolean;
+    /**
+     * True when this inbound is the bot's own outbound message bouncing
+     * back from the platform (shared-number WhatsApp, fromMe loopback,
+     * etc.). The router stores the message so the agent has self-context
+     * but skips engagement evaluation — without this gate the bot's reply
+     * triggers itself in a tight loop.
+     *
+     * Adapters that can't observe loopback (or whose platform doesn't
+     * loop bot outputs back) leave this undefined.
+     */
+    isBotMessage?: boolean;
   };
   replyTo?: DeliveryAddress;
 }
@@ -85,6 +96,13 @@ export interface InboundMessage {
   isMention?: boolean;
   /** True when the source is a group/channel thread, false for DMs. */
   isGroup?: boolean;
+  /**
+   * True when this inbound is the bot's own outbound bouncing back. See
+   * `InboundEvent.message.isBotMessage` for the full contract. The router
+   * stores the message but skips engagement so the bot does not loop on
+   * its own replies.
+   */
+  isBotMessage?: boolean;
 }
 
 /** A file attachment to deliver alongside a message. */
