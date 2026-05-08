@@ -309,9 +309,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       !isBotLoopback && replyToMessageId
         ? isReplyToOurBot(agent.agent_group_id, mg.id, event.threadId, replyToMessageId)
         : false;
-    const engages = isBotLoopback
-      ? false
-      : evaluateEngage(agent, messageText, isMention, isReplyToBot, mg, event.threadId);
+    const engages = isBotLoopback ? false : evaluateEngage(agent, messageText, isMention, isReplyToBot);
 
     const accessOk = engages && (!accessGate || accessGate(event, userId, mg, agent.agent_group_id).allowed);
     const scopeOk = engages && (!senderScopeGate || senderScopeGate(event, userId, mg, agent).allowed);
@@ -394,11 +392,18 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
  *                      user wants to disambiguate between multiple agents
  *                      wired to one chat, use engage_mode='pattern' with
  *                      the disambiguator as the regex.
- *   'mention-sticky' — platform mention OR an active per-thread session
- *                      already exists for this (agent, mg, thread). The
- *                      session existence IS our subscription state; once
- *                      a thread has engaged us once, follow-ups arrive
- *                      with no mention and should still fire.
+ *   'mention-sticky' — platform mention OR reply-to-bot, same trigger set
+ *                      as 'mention'. Stickiness is delegated to the SDK
+ *                      subscription path (onSubscribedMessage), which on
+ *                      threaded platforms keeps follow-ups flowing through
+ *                      isMention=true. We deliberately do NOT fall back to
+ *                      session-existence: on flat-reply platforms (e.g.
+ *                      Discord, where we use native reply pills instead of
+ *                      Discord threads) there is no SDK subscription to
+ *                      gate against, and "session exists ⇒ engage" causes
+ *                      every message in the channel to wake the agent.
+ *                      Reply-to-bot (a408237) is the v1-parity trigger
+ *                      that lets a thread stay sticky without a re-mention.
  */
 /**
  * Check whether `platformMessageId` was a prior bot outbound for the active
@@ -423,14 +428,7 @@ function isReplyToOurBot(
   }
 }
 
-function evaluateEngage(
-  agent: MessagingGroupAgent,
-  text: string,
-  isMention: boolean,
-  isReplyToBot: boolean,
-  mg: MessagingGroup,
-  threadId: string | null,
-): boolean {
+function evaluateEngage(agent: MessagingGroupAgent, text: string, isMention: boolean, isReplyToBot: boolean): boolean {
   switch (agent.engage_mode) {
     case 'pattern': {
       const pat = agent.engage_pattern ?? '.';
@@ -448,14 +446,12 @@ function evaluateEngage(
       // adapter populates the parent message id; isReplyToOurBot confirms
       // the parent was one of our deliveries before letting it engage.
       return isMention || isReplyToBot;
-    case 'mention-sticky': {
-      if (isMention || isReplyToBot) return true;
-      // Sticky follow-up: session already exists for this (agent, mg, thread)
-      // — the thread was activated before, keep firing.
-      if (mg.is_group === 0) return false; // DMs never use mention-sticky sensibly
-      const existing = findSessionForAgent(agent.agent_group_id, mg.id, threadId);
-      return existing !== undefined;
-    }
+    case 'mention-sticky':
+      // v1 `requires_trigger` parity. Same set as 'mention' — the
+      // host-side session-existence fallback was removed because on
+      // platforms without real SDK threads (Discord with native reply
+      // pills) it engaged on every message in the channel.
+      return isMention || isReplyToBot;
     default:
       return false;
   }
