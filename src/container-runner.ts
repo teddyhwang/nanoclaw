@@ -334,13 +334,19 @@ function buildMounts(
   mounts.push({ hostPath: claudeDir, containerPath: '/home/node/.claude', readonly: false });
 
   // Shared agent-runner source — read-only, same code for all groups.
-  const agentRunnerSrc = path.join(projectRoot, 'container', 'agent-runner', 'src');
+  // Resolve symlinks: Docker Desktop on macOS does NOT follow host-side
+  // symlinks when bind-mounting (the symlink itself is passed to the VM,
+  // which sees nothing), so embedded forks like Optimus that point
+  // `<root>/container -> packages/<sub>/container` would mount an empty
+  // dir without realpath. Standalone NanoClaw is unaffected since
+  // `<root>/container` is already a real dir.
+  const agentRunnerSrc = fs.realpathSync(path.join(projectRoot, 'container', 'agent-runner', 'src'));
   mounts.push({ hostPath: agentRunnerSrc, containerPath: '/app/src', readonly: true });
 
   // Shared skills — read-only, symlinks in .claude-shared/skills/ point here.
   const skillsSrc = path.join(projectRoot, 'container', 'skills');
   if (fs.existsSync(skillsSrc)) {
-    mounts.push({ hostPath: skillsSrc, containerPath: '/app/skills', readonly: true });
+    mounts.push({ hostPath: fs.realpathSync(skillsSrc), containerPath: '/app/skills', readonly: true });
   }
 
   // Additional mounts from container config
