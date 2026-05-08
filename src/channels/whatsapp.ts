@@ -75,6 +75,48 @@ const baileysLogger = pino({ level: 'silent' });
 function resolveAuthDir(): string {
   return path.join(getEnginePaths().dataDir, 'whatsapp', 'auth');
 }
+
+/**
+ * Resolve a message-content lookup db. Optimus (and other v2 hosts that
+ * archive every WhatsApp message host-side) write to
+ * `<dataDir>/messages.db` with a `messages(id, chat_jid, content)` table.
+ * Returning a getter lets `getMessage` recover content for Baileys'
+ * encrypt-retry path — without this fallback, peers see indefinite
+ * "Waiting for this message" prompts when WhatsApp asks us to re-send a
+ * message whose proto we no longer hold in memory. Lazy-open + cache so
+ * every retry doesn't reopen the file.
+ */
+let _messagesDb: import('better-sqlite3').Database | null | undefined;
+function getMessageContentLookup(): ((id: string, jid: string) => string | undefined) | null {
+  if (_messagesDb === null) return null; // probed and absent
+  if (_messagesDb === undefined) {
+    const dbPath = path.join(getEnginePaths().dataDir, 'messages.db');
+    if (!fs.existsSync(dbPath)) {
+      _messagesDb = null;
+      return null;
+    }
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+      const Database = require('better-sqlite3');
+      _messagesDb = new Database(dbPath, { readonly: true, fileMustExist: true });
+    } catch {
+      _messagesDb = null;
+      return null;
+    }
+  }
+  const db = _messagesDb;
+  if (!db) return null;
+  return (id, jid) => {
+    try {
+      const row = db
+        .prepare('SELECT content FROM messages WHERE id = ? AND chat_jid = ? LIMIT 1')
+        .get(id, jid) as { content: string } | undefined;
+      return row?.content;
+    } catch {
+      return undefined;
+    }
+  };
+}
 const GROUP_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24h
 const GROUP_METADATA_CACHE_TTL_MS = 60_000; // 1 min for outbound sends
 const SENT_MESSAGE_CACHE_MAX = 256;
@@ -390,7 +432,19 @@ registerChannelAdapter('whatsapp', {
           // Check in-memory cache first (recently sent messages)
           const cached = sentMessageCache.get(key.id || '');
           if (cached) return cached;
-          // Return empty message to prevent indefinite "waiting for this message"
+          // Fall back to a host-archived message DB if available
+          // (`<projectRoot>/store/messages.db`). Without this, peers see
+          // "Waiting for this message" indefinitely when WhatsApp asks
+          // us to re-encrypt a message whose proto we no longer hold —
+          // worst with self-chats and other linked-device-only flows.
+          const lookup = getMessageContentLookup();
+          if (lookup && key.id && key.remoteJid) {
+            const content = lookup(key.id, key.remoteJid);
+            if (content) return proto.Message.fromObject({ conversation: content });
+          }
+          // Return empty message rather than undefined to prevent the
+          // protocol getting stuck — peers fall back to "this message
+          // can't be displayed" instead of an indefinite spinner.
           return proto.Message.fromObject({});
         },
       });
@@ -413,14 +467,20 @@ registerChannelAdapter('whatsapp', {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr && !phoneNumber) {
-          // QR code auth — print to terminal
+          // QR code auth — print to terminal AND write a scannable PNG to
+          // <authDir>/qr.png so the operator can open it from a file
+          // browser / image viewer if their terminal mangles the ANSI
+          // QR (logger word-wrap, narrow window, copy-paste artifacts).
           (async () => {
             try {
               const QRCode = await import('qrcode');
-              const qrText = await QRCode.toString(qr, { type: 'terminal' });
+              const qrText = await QRCode.toString(qr, { type: 'terminal', small: true });
               log.info('WhatsApp QR code — scan with WhatsApp > Linked Devices:\n' + qrText);
-            } catch {
-              log.info('WhatsApp QR code (raw)', { qr });
+              const pngPath = path.join(authDir, 'qr.png');
+              await QRCode.toFile(pngPath, qr, { width: 512, margin: 2 });
+              log.info('WhatsApp QR code also written as PNG', { path: pngPath });
+            } catch (err) {
+              log.info('WhatsApp QR code (raw)', { qr, err: String(err) });
             }
           })();
         }
