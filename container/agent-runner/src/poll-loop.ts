@@ -320,6 +320,26 @@ async function processQuery(
         let newMessages = pending.filter((m) => m.kind !== 'system');
         if (newMessages.length === 0) return;
 
+        // Accumulate gate (mirror of the cold-start gate above): if the
+        // follow-up batch contains only trigger=0 rows, do NOT push them
+        // into the active query. They're context-only (router stored them
+        // under ignored_message_policy='accumulate' because the engagement
+        // gate didn't fire) and pushing them as prompts makes the agent
+        // respond to messages that were never addressed to it. Leave them
+        // pending; the next trigger=1 message picks them up as context.
+        // Without this gate, a warm container that's mid-turn responds to
+        // every accumulate message in the channel — exactly the v1
+        // requires_trigger gap operators reported (2026-05-09 AI Friends
+        // "F" echo).
+        if (!newMessages.some((m) => m.trigger === 1)) {
+          // Don't markCompleted these — they need to ride along with the
+          // next real trigger so the agent sees them as context.
+          log(
+            `Skipping ${newMessages.length} accumulate-only follow-up(s) — leaving pending until next trigger`,
+          );
+          return;
+        }
+
         // Cross-sender deferral: in a shared-session group chat, a trigger from
         // a different sender than the one currently being answered must NOT
         // get pushed into the active query — the SDK folds both into one
