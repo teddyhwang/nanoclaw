@@ -10,11 +10,7 @@ import fs from 'fs';
 import path from 'path';
 import { describe, it, expect, afterEach } from 'vitest';
 
-import {
-  countDueMessages,
-  getInboundSourceSessionId,
-  migrateMessagesInTable,
-} from './session-db.js';
+import { countDueMessages, getInboundSourceSessionId, migrateMessagesInTable } from './session-db.js';
 import { INBOUND_SCHEMA } from './schema.js';
 
 const TEST_DIR = '/tmp/nanoclaw-session-db-test';
