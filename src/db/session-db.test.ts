@@ -10,7 +10,8 @@ import fs from 'fs';
 import path from 'path';
 import { describe, it, expect, afterEach } from 'vitest';
 
-import { migrateMessagesInTable } from './session-db.js';
+import { countDueMessages, migrateMessagesInTable } from './session-db.js';
+import { INBOUND_SCHEMA } from './schema.js';
 
 const TEST_DIR = '/tmp/nanoclaw-session-db-test';
 const DB_PATH = path.join(TEST_DIR, 'inbound.db');
@@ -53,6 +54,31 @@ describe('migrateMessagesInTable', () => {
       series_id: string;
     };
     expect(row.series_id).toBe('legacy-1');
+    db.close();
+  });
+});
+
+describe('countDueMessages', () => {
+  it('ignores pending system responses because the runner filters them out', () => {
+    const db = new Database(':memory:');
+    db.exec(INBOUND_SCHEMA);
+    db.prepare(
+      `INSERT INTO messages_in (id, seq, kind, timestamp, status, content, trigger)
+       VALUES (?, ?, ?, datetime('now'), 'pending', '{}', ?)`,
+    ).run('sys-1', 2, 'system', 1);
+    db.prepare(
+      `INSERT INTO messages_in (id, seq, kind, timestamp, status, content, trigger)
+       VALUES (?, ?, ?, datetime('now'), 'pending', '{}', ?)`,
+    ).run('ctx-1', 4, 'chat', 0);
+
+    expect(countDueMessages(db)).toBe(0);
+
+    db.prepare(
+      `INSERT INTO messages_in (id, seq, kind, timestamp, status, content, trigger)
+       VALUES (?, ?, ?, datetime('now'), 'pending', '{}', ?)`,
+    ).run('chat-1', 6, 'chat', 1);
+
+    expect(countDueMessages(db)).toBe(1);
     db.close();
   });
 });
