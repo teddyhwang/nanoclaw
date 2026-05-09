@@ -159,6 +159,19 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       continue;
     }
 
+    // Re-check the accumulate gate after script filtering. The gate at the
+    // top of the loop lets the batch through if ANY message has trigger=1,
+    // but a recurring task with wakeAgent=false (e.g. dream/maintenance
+    // scripts that decide nothing's worth waking for) is the only trigger=1
+    // row in the batch and gets stripped here. Without this re-check, the
+    // trigger=0 accumulate rows that rode along get processed as prompts —
+    // exactly the v1 requires_trigger gap operators reported (2026-05-09
+    // AI Friends "close.. just gotta suppress those embeds" echo).
+    if (!keep.some((m) => m.trigger === 1)) {
+      log(`Skipping ${keep.length} accumulate-only message(s) after script filter — leaving pending until next trigger`);
+      continue;
+    }
+
     // Format messages: passthrough commands get raw text (only if the
     // provider natively handles slash commands), others get XML.
     const prompt = formatMessagesWithCommands(keep, config.provider.supportsNativeSlashCommands);
@@ -385,6 +398,21 @@ async function processQuery(
         // MODULE-HOOK:scheduling-pre-task-followup:end
 
         if (keep.length === 0) return;
+
+        // Re-check the accumulate gate after script filtering. The gate
+        // above lets the batch through if ANY message has trigger=1, but
+        // a recurring task with wakeAgent=false (e.g. dream/maintenance
+        // scripts that decide nothing's worth waking for) is the only
+        // trigger=1 row in the batch and gets stripped here. Without this
+        // re-check, the trigger=0 accumulate rows that rode along get
+        // pushed to the agent as if they were prompts — defeating the
+        // requires_trigger contract.
+        if (!keep.some((m) => m.trigger === 1)) {
+          log(
+            `Skipping ${keep.length} accumulate-only follow-up(s) after script filter — leaving pending until next trigger`,
+          );
+          return;
+        }
         // Re-check done — the outer query may have finished while the script
         // was awaited. Pushing into a closed stream is wasted work; the
         // claimed messages get released by the host's processing-claim sweep.
