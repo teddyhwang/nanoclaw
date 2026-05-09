@@ -72,6 +72,13 @@ export interface ChannelDeliveryAdapter {
      * to `": "` when undefined. Operator-controlled per group.
      */
     assistantPrefixSeparator?: string,
+    /**
+     * Per-agent-group suppress-link-previews flag (Discord SUPPRESS_EMBEDS).
+     * Read from container.json `suppressEmbeds` (mirrors cybertron's
+     * workspace_agent_groups.suppress_embeds). Optional — adapters whose
+     * platform has no embed concept ignore it.
+     */
+    suppressEmbeds?: boolean,
   ): Promise<string | undefined>;
   setTyping?(channelType: string, platformId: string, threadId: string | null): Promise<void>;
 }
@@ -404,12 +411,14 @@ async function deliverMessage(
   // each group brands itself independently.
   let assistantName: string | undefined;
   let assistantPrefixSeparator: string | undefined;
+  let suppressEmbeds: boolean | undefined;
   try {
     const agentGroup = getAgentGroup(session.agent_group_id);
     if (agentGroup) {
       const cfg = readContainerConfig(agentGroup);
       assistantName = cfg.assistantName;
       assistantPrefixSeparator = cfg.assistantPrefixSeparator;
+      suppressEmbeds = cfg.suppressEmbeds;
     }
   } catch (err) {
     log.debug('Failed to resolve per-session assistantName', { err, sessionId: session.id });
@@ -425,6 +434,7 @@ async function deliverMessage(
     inReplyTo,
     assistantName,
     assistantPrefixSeparator,
+    suppressEmbeds,
   );
   log.info('Message delivered', {
     id: msg.id,

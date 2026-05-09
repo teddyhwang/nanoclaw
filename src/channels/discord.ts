@@ -19,6 +19,34 @@ function extractReplyContext(raw: Record<string, any>): ReplyContext | null {
   };
 }
 
+/**
+ * Discord renders `[text](url)` as a clickable link only inside embeds, not
+ * in normal message content — there it shows as literal `[text](url)` text.
+ * Agents (especially Claude SDK) frequently emit `[https://x](https://x)`
+ * where label == href. Collapse those to the bare URL so Discord auto-links
+ * them. Leave `[different label](url)` alone — Discord still shows it as
+ * literal text but the label carries information the URL alone wouldn't.
+ *
+ * Patterns handled:
+ *   `[https://foo](https://foo)`        → `https://foo`
+ *   `[<https://foo>](<https://foo>)`    → `<https://foo>`  (Discord auto-link suppressor preserved)
+ *   `[ https://foo ](https://foo)`      → `https://foo`    (whitespace tolerance)
+ *
+ * Idempotent and safe on text without markdown links.
+ */
+export function collapseRedundantMarkdownLinks(text: string): string {
+  // Greedy-but-safe pattern: `[ X ]( Y )` where X and Y trim to the same string.
+  return text.replace(/\[([^\]\n]+)\]\(([^)\n\s]+)\)/g, (whole, label, href) => {
+    const labelTrim = label.trim();
+    if (labelTrim === href) return href;
+    // Also handle the `<url>` auto-link-suppressor wrapping: `<https://x>` ≡ `https://x`
+    if (labelTrim.replace(/^<|>$/g, '') === href.replace(/^<|>$/g, '')) {
+      return href;
+    }
+    return whole;
+  });
+}
+
 registerChannelAdapter('discord', {
   factory: () => {
     const env = readEnvFile(['DISCORD_BOT_TOKEN', 'DISCORD_PUBLIC_KEY', 'DISCORD_APPLICATION_ID']);
@@ -34,6 +62,7 @@ registerChannelAdapter('discord', {
       botToken: env.DISCORD_BOT_TOKEN,
       extractReplyContext,
       supportsThreads: true,
+      transformOutboundText: collapseRedundantMarkdownLinks,
     });
   },
 });

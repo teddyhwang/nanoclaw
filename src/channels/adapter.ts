@@ -129,6 +129,14 @@ export interface OutboundMessage {
    * when undefined. Adapters that don't prefix can ignore it.
    */
   assistantPrefixSeparator?: string;
+  /**
+   * Suppress link previews / unfurls on platforms that support it
+   * (Discord: message flag 4 = SUPPRESS_EMBEDS). Adapters whose platform
+   * has no embed concept (WhatsApp, Telegram) ignore this field. Source
+   * of truth lives in cybertron.workspace_agent_groups.suppress_embeds —
+   * the host resolves it per agent group at delivery time.
+   */
+  suppressEmbeds?: boolean;
 }
 
 /** Discovered conversation info (from syncConversations). */

@@ -75,6 +75,14 @@ export interface ContainerConfig {
   agentGroupId?: string;
   /** Max messages per prompt. Falls back to code default if unset. */
   maxMessagesPerPrompt?: number;
+  /**
+   * Suppress link previews / unfurls on platforms that support it (Discord
+   * SUPPRESS_EMBEDS message flag). Default false. Operator-controlled per
+   * agent group via the dashboard. The chat-sdk-bridge passes this through
+   * to adapters as `OutboundMessage.suppressEmbeds`; adapters whose
+   * platform has no embed concept (WhatsApp, Telegram) ignore it.
+   */
+  suppressEmbeds?: boolean;
 }
 
 function emptyConfig(): ContainerConfig {
@@ -116,6 +124,7 @@ export function readContainerConfig(group: GroupRef): ContainerConfig {
       assistantPrefixSeparator: raw.assistantPrefixSeparator,
       agentGroupId: raw.agentGroupId,
       maxMessagesPerPrompt: raw.maxMessagesPerPrompt,
+      suppressEmbeds: raw.suppressEmbeds,
     };
   } catch (err) {
     console.error(`[container-config] failed to parse ${p}: ${String(err)}`);

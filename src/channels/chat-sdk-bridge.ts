@@ -457,6 +457,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           const replyForChunk = i === 0 ? replyTo : null;
           const post = attachFiles ? { markdown: chunk, files: fileUploads } : { markdown: chunk };
           if (replyForChunk) (post as Record<string, unknown>).replyTo = replyForChunk;
+          // Discord-only: pass suppressEmbeds through so the patched chat-adapter
+          // can set message flags = 4 (SUPPRESS_EMBEDS). Other adapters ignore
+          // unknown postable fields.
+          if (message.suppressEmbeds) {
+            (post as Record<string, unknown>).suppressEmbeds = true;
+          }
           const result = await adapter.postMessage(tid, post);
           if (i === 0) firstId = result?.id;
         }

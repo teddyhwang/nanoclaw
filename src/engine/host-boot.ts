@@ -138,6 +138,7 @@ export async function _bootForHost(opts: { managedSignals: boolean }): Promise<v
       inReplyTo?: string | null,
       assistantName?: string,
       assistantPrefixSeparator?: string,
+      suppressEmbeds?: boolean,
     ): Promise<string | undefined> {
       const adapter = getChannelAdapter(channelType);
       if (!adapter) {
@@ -151,6 +152,7 @@ export async function _bootForHost(opts: { managedSignals: boolean }): Promise<v
         inReplyTo,
         assistantName,
         assistantPrefixSeparator,
+        suppressEmbeds,
       });
     },
     async setTyping(channelType: string, platformId: string, threadId: string | null): Promise<void> {
