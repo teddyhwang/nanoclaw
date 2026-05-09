@@ -386,6 +386,21 @@ function buildMounts(
   // Resolver returns [] for non-DM containers and when no host registered.
   // See packages/nanoclaw/src/shared-groups.ts.
   const sharedGroups = resolveSharedGroups(agentGroup);
+  if (sharedGroups.length > 0) {
+    // Docker Desktop's virtiofs cannot create a bind mountpoint inside
+    // an outer bind unless the parent directory physically exists on the
+    // host source. `/workspace` is bound from `<sessDir>`; if the host
+    // doesn't have `<sessDir>/shared-groups/<folder>/` pre-created, runc
+    // fails with `mountpoint … is outside of rootfs` when it tries to
+    // place the per-file binds (IDENTITY.md, CLAUDE.md) inside the
+    // not-yet-existing folder dir. Pre-create the dirs here — same shape
+    // as the `outbox/` pre-create in session-manager.ts.
+    const sessSharedRoot = path.join(sessDir, 'shared-groups');
+    fs.mkdirSync(sessSharedRoot, { recursive: true });
+    for (const shared of sharedGroups) {
+      fs.mkdirSync(path.join(sessSharedRoot, shared.folder), { recursive: true });
+    }
+  }
   for (const shared of sharedGroups) {
     // Falls back to flat <groupsDir>/<folder> when shared.id is absent
     // or the resolver returns null — matches standalone NanoClaw layout.
