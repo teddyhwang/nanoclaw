@@ -91,6 +91,9 @@ function emptyConfig(): ContainerConfig {
     packages: { apt: [], npm: [] },
     additionalMounts: [],
     skills: 'all',
+    // New groups suppress embeds by default — link previews clog up agent
+    // replies. Adapters whose platform has no embed concept ignore it.
+    suppressEmbeds: true,
   };
 }
 
@@ -124,7 +127,12 @@ export function readContainerConfig(group: GroupRef): ContainerConfig {
       assistantPrefixSeparator: raw.assistantPrefixSeparator,
       agentGroupId: raw.agentGroupId,
       maxMessagesPerPrompt: raw.maxMessagesPerPrompt,
-      suppressEmbeds: raw.suppressEmbeds,
+      // Default true: link previews/unfurls clutter agent replies, and
+      // platforms that don't support the flag (WhatsApp, Telegram) ignore
+      // it. Operators flip individual groups to false when they actually
+      // want previews. Both undefined and missing-key collapse to true;
+      // explicit false is honored.
+      suppressEmbeds: raw.suppressEmbeds ?? true,
     };
   } catch (err) {
     console.error(`[container-config] failed to parse ${p}: ${String(err)}`);
