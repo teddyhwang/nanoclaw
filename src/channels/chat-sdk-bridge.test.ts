@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
 
-import { createChatSdkBridge, splitForLimit } from './chat-sdk-bridge.js';
+import { createChatSdkBridge, htmlToMarkdown, splitForLimit } from './chat-sdk-bridge.js';
 
 function stubAdapter(partial: Partial<Adapter>): Adapter {
   return { name: 'stub', ...partial } as unknown as Adapter;
@@ -47,6 +47,80 @@ describe('splitForLimit', () => {
     expect(chunks.length).toBe(Math.ceil(100 / 30));
     for (const c of chunks) expect(c.length).toBeLessThanOrEqual(30);
     expect(chunks.join('')).toBe(text);
+  });
+
+  it('preserves URLs by splitting before them, not mid-link', () => {
+    const head = 'A'.repeat(1900);
+    const url = 'https://dashboard.teddyhwang.com/settings/integrations';
+    const tail = ' continued sentence here.';
+    const text = head + ' ' + url + tail;
+    const out = splitForLimit(text, 2000);
+    const urlChunk = out.find((c) => c.includes(url));
+    expect(urlChunk).toBeDefined();
+    const partials = out.filter((c) => c.includes('https') && !c.includes(url));
+    expect(partials).toHaveLength(0);
+  });
+
+  it('closes and re-opens fenced code blocks across split boundaries', () => {
+    const text = 'Intro\n\n```ts\n' + 'code line\n'.repeat(80) + '```\n';
+    const out = splitForLimit(text, 200);
+    expect(out.length).toBeGreaterThan(1);
+    for (const chunk of out) {
+      const fenceCount = (chunk.match(/```/g) || []).length;
+      expect(fenceCount % 2).toBe(0);
+    }
+  });
+
+  it('normalizes HTML before chunking', () => {
+    const text = 'use <code>foo</code> in your code';
+    const out = splitForLimit(text, 1000);
+    expect(out[0]).toBe('use `foo` in your code');
+  });
+});
+
+describe('htmlToMarkdown', () => {
+  it('converts <code>X</code> to inline backtick markdown', () => {
+    expect(htmlToMarkdown('use <code>foo</code> here')).toBe('use `foo` here');
+  });
+
+  it('converts <pre><code> blocks to fenced code', () => {
+    expect(htmlToMarkdown('<pre><code>const x = 1</code></pre>')).toBe('\n```\nconst x = 1\n```\n');
+  });
+
+  it('converts <b>/<strong> to bold and <i>/<em> to italic', () => {
+    expect(htmlToMarkdown('<b>x</b> <strong>y</strong>')).toBe('**x** **y**');
+    expect(htmlToMarkdown('<i>x</i> <em>y</em>')).toBe('*x* *y*');
+  });
+
+  it('converts <a href> to markdown link', () => {
+    expect(htmlToMarkdown('see <a href="https://example.com">site</a> now')).toBe(
+      'see [site](https://example.com) now',
+    );
+  });
+
+  it('converts <br> to newline', () => {
+    expect(htmlToMarkdown('a<br>b<br/>c')).toBe('a\nb\nc');
+  });
+
+  it('drops unknown tags but keeps inner content', () => {
+    expect(htmlToMarkdown('<span class="x">hello</span>')).toBe('hello');
+  });
+
+  it('preserves math/comparison < and >', () => {
+    expect(htmlToMarkdown('a < b and 5 > 3')).toBe('a < b and 5 > 3');
+  });
+
+  it('handles HTML-tag-wrapped Discord mentions', () => {
+    expect(htmlToMarkdown('<code><@Barret></code>')).toBe('`<@Barret>`');
+  });
+
+  it('idempotent on plain markdown', () => {
+    const md = '**bold** and `code` and [link](https://example.com)';
+    expect(htmlToMarkdown(md)).toBe(md);
+  });
+
+  it('safe on empty input', () => {
+    expect(htmlToMarkdown('')).toBe('');
   });
 });
 

@@ -110,20 +110,169 @@ function resolveSelectedOption(
   return candidate;
 }
 
+/**
+ * Convert common HTML inline tags to Markdown. Discord, Telegram, Slack all
+ * parse Markdown, never HTML — so any literal `<code>X</code>` an agent emits
+ * renders as visible angle-brackets. Conversion happens before chunking so
+ * size budgets land on rendered text. Self-closing `<br>` becomes a newline;
+ * unknown tag pairs are unwrapped (kept inner content); unknown self-closing
+ * tags are dropped. Standalone `<` / `>` (math, generics in code) are
+ * preserved by the alpha-name guard.
+ */
+export function htmlToMarkdown(text: string): string {
+  if (!text) return text;
+  let out = text;
+  out = out.replace(
+    /<a\s+[^>]*href\s*=\s*"([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi,
+    (_m, href, label) => `[${(label as string).trim() || (href as string)}](${href})`,
+  );
+  out = out.replace(
+    /<a\s+[^>]*href\s*=\s*'([^']*)'[^>]*>([\s\S]*?)<\/a>/gi,
+    (_m, href, label) => `[${(label as string).trim() || (href as string)}](${href})`,
+  );
+  out = out.replace(
+    /<pre>\s*<code(?:\s+[^>]*)?>([\s\S]*?)<\/code>\s*<\/pre>/gi,
+    (_m, body) => `\n\`\`\`\n${(body as string).trim()}\n\`\`\`\n`,
+  );
+  out = out.replace(
+    /<pre(?:\s+[^>]*)?>([\s\S]*?)<\/pre>/gi,
+    (_m, body) => `\n\`\`\`\n${(body as string).trim()}\n\`\`\`\n`,
+  );
+  out = out.replace(/<code(?:\s+[^>]*)?>([\s\S]*?)<\/code>/gi, (_m, body) => `\`${body as string}\``);
+  out = out.replace(/<(?:b|strong)(?:\s+[^>]*)?>([\s\S]*?)<\/(?:b|strong)>/gi, (_m, body) => `**${body as string}**`);
+  out = out.replace(/<(?:i|em)(?:\s+[^>]*)?>([\s\S]*?)<\/(?:i|em)>/gi, (_m, body) => `*${body as string}*`);
+  out = out.replace(/<br\s*\/?>/gi, '\n');
+  out = out.replace(/<([a-zA-Z][a-zA-Z0-9-]*)(?:\s+[^>]*)?>([\s\S]*?)<\/\1>/g, (_m, _tag, body) => body as string);
+  out = out.replace(/<([a-zA-Z][a-zA-Z0-9-]*)(?:\s+[^>]*)?\/?>/g, '');
+  return out;
+}
+
+/**
+ * Size-aware chunking with code-fence carryover. Tries paragraph (\n\n) →
+ * single newline → sentence end → word boundary, falling back to a hard cut.
+ * If a chunk ends with an open ``` fence, closes it on the head and reopens
+ * with the original lang tag on the tail so each chunk renders as a valid
+ * code block on the platform.
+ *
+ * Reject boundaries that are too close to the start (within 25% of budget)
+ * to avoid emitting a tiny head + huge tail when a paragraph break sits
+ * near the very beginning of the budget window.
+ */
+const SPLIT_TOLERANCE = 0.25;
+
 export function splitForLimit(text: string, limit: number): string[] {
+  // Normalize HTML before chunking so split boundaries land on rendered text.
+  text = htmlToMarkdown(text);
   if (text.length <= limit) return [text];
+
   const chunks: string[] = [];
   let remaining = text;
-  while (remaining.length > limit) {
-    let cut = remaining.lastIndexOf('\n\n', limit);
-    if (cut <= 0) cut = remaining.lastIndexOf('\n', limit);
-    if (cut <= 0) cut = remaining.lastIndexOf(' ', limit);
-    if (cut <= 0) cut = limit;
-    chunks.push(remaining.slice(0, cut).trimEnd());
-    remaining = remaining.slice(cut).trimStart();
+  let carryFence: string | null = null;
+
+  while (remaining.length > 0) {
+    const prefix = carryFence ?? '';
+    const budget = limit - prefix.length;
+
+    if (prefix.length + remaining.length <= limit) {
+      chunks.push(prefix + remaining);
+      break;
+    }
+
+    const cut = findCut(remaining, budget, SPLIT_TOLERANCE);
+    const head = remaining.slice(0, cut.headEnd);
+    const tail = remaining.slice(cut.tailStart);
+
+    const fenceState = scanFenceState(prefix + head);
+    if (fenceState.open) {
+      const closed = (prefix + head).trimEnd() + '\n```';
+      chunks.push(closed);
+      carryFence = '```' + fenceState.lang + '\n';
+    } else {
+      chunks.push(prefix + head);
+      carryFence = null;
+    }
+
+    remaining = tail;
   }
-  if (remaining.length > 0) chunks.push(remaining);
+
   return chunks;
+}
+
+interface SplitCut {
+  headEnd: number;
+  tailStart: number;
+}
+
+function findCut(text: string, budget: number, tolerance: number): SplitCut {
+  const minAccept = Math.floor(budget * (1 - tolerance));
+  const window = text.slice(0, budget);
+
+  // Closed code-fence boundary: prefer a `\n```\n` boundary regardless of tier.
+  const fenceIdx = window.lastIndexOf('\n```\n');
+  if (fenceIdx >= 0) {
+    const end = fenceIdx + 5;
+    return { headEnd: end, tailStart: end };
+  }
+
+  const tiers: Array<() => SplitCut | null> = [
+    () => {
+      const idx = window.lastIndexOf('\n\n');
+      if (idx < 0) return null;
+      return { headEnd: idx, tailStart: skipLeading(text, idx, /\n/) };
+    },
+    () => {
+      const idx = window.lastIndexOf('\n');
+      if (idx < 0) return null;
+      return { headEnd: idx, tailStart: skipLeading(text, idx, /\n/) };
+    },
+    () => {
+      const m = window.match(/[.!?](?:\s|$)(?=[^.!?]*$)/);
+      if (!m || m.index === undefined) return null;
+      const afterPunct = m.index + 1;
+      return {
+        headEnd: afterPunct,
+        tailStart: skipLeading(text, afterPunct, /\s/),
+      };
+    },
+    () => {
+      const m = window.match(/\s(?=\S*$)/);
+      if (!m || m.index === undefined) return null;
+      return {
+        headEnd: m.index,
+        tailStart: skipLeading(text, m.index, /\s/),
+      };
+    },
+  ];
+
+  for (const tier of tiers) {
+    const cut = tier();
+    if (cut && cut.headEnd >= minAccept) return cut;
+  }
+
+  return { headEnd: budget, tailStart: budget };
+}
+
+function skipLeading(text: string, start: number, re: RegExp): number {
+  let i = start;
+  while (i < text.length && re.test(text[i])) i++;
+  return i;
+}
+
+function scanFenceState(text: string): { open: boolean; lang: string } {
+  const fenceRe = /^```([^\n]*)$/gm;
+  let open = false;
+  let lang = '';
+  let m: RegExpExecArray | null;
+  while ((m = fenceRe.exec(text)) !== null) {
+    if (open) {
+      open = false;
+      lang = '';
+    } else {
+      open = true;
+      lang = m[1].trim();
+    }
+  }
+  return { open, lang };
 }
 
 export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter {
