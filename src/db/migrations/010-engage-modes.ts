@@ -15,7 +15,10 @@
  *     → engage_mode='pattern', engage_pattern='.'
  *   - Else (requires trigger but no pattern specified) → engage_mode='mention'
  *   - sender_scope: 'known' when response_scope was 'allowlisted', 'all' otherwise
- *   - ignored_message_policy: 'drop' (conservative default; no old-schema analog)
+ *   - ignored_message_policy: 'accumulate' (v1 stored every message in the
+ *     agent's context regardless of trigger; the accumulate router branch
+ *     preserves that "background context" behavior. Per-wiring opt-out via
+ *     the dashboard picker.)
  */
 import type Database from 'better-sqlite3';
 import type { Migration } from './index.js';
@@ -58,7 +61,7 @@ function backfill(row: LegacyRow): {
 
   const sender_scope: 'all' | 'known' = row.response_scope === 'allowlisted' ? 'known' : 'all';
 
-  return { engage_mode, engage_pattern, sender_scope, ignored_message_policy: 'drop' };
+  return { engage_mode, engage_pattern, sender_scope, ignored_message_policy: 'accumulate' };
 }
 
 export const migration010: Migration = {

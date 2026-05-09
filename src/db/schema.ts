@@ -48,7 +48,7 @@ CREATE TABLE messaging_group_agents (
   engage_pattern         TEXT,   -- regex; required when engage_mode='pattern';
                                  -- '.' means "match every message" (the "always" flavor)
   sender_scope           TEXT NOT NULL DEFAULT 'all',    -- 'all' | 'known'
-  ignored_message_policy TEXT NOT NULL DEFAULT 'drop',   -- 'drop' | 'accumulate'
+  ignored_message_policy TEXT NOT NULL DEFAULT 'accumulate',   -- 'drop' | 'accumulate'
   session_mode           TEXT DEFAULT 'shared',
   priority               INTEGER DEFAULT 0,
   created_at             TEXT NOT NULL,
