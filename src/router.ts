@@ -163,9 +163,20 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   if (messageInterceptor && (await messageInterceptor(event))) return;
 
   // 0. Apply the adapter's thread policy. Non-threaded adapters (Telegram,
-  //    WhatsApp, iMessage, email) collapse threads to the channel.
+  //    WhatsApp, iMessage, email) collapse threads to the channel. For
+  //    threaded adapters (Discord), chat-sdk emits `thread.id = channel_id`
+  //    when the message arrives on the channel itself (not inside a real
+  //    Discord thread). Treat those as not-a-thread so the per-thread
+  //    session-mode forcing in deliverToAgent doesn't shard a single channel
+  //    into two parallel sessions — the v1→v2 cutover seed creates sessions
+  //    with `thread_id=NULL`, but a live inbound carrying `threadId =
+  //    platformId` would otherwise miss that lookup and create a duplicate.
+  //    See investigation 2026-05-09: AI Friends, Boys Night, two DMs all had
+  //    duplicate sessions until this collapse landed.
   const adapter = getChannelAdapter(event.channelType);
   if (adapter && !adapter.supportsThreads) {
+    event = { ...event, threadId: null };
+  } else if (event.threadId !== null && event.threadId === event.platformId) {
     event = { ...event, threadId: null };
   }
 

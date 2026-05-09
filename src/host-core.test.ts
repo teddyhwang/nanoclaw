@@ -424,6 +424,51 @@ describe('router', () => {
     expect(wakeContainer).toHaveBeenCalled();
   });
 
+  it('collapses threadId to null when the threaded adapter reports thread_id == platform_id', async () => {
+    // Repro of the 2026-05-09 duplicate-session bug: chat-sdk emits
+    // `thread.id = channel_id` for messages on a regular Discord channel
+    // (no actual Discord-thread feature in use). Without the collapse, that
+    // inbound carrying `threadId == platformId` misses the cutover-seeded
+    // session (which has thread_id=NULL) and creates a parallel session, so
+    // every Discord channel ends up with two sessions racing for replies.
+    const { routeInbound } = await import('./router.js');
+
+    // First inbound mirrors a v1→v2 cutover seed: explicit threadId=null.
+    await routeInbound({
+      channelType: 'discord',
+      platformId: 'chan-123',
+      threadId: null,
+      message: {
+        id: 'msg-seed',
+        kind: 'chat',
+        content: JSON.stringify({ sender: 'User', text: 'first' }),
+        timestamp: now(),
+      },
+    });
+    const seeded = findSession('mg-1', null);
+    expect(seeded).toBeDefined();
+
+    // Second inbound mirrors live chat-sdk routing on a regular channel:
+    // threadId === platformId. Should resolve to the SAME session as the
+    // seed, not create a new one with a non-null thread_id.
+    await routeInbound({
+      channelType: 'discord',
+      platformId: 'chan-123',
+      threadId: 'chan-123',
+      message: {
+        id: 'msg-live',
+        kind: 'chat',
+        content: JSON.stringify({ sender: 'User', text: 'second' }),
+        timestamp: now(),
+      },
+    });
+    const live = findSession('mg-1', null);
+    expect(live).toBeDefined();
+    expect(live!.id).toBe(seeded!.id);
+    // And no rogue session got created with thread_id='chan-123'.
+    expect(findSession('mg-1', 'chan-123')).toBeUndefined();
+  });
+
   it('auto-creates messaging group only when the bot is addressed (mention/DM)', async () => {
     // The router's no-mg branch is escalation-gated: plain chatter on an
     // unknown channel stays silent (no DB writes) so a bot that sits in
