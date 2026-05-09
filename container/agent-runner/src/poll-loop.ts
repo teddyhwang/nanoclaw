@@ -2,12 +2,17 @@ import { findByName, getAllDestinations, type DestinationEntry } from './destina
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
 import { writeMessageOut } from './db/messages-out.js';
 import { touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
+import { clearContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
 import {
-  clearContinuation,
-  migrateLegacyContinuation,
-  setContinuation,
-} from './db/session-state.js';
-import { formatMessages, extractRouting, extractMessageSender, categorizeMessage, isClearCommand, isRunnerCommand, stripInternalTags, type RoutingContext } from './formatter.js';
+  formatMessages,
+  extractRouting,
+  extractMessageSender,
+  categorizeMessage,
+  isClearCommand,
+  isRunnerCommand,
+  stripInternalTags,
+  type RoutingContext,
+} from './formatter.js';
 import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
 
 const POLL_INTERVAL_MS = 1000;
@@ -196,15 +201,21 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         clearContinuation(config.providerName);
       }
 
-      // Write error response so the user knows something went wrong
-      writeMessageOut({
-        id: generateId(),
-        kind: 'chat',
-        platform_id: routing.platformId,
-        channel_type: routing.channelType,
-        thread_id: routing.threadId,
-        content: JSON.stringify({ text: `Error: ${errMsg}` }),
-      });
+      if (shouldSendErrorResponseForBatch(keep)) {
+        // Write error response so the user knows something went wrong.
+        // Task-only failures stay in logs: scheduled maintenance prompts are
+        // often explicitly silent and should not leak raw runtime errors to chat.
+        writeMessageOut({
+          id: generateId(),
+          kind: 'chat',
+          platform_id: routing.platformId,
+          channel_type: routing.channelType,
+          thread_id: routing.threadId,
+          content: JSON.stringify({ text: `Error: ${errMsg}` }),
+        });
+      } else {
+        log(`Suppressing user-visible error for task-only batch: ${errMsg}`);
+      }
     }
 
     // Ensure completed even if processQuery ended without a result event
@@ -212,6 +223,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     markCompleted(processingIds);
     log(`Completed ${ids.length} message(s)`);
   }
+}
+
+export function shouldSendErrorResponseForBatch(messages: MessageInRow[]): boolean {
+  return !messages.every((m) => m.kind === 'task');
 }
 
 /**
@@ -323,9 +338,7 @@ async function processQuery(
             }
           }
           if (deferred.length > 0) {
-            log(
-              `Deferring ${deferred.length} cross-sender follow-up(s) — will re-process after active turn`,
-            );
+            log(`Deferring ${deferred.length} cross-sender follow-up(s) — will re-process after active turn`);
           }
           newMessages = sameSender;
           if (newMessages.length === 0) return;
@@ -431,7 +444,9 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
       log(`Result: ${event.text ? event.text.slice(0, 200) : '(empty)'}`);
       break;
     case 'error':
-      log(`Error: ${event.message} (retryable: ${event.retryable}${event.classification ? `, ${event.classification}` : ''})`);
+      log(
+        `Error: ${event.message} (retryable: ${event.retryable}${event.classification ? `, ${event.classification}` : ''})`,
+      );
       break;
     case 'progress':
       log(`Progress: ${event.message}`);

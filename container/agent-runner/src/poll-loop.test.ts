@@ -5,6 +5,7 @@ import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
 import { MockProvider } from './providers/mock.js';
+import { shouldSendErrorResponseForBatch } from './poll-loop.js';
 
 beforeEach(() => {
   initTestSessionDb();
@@ -189,6 +190,18 @@ describe('mock provider', () => {
     expect(results).toHaveLength(2);
     expect(results[0].text).toBe('Re: First');
     expect(results[1].text).toBe('Re: Second');
+  });
+});
+
+describe('error response gating', () => {
+  it('suppresses user-visible errors for task-only batches', () => {
+    insertMessage('m1', 'task', { prompt: 'Silent maintenance' });
+    expect(shouldSendErrorResponseForBatch(getPendingMessages())).toBe(false);
+  });
+
+  it('keeps user-visible errors for chat-triggered batches', () => {
+    insertMessage('m1', 'chat', { sender: 'User', text: 'Help' });
+    expect(shouldSendErrorResponseForBatch(getPendingMessages())).toBe(true);
   });
 });
 

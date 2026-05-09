@@ -40,11 +40,47 @@ describe('decideStuckAction', () => {
       heartbeatMtimeMs,
       containerState: null,
       claims: [],
+      idleTimeoutMs: ABSOLUTE_CEILING_MS + 60_000,
     });
     expect(res.action).toBe('kill-ceiling');
     if (res.action !== 'kill-ceiling') return;
     expect(res.ceilingMs).toBe(ABSOLUTE_CEILING_MS);
     expect(res.heartbeatAgeMs).toBeGreaterThan(ABSOLUTE_CEILING_MS);
+  });
+
+  it('returns stop-idle when a warm container has no work past idle timeout', () => {
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: BASE - 6 * 60 * 1000,
+      containerState: null,
+      claims: [],
+      dueCount: 0,
+      idleTimeoutMs: 5 * 60 * 1000,
+    });
+    expect(res.action).toBe('stop-idle');
+  });
+
+  it('does not stop-idle when due work exists', () => {
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: BASE - 6 * 60 * 1000,
+      containerState: null,
+      claims: [],
+      dueCount: 1,
+      idleTimeoutMs: 5 * 60 * 1000,
+    });
+    expect(res.action).toBe('ok');
+  });
+
+  it('does not stop-idle when a message is still processing', () => {
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: BASE - 6 * 60 * 1000,
+      containerState: null,
+      claims: [claim('msg-1', 30_000)],
+      idleTimeoutMs: 5 * 60 * 1000,
+    });
+    expect(res.action).toBe('ok');
   });
 
   it('skips the ceiling check when no heartbeat file exists (fresh container not yet ticked)', () => {

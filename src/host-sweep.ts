@@ -42,6 +42,7 @@ import {
   syncProcessingAcks,
   type ContainerState,
 } from './db/session-db.js';
+import { IDLE_TIMEOUT } from './config.js';
 import { emitEngineEvent } from './engine/events.js';
 import { log } from './log.js';
 import { openInboundDb, openOutboundDb, openOutboundDbRw, inboundDbPath, heartbeatPath } from './session-manager.js';
@@ -61,6 +62,7 @@ const BACKOFF_BASE_MS = 5000;
 
 export type StuckDecision =
   | { action: 'ok' }
+  | { action: 'stop-idle'; idleAgeMs: number; idleTimeoutMs: number }
   | { action: 'kill-ceiling'; heartbeatAgeMs: number; ceilingMs: number }
   | { action: 'kill-claim'; messageId: string; claimAgeMs: number; toleranceMs: number };
 
@@ -74,8 +76,10 @@ export function decideStuckAction(args: {
   heartbeatMtimeMs: number; // 0 when heartbeat file absent
   containerState: ContainerState | null;
   claims: Array<{ message_id: string; status_changed: string }>;
+  dueCount?: number;
+  idleTimeoutMs?: number;
 }): StuckDecision {
-  const { now, heartbeatMtimeMs, containerState, claims } = args;
+  const { now, heartbeatMtimeMs, containerState, claims, dueCount = 0, idleTimeoutMs = IDLE_TIMEOUT } = args;
   const declaredBashMs = bashTimeoutMs(containerState);
 
   // Ceiling check only applies when we have an actual heartbeat timestamp.
@@ -88,6 +92,10 @@ export function decideStuckAction(args: {
   // claim-stuck check below handles it.
   if (heartbeatMtimeMs !== 0) {
     const heartbeatAge = now - heartbeatMtimeMs;
+    if (!containerState?.current_tool && claims.length === 0 && dueCount === 0 && heartbeatAge > idleTimeoutMs) {
+      return { action: 'stop-idle', idleAgeMs: heartbeatAge, idleTimeoutMs };
+    }
+
     const ceiling = Math.max(ABSOLUTE_CEILING_MS, declaredBashMs ?? 0);
     if (heartbeatAge > ceiling) {
       return { action: 'kill-ceiling', heartbeatAgeMs: heartbeatAge, ceilingMs: ceiling };
@@ -177,9 +185,9 @@ async function sweepSession(session: Session): Promise<void> {
 
     const alive = isContainerRunning(session.id);
 
-    // 3. Running-container SLA: absolute ceiling + per-claim stuck rules.
+    // 3. Running-container SLA: idle timeout + stuck rules.
     if (alive && outDb) {
-      enforceRunningContainerSla(inDb, outDb, session, agentGroup.id);
+      enforceRunningContainerSla(inDb, outDb, session, agentGroup.id, dueCount);
     }
 
     // 4. Crashed-container cleanup: processing rows left behind get retried.
@@ -220,15 +228,27 @@ function enforceRunningContainerSla(
   outDb: Database.Database,
   session: Session,
   agentGroupId: string,
+  dueCount: number,
 ): void {
   const decision = decideStuckAction({
     now: Date.now(),
     heartbeatMtimeMs: heartbeatMtimeMs(agentGroupId, session.id),
     containerState: getContainerState(outDb),
     claims: getProcessingClaims(outDb),
+    dueCount,
   });
 
   if (decision.action === 'ok') return;
+
+  if (decision.action === 'stop-idle') {
+    log.info('Stopping idle container', {
+      sessionId: session.id,
+      idleAgeMs: decision.idleAgeMs,
+      idleTimeoutMs: decision.idleTimeoutMs,
+    });
+    killContainer(session.id, 'idle-timeout');
+    return;
+  }
 
   if (decision.action === 'kill-ceiling') {
     log.warn('Killing container past absolute ceiling', {
