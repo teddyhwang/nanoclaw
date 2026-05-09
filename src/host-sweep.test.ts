@@ -10,6 +10,7 @@ import { deleteOrphanProcessingClaims, getProcessingClaims } from './db/session-
 import {
   ABSOLUTE_CEILING_MS,
   CLAIM_STUCK_MS,
+  MCP_TOOL_CEILING_MS,
   _resetStuckProcessingRowsForTesting,
   decideStuckAction,
 } from './host-sweep.js';
@@ -174,6 +175,80 @@ describe('decideStuckAction', () => {
         tool_started_at: new Date(BASE - 5 * 60 * 1000).toISOString(),
       },
       claims: [claim('msg-1', 5 * 60 * 1000)],
+    });
+    expect(res.action).toBe('ok');
+  });
+
+  it('extends the ceiling while a non-Bash MCP tool is in flight', () => {
+    // Repro of 2026-05-09 tico whatsapp_dm_teddy: long-running gws-docs MCP
+    // call left the heartbeat untouched past 30 min. Old behavior killed the
+    // container mid-tool with code=137. New behavior tolerates up to
+    // MCP_TOOL_CEILING_MS while current_tool is an mcp__* tool.
+    const fortyFiveMinMs = 45 * 60 * 1000;
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: BASE - fortyFiveMinMs,
+      containerState: {
+        current_tool: 'mcp__google__create_doc',
+        tool_declared_timeout_ms: null,
+        tool_started_at: new Date(BASE - fortyFiveMinMs).toISOString(),
+      },
+      claims: [],
+    });
+    expect(res.action).toBe('ok');
+  });
+
+  it('still kills past the MCP ceiling when an MCP tool is genuinely hung', () => {
+    const overMcpCeiling = MCP_TOOL_CEILING_MS + 60_000;
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: BASE - overMcpCeiling,
+      containerState: {
+        current_tool: 'mcp__google__create_doc',
+        tool_declared_timeout_ms: null,
+        tool_started_at: new Date(BASE - overMcpCeiling).toISOString(),
+      },
+      claims: [],
+      idleTimeoutMs: overMcpCeiling + 60_000,
+    });
+    expect(res.action).toBe('kill-ceiling');
+    if (res.action !== 'kill-ceiling') return;
+    expect(res.ceilingMs).toBe(MCP_TOOL_CEILING_MS);
+  });
+
+  it('does not extend the ceiling for non-MCP, non-Bash tools', () => {
+    // SDK builtins like Read/Edit/Glob complete in milliseconds — they should
+    // not get the MCP grace window. Heartbeat older than 30 min with a
+    // builtin in flight is still a stuck container.
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: BASE - ABSOLUTE_CEILING_MS - 60_000,
+      containerState: {
+        current_tool: 'Read',
+        tool_declared_timeout_ms: null,
+        tool_started_at: new Date(BASE - ABSOLUTE_CEILING_MS - 60_000).toISOString(),
+      },
+      claims: [],
+      idleTimeoutMs: ABSOLUTE_CEILING_MS * 2,
+    });
+    expect(res.action).toBe('kill-ceiling');
+    if (res.action !== 'kill-ceiling') return;
+    expect(res.ceilingMs).toBe(ABSOLUTE_CEILING_MS);
+  });
+
+  it('widens per-claim tolerance for a running MCP tool', () => {
+    // A claim that's been processing for 45 min with the MCP tool still in
+    // flight should not trip claim-stuck.
+    const fortyFiveMinMs = 45 * 60 * 1000;
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: BASE - fortyFiveMinMs - 5_000,
+      containerState: {
+        current_tool: 'mcp__google__create_doc',
+        tool_declared_timeout_ms: null,
+        tool_started_at: new Date(BASE - fortyFiveMinMs).toISOString(),
+      },
+      claims: [claim('msg-1', fortyFiveMinMs)],
     });
     expect(res.action).toBe('ok');
   });

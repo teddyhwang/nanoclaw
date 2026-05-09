@@ -3,7 +3,7 @@ import path from 'path';
 
 import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 
-import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
+import { clearContainerToolInFlight, setContainerToolInFlight, touchHeartbeat } from '../db/connection.js';
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
@@ -175,6 +175,11 @@ const preToolUseHook: HookCallback = async (input) => {
   } catch (err) {
     log(`PreToolUse: failed to record container_state: ${err instanceof Error ? err.message : String(err)}`);
   }
+  // Refresh heartbeat at tool-call boundaries so a long MCP tool that's about
+  // to block (e.g. gws-docs read of a large doc) doesn't leave the heartbeat
+  // stranded at its pre-call mtime and trip the absolute-ceiling kill while
+  // genuine work is in flight. PostToolUse refreshes again on return.
+  touchHeartbeat();
   return { continue: true };
 };
 
@@ -185,6 +190,7 @@ const postToolUseHook: HookCallback = async () => {
   } catch (err) {
     log(`PostToolUse: failed to clear container_state: ${err instanceof Error ? err.message : String(err)}`);
   }
+  touchHeartbeat();
   return { continue: true };
 };
 

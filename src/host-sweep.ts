@@ -54,6 +54,12 @@ const SWEEP_INTERVAL_MS = 60_000;
 // been touched in this long, the container is either stuck or doing genuinely
 // nothing — kill and restart on the next inbound.
 export const ABSOLUTE_CEILING_MS = 30 * 60 * 1000;
+// Widened ceiling applied while a non-Bash MCP tool is in flight. MCP tools
+// don't expose a declared timeout the way Bash does, but we know real work is
+// happening (PreToolUse hook recorded current_tool, hasn't fired PostToolUse
+// yet). Without this, a genuinely long single MCP call — e.g. gws-docs on a
+// large doc — gets SIGKILL'd at 30 min and the partial work is lost.
+export const MCP_TOOL_CEILING_MS = 60 * 60 * 1000;
 // Stuck tolerance window applied per 'processing' claim — "did we see any
 // signs of life since this message was claimed?"
 export const CLAIM_STUCK_MS = 60 * 1000;
@@ -96,13 +102,21 @@ export function decideStuckAction(args: {
       return { action: 'stop-idle', idleAgeMs: heartbeatAge, idleTimeoutMs };
     }
 
-    const ceiling = Math.max(ABSOLUTE_CEILING_MS, declaredBashMs ?? 0);
+    const mcpInFlight =
+      typeof containerState?.current_tool === 'string' && containerState.current_tool.startsWith('mcp__')
+        ? MCP_TOOL_CEILING_MS
+        : 0;
+    const ceiling = Math.max(ABSOLUTE_CEILING_MS, declaredBashMs ?? 0, mcpInFlight);
     if (heartbeatAge > ceiling) {
       return { action: 'kill-ceiling', heartbeatAgeMs: heartbeatAge, ceilingMs: ceiling };
     }
   }
 
-  const tolerance = Math.max(CLAIM_STUCK_MS, declaredBashMs ?? 0);
+  const mcpInFlightTolerance =
+    typeof containerState?.current_tool === 'string' && containerState.current_tool.startsWith('mcp__')
+      ? MCP_TOOL_CEILING_MS
+      : 0;
+  const tolerance = Math.max(CLAIM_STUCK_MS, declaredBashMs ?? 0, mcpInFlightTolerance);
   for (const claim of claims) {
     const claimedAt = Date.parse(claim.status_changed);
     if (Number.isNaN(claimedAt)) continue;
