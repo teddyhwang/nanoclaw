@@ -53,6 +53,12 @@ import './channels/index.js';
 // append registry-based modules. Imported for side effects (registrations).
 import './modules/index.js';
 
+// CLI command barrel — populates the `ncl` registry before the CLI server
+// accepts connections.
+import './cli/commands/index.js';
+import './cli/delivery-action.js';
+import { startCliServer, stopCliServer } from './cli/socket-server.js';
+
 import type { ChannelAdapter, ChannelSetup } from './channels/adapter.js';
 import { initChannelAdapters, teardownChannelAdapters, getChannelAdapter } from './channels/channel-registry.js';
 
@@ -174,6 +180,9 @@ async function main(): Promise<void> {
   startHostSweep();
   log.info('Host sweep started');
 
+  // 7. Start the `ncl` CLI socket server (data/ncl.sock).
+  await startCliServer();
+
   log.info('NanoClaw running');
 }
 
@@ -189,6 +198,7 @@ async function shutdown(signal: string): Promise<void> {
   }
   stopDeliveryPolls();
   stopHostSweep();
+  await stopCliServer();
   try {
     await teardownChannelAdapters();
   } finally {
