@@ -5,7 +5,8 @@ import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
 import { MockProvider } from './providers/mock.js';
-import { shouldSendErrorResponseForBatch } from './poll-loop.js';
+import { shouldSendErrorResponseForBatch, dispatchResultText } from './poll-loop.js';
+import type { RoutingContext } from './formatter.js';
 
 beforeEach(() => {
   initTestSessionDb();
@@ -386,5 +387,73 @@ describe('end-to-end with mock provider', () => {
     expect(outMessages).toHaveLength(1);
     expect(JSON.parse(outMessages[0].content).text).toBe('The answer is 4');
     expect(outMessages[0].in_reply_to).toBe('m1');
+  });
+});
+
+describe('dispatchResultText safety net (local fork patch)', () => {
+  const ROUTING: RoutingContext = {
+    platformId: 'discord:1158397269079506955:1192937484582142012',
+    channelType: 'discord',
+    threadId: null,
+    inReplyTo: 'm1',
+  };
+
+  function insertChannelDestination(name: string): void {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+         VALUES (?, ?, 'channel', ?, ?, NULL)`,
+      )
+      .run(name, name, ROUTING.channelType!, ROUTING.platformId!);
+  }
+
+  it('emits bare result text to the originating channel with a degraded label when no <message> block is present', () => {
+    insertChannelDestination('boys-night');
+
+    dispatchResultText('Calendar event created and the knowledge base updated.', ROUTING);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    const text = JSON.parse(out[0].content).text;
+    expect(text).toContain('[degraded — agent did not wrap reply in <message> block]');
+    expect(text).toContain('Calendar event created and the knowledge base updated.');
+    expect(out[0].channel_type).toBe(ROUTING.channelType);
+    expect(out[0].platform_id).toBe(ROUTING.platformId);
+  });
+
+  it('does not invoke safety net when at least one <message> block is dispatched (mixed turn)', () => {
+    insertChannelDestination('boys-night');
+
+    dispatchResultText(
+      'Some scratchpad notes.\n<message to="boys-night">Booked.</message>\nMore scratchpad.',
+      ROUTING,
+    );
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    const text = JSON.parse(out[0].content).text;
+    expect(text).toBe('Booked.');
+    expect(text).not.toContain('[degraded');
+  });
+
+  it('does not emit safety-net for empty/whitespace-only result text', () => {
+    insertChannelDestination('boys-night');
+
+    dispatchResultText('   \n\n   ', ROUTING);
+
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+
+  it('drops with log when routing has no origin channel (defensive)', () => {
+    const blankRouting: RoutingContext = {
+      platformId: null,
+      channelType: null,
+      threadId: null,
+      inReplyTo: null,
+    };
+
+    dispatchResultText('I did the thing.', blankRouting);
+
+    expect(getUndeliveredMessages()).toHaveLength(0);
   });
 });

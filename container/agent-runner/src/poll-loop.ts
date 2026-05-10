@@ -629,7 +629,9 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
  * The agent must always wrap output in <message to="name">...</message>
  * blocks, even with a single destination. Bare text is scratchpad only.
  */
-function dispatchResultText(text: string, routing: RoutingContext): void {
+// Exported for tests. Local-fork patch: the safety-net branch needs
+// focused coverage so the silent-drop class of bug stays caught.
+export function dispatchResultText(text: string, routing: RoutingContext): void {
   const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
 
   let match: RegExpExecArray | null;
@@ -665,8 +667,40 @@ function dispatchResultText(text: string, routing: RoutingContext): void {
   }
 
   if (sent === 0 && text.trim()) {
-    log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent`);
+    log(`WARNING: agent output had no <message to="..."> blocks — emitting via safety-net to origin channel`);
+    deliverSafetyNet(text.trim(), routing);
   }
+}
+
+/**
+ * Last-resort delivery when the agent emitted result text but never wrapped
+ * any of it in `<message to="...">`. Without this we silently drop the turn
+ * and the user sees nothing — same shape as the silent-fallback regression
+ * incident 2026-05-10 in `#boysnight`. Mirrors the v2 runner's
+ * `assistant-fallback`: send the bare text to the originating channel with
+ * a label so the user (a) gets *something*, and (b) knows the agent
+ * skipped the wrap so the problem is visible instead of invisible.
+ *
+ * Stays local-fork-only — upstream's poll-loop has the strict drop
+ * contract on purpose; this is Optimus-side belt-and-suspenders against
+ * agent-prompt drift.
+ */
+function deliverSafetyNet(body: string, routing: RoutingContext): void {
+  if (!routing.platformId || !routing.channelType) {
+    log(`safety-net: no origin channel in routing context, dropping`);
+    return;
+  }
+  const labeled = `[degraded — agent did not wrap reply in <message> block]\n\n${body}`;
+  const destRouting = resolveDestinationThread(routing.channelType, routing.platformId);
+  writeMessageOut({
+    id: generateId(),
+    in_reply_to: destRouting?.inReplyTo ?? routing.inReplyTo,
+    kind: 'chat',
+    platform_id: routing.platformId,
+    channel_type: routing.channelType,
+    thread_id: destRouting?.threadId ?? null,
+    content: JSON.stringify({ text: labeled }),
+  });
 }
 
 function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): void {
