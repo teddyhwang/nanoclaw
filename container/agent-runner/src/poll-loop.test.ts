@@ -444,6 +444,28 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(getUndeliveredMessages()).toHaveLength(0);
   });
 
+  it('does not emit safety-net for <internal>-only output (private maintenance turn)', () => {
+    insertChannelDestination('boys-night');
+
+    dispatchResultText(
+      '<internal>Nothing new to save. The Tico calendar preference and the security rule were already saved in the previous maintenance task.</internal>',
+      ROUTING,
+    );
+
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+
+  it('does not emit safety-net when only <internal> tags + whitespace remain after strip', () => {
+    insertChannelDestination('boys-night');
+
+    dispatchResultText(
+      '\n  <internal>silent decision</internal>\n  <internal>another silent thought</internal>  \n',
+      ROUTING,
+    );
+
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+
   it('drops with log when routing has no origin channel (defensive)', () => {
     const blankRouting: RoutingContext = {
       platformId: null,

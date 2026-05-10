@@ -660,15 +660,21 @@ export function dispatchResultText(text: string, routing: RoutingContext): void 
     scratchpadParts.push(text.slice(lastIndex));
   }
 
-  const scratchpad = stripInternalTags(scratchpadParts.join(''));
+  const scratchpad = stripInternalTags(scratchpadParts.join('')).trim();
 
   if (scratchpad) {
     log(`[scratchpad] ${scratchpad.slice(0, 500)}${scratchpad.length > 500 ? '…' : ''}`);
   }
 
-  if (sent === 0 && text.trim()) {
+  // Safety-net only fires when there's user-facing content the runner
+  // would otherwise silently drop. `<internal>...</internal>` is the
+  // agent's private-thoughts tag — content inside it is *meant* to stay
+  // private (e.g. "Nothing new to save" from a maintenance reflection).
+  // Use the post-strip scratchpad as the trigger so internal-only output
+  // doesn't get force-emitted with a degraded label.
+  if (sent === 0 && scratchpad) {
     log(`WARNING: agent output had no <message to="..."> blocks — emitting via safety-net to origin channel`);
-    deliverSafetyNet(text.trim(), routing);
+    deliverSafetyNet(scratchpad, routing);
   }
 }
 
