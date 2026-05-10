@@ -339,6 +339,15 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           }
         }
         if (buffer) {
+          // Resize oversized images (>~3.5MB raw) so the base64 payload
+          // stays under Anthropic's 5MB per-image cap. Static formats
+          // (JPEG/PNG/WebP) get resized to 1024px-max + JPEG q85;
+          // animated formats pass through. Mirrors v1's
+          // `resizeToJpegBuffer` in apps/nanoclaw/src/shared/image-processing.ts.
+          if (att.type === 'image' && att.mimeType) {
+            const { maybeResizeImage } = await import('../media/image-processing.js');
+            buffer = await maybeResizeImage(buffer, att.mimeType);
+          }
           entry.data = buffer.toString('base64');
           // Transcribe voice/audio attachments host-side so the agent sees
           // text instead of opaque base64. Mirrors v1 behavior

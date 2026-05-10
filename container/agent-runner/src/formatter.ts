@@ -136,9 +136,7 @@ export interface RoutingContext {
  *
  * Returns the picked message or null when the batch is empty.
  */
-export function pickInReplyToMessage(
-  messages: MessageInRow[],
-): MessageInRow | null {
+export function pickInReplyToMessage(messages: MessageInRow[]): MessageInRow | null {
   if (messages.length === 0) return null;
   const trigger = messages.find((m) => m.trigger === 1);
   return trigger ?? messages[0];
@@ -328,4 +326,63 @@ function escapeXml(str: string): string {
  */
 export function stripInternalTags(text: string): string {
   return text.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+}
+
+/**
+ * Walk a batch of messages and collect image attachments suitable for
+ * Anthropic vision multimodal blocks. Each result is `{ messageId, name,
+ * absolutePath, mediaType }` where `absolutePath` is the container's view
+ * of the file (`/workspace/<localPath>`) — caller reads bytes off disk.
+ *
+ * Only `type === 'image'` attachments with a `localPath` are surfaced.
+ * Attachments without `localPath` (e.g. download failed host-side, or
+ * non-image types) are skipped. mediaType is normalized to one of the
+ * four Anthropic-accepted forms; mismatched mimeTypes (e.g. `image/heic`)
+ * are dropped because the SDK rejects them with a 400.
+ */
+export interface InboundImageRef {
+  messageId: string;
+  name: string;
+  absolutePath: string;
+  mediaType: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
+}
+
+const ACCEPTED_IMAGE_TYPES: ReadonlySet<InboundImageRef['mediaType']> = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/gif',
+  'image/webp',
+]);
+
+function normalizeMediaType(raw: string | undefined): InboundImageRef['mediaType'] | null {
+  if (!raw) return null;
+  const lower = raw.toLowerCase();
+  // Some platforms emit `image/jpg` or `image/x-png`; map common variants.
+  if (lower === 'image/jpg' || lower === 'image/pjpeg') return 'image/jpeg';
+  if (ACCEPTED_IMAGE_TYPES.has(lower as InboundImageRef['mediaType'])) {
+    return lower as InboundImageRef['mediaType'];
+  }
+  return null;
+}
+
+export function extractImageAttachments(messages: MessageInRow[]): InboundImageRef[] {
+  const refs: InboundImageRef[] = [];
+  for (const msg of messages) {
+    const content = parseContent(msg.content);
+    const attachments = content?.attachments;
+    if (!Array.isArray(attachments)) continue;
+    for (const att of attachments) {
+      if (att?.type !== 'image') continue;
+      if (typeof att.localPath !== 'string' || !att.localPath) continue;
+      const mediaType = normalizeMediaType(att.mimeType);
+      if (!mediaType) continue;
+      refs.push({
+        messageId: msg.id,
+        name: att.name || att.filename || 'image',
+        absolutePath: `/workspace/${att.localPath}`,
+        mediaType,
+      });
+    }
+  }
+  return refs;
 }

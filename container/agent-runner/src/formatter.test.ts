@@ -18,6 +18,7 @@ import {
   stripInternalTags,
   extractMessageSender,
   pickInReplyToMessage,
+  extractImageAttachments,
 } from './formatter.js';
 import { TIMEZONE } from './timezone.js';
 
@@ -29,12 +30,7 @@ afterEach(() => {
   closeSessionDb();
 });
 
-function insertMessage(
-  id: string,
-  kind: string,
-  content: object,
-  opts?: { timestamp?: string },
-) {
+function insertMessage(id: string, kind: string, content: object, opts?: { timestamp?: string }) {
   const timestamp = opts?.timestamp ?? new Date().toISOString();
   getInboundDb()
     .prepare(
@@ -147,9 +143,7 @@ describe('stripInternalTags', () => {
   });
 
   it('strips multi-line internal tags', () => {
-    expect(stripInternalTags('hello <internal>\nsecret\nstuff\n</internal> world')).toBe(
-      'hello  world',
-    );
+    expect(stripInternalTags('hello <internal>\nsecret\nstuff\n</internal> world')).toBe('hello  world');
   });
 
   it('strips multiple internal tag blocks', () => {
@@ -165,9 +159,7 @@ describe('stripInternalTags', () => {
   });
 
   it('preserves content that surrounds internal tags', () => {
-    expect(stripInternalTags('<internal>thinking</internal>The answer is 42')).toBe(
-      'The answer is 42',
-    );
+    expect(stripInternalTags('<internal>thinking</internal>The answer is 42')).toBe('The answer is 42');
   });
 });
 
@@ -264,11 +256,7 @@ describe('pickInReplyToMessage', () => {
   it('handles a mix where multiple trigger=1 rows exist', () => {
     // When two trigger=1 rows are in the batch (both real engages), the
     // newest wins — that's the agent's most recent reason to be active.
-    const messages = [
-      row('newer-mention', 1, 70),
-      row('drive-by', 0, 68),
-      row('older-mention', 1, 64),
-    ];
+    const messages = [row('newer-mention', 1, 70), row('drive-by', 0, 68), row('older-mention', 1, 64)];
     const m = pickInReplyToMessage(messages);
     expect(m?.id).toBe('newer-mention');
   });
@@ -282,5 +270,152 @@ describe('pickInReplyToMessage', () => {
     const messages = [row('seq66-sorta', 0, 66), row('seq64-question', 1, 64)];
     const m = pickInReplyToMessage(messages);
     expect(m?.id).toBe('seq64-question');
+  });
+});
+
+describe('extractImageAttachments', () => {
+  function row(id: string, content: object): MessageInRow {
+    return {
+      id,
+      seq: 1,
+      kind: 'chat-sdk',
+      timestamp: '2026-05-09T20:00:00.000Z',
+      status: 'pending',
+      process_after: null,
+      recurrence: null,
+      tries: 0,
+      trigger: 1,
+      platform_id: 'discord:abc',
+      channel_type: 'discord',
+      thread_id: null,
+      content: JSON.stringify(content),
+    };
+  }
+
+  it('returns empty array on no attachments', () => {
+    expect(extractImageAttachments([row('a', { text: 'hi' })])).toEqual([]);
+  });
+
+  it('extracts a single image with localPath and accepted mediaType', () => {
+    const refs = extractImageAttachments([
+      row('msg1', {
+        text: 'see attached',
+        attachments: [
+          {
+            type: 'image',
+            name: 'screenshot.png',
+            mimeType: 'image/png',
+            localPath: 'inbox/msg1/screenshot.png',
+            size: 12345,
+          },
+        ],
+      }),
+    ]);
+    expect(refs).toHaveLength(1);
+    expect(refs[0]).toEqual({
+      messageId: 'msg1',
+      name: 'screenshot.png',
+      absolutePath: '/workspace/inbox/msg1/screenshot.png',
+      mediaType: 'image/png',
+    });
+  });
+
+  it('skips attachments without localPath (download failed host-side)', () => {
+    expect(
+      extractImageAttachments([
+        row('msg1', {
+          attachments: [
+            {
+              type: 'image',
+              name: 'broken.png',
+              mimeType: 'image/png',
+              size: 100,
+              // no localPath
+            },
+          ],
+        }),
+      ]),
+    ).toEqual([]);
+  });
+
+  it('skips non-image attachment types', () => {
+    expect(
+      extractImageAttachments([
+        row('msg1', {
+          attachments: [
+            { type: 'file', name: 'doc.pdf', localPath: 'inbox/msg1/doc.pdf' },
+            { type: 'video', name: 'clip.mp4', localPath: 'inbox/msg1/clip.mp4' },
+          ],
+        }),
+      ]),
+    ).toEqual([]);
+  });
+
+  it('normalizes image/jpg → image/jpeg', () => {
+    const refs = extractImageAttachments([
+      row('msg1', {
+        attachments: [
+          {
+            type: 'image',
+            name: 'photo.jpg',
+            mimeType: 'image/jpg',
+            localPath: 'inbox/msg1/photo.jpg',
+          },
+        ],
+      }),
+    ]);
+    expect(refs[0].mediaType).toBe('image/jpeg');
+  });
+
+  it('drops images with unsupported mediaType (e.g. heic)', () => {
+    expect(
+      extractImageAttachments([
+        row('msg1', {
+          attachments: [
+            {
+              type: 'image',
+              name: 'photo.heic',
+              mimeType: 'image/heic',
+              localPath: 'inbox/msg1/photo.heic',
+            },
+          ],
+        }),
+      ]),
+    ).toEqual([]);
+  });
+
+  it('handles multiple messages with multiple images', () => {
+    const refs = extractImageAttachments([
+      row('msg1', {
+        attachments: [
+          { type: 'image', name: 'a.png', mimeType: 'image/png', localPath: 'inbox/msg1/a.png' },
+          { type: 'image', name: 'b.jpg', mimeType: 'image/jpeg', localPath: 'inbox/msg1/b.jpg' },
+        ],
+      }),
+      row('msg2', {
+        attachments: [{ type: 'image', name: 'c.gif', mimeType: 'image/gif', localPath: 'inbox/msg2/c.gif' }],
+      }),
+    ]);
+    expect(refs.map((r) => r.name)).toEqual(['a.png', 'b.jpg', 'c.gif']);
+    expect(refs.map((r) => r.messageId)).toEqual(['msg1', 'msg1', 'msg2']);
+  });
+
+  it('handles malformed JSON content gracefully', () => {
+    const m: MessageInRow = {
+      id: 'bad',
+      seq: 1,
+      kind: 'chat-sdk',
+      timestamp: '2026-05-09T20:00:00.000Z',
+      status: 'pending',
+      process_after: null,
+      recurrence: null,
+      tries: 0,
+      trigger: 1,
+      platform_id: null,
+      channel_type: null,
+      thread_id: null,
+      content: 'not-json',
+    };
+    expect(extractImageAttachments([m])).toEqual([]);
   });
 });

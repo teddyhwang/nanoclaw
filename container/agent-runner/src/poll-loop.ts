@@ -4,18 +4,21 @@ import { writeMessageOut } from './db/messages-out.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import { clearContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
 import { clearCurrentInReplyTo, setCurrentInReplyTo } from './current-batch.js';
+import fs from 'fs';
 import {
   formatMessages,
   extractRouting,
   pickInReplyToMessage,
   extractMessageSender,
+  extractImageAttachments,
   categorizeMessage,
   isClearCommand,
   isRunnerCommand,
   stripInternalTags,
+  type InboundImageRef,
   type RoutingContext,
 } from './formatter.js';
-import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
+import type { AgentProvider, AgentQuery, ImageContentBlock, ProviderEvent } from './providers/types.js';
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
@@ -26,6 +29,39 @@ function log(msg: string): void {
 
 function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * Read inbound image attachments off disk and convert to Anthropic
+ * vision content blocks. The host writes raw bytes to
+ * `<sessDir>/inbox/<msgId>/<file>` (resized client-side via sharp when
+ * over Anthropic's 5MB cap; see src/media/image-processing.ts), and the
+ * session dir is mounted at `/workspace`. We base64-encode and emit the
+ * blocks for the provider.
+ *
+ * Per-image read failure is logged + skipped so one bad attachment
+ * doesn't kill the whole turn. Returns empty array when the input is
+ * empty or all reads failed.
+ */
+function loadImageBlocks(refs: InboundImageRef[]): ImageContentBlock[] {
+  const blocks: ImageContentBlock[] = [];
+  for (const ref of refs) {
+    try {
+      const buffer = fs.readFileSync(ref.absolutePath);
+      blocks.push({
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: ref.mediaType,
+          data: buffer.toString('base64'),
+        },
+      });
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      log(`Failed to read image attachment ${ref.absolutePath}: ${errMsg}`);
+    }
+  }
+  return blocks;
 }
 
 export interface PollLoopConfig {
@@ -170,7 +206,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // exactly the v1 requires_trigger gap operators reported (2026-05-09
     // AI Friends "close.. just gotta suppress those embeds" echo).
     if (!keep.some((m) => m.trigger === 1)) {
-      log(`Skipping ${keep.length} accumulate-only message(s) after script filter — leaving pending until next trigger`);
+      log(
+        `Skipping ${keep.length} accumulate-only message(s) after script filter — leaving pending until next trigger`,
+      );
       continue;
     }
 
@@ -187,11 +225,23 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     const triggerRow = keep.find((m) => m.trigger === 1) ?? keep[0];
     const activeSender = extractMessageSender(triggerRow);
 
+    // Load any inbound image attachments as Anthropic vision content blocks.
+    // The host wrote bytes to <sessDir>/inbox/<msgId>/<file> (sized to fit
+    // the 5MB API cap by chat-sdk-bridge before insert), and the session dir
+    // mounts at /workspace, so absolutePath is `/workspace/inbox/...`.
+    // Empty array on no images / all reads failed — provider sends text-only.
+    const imageRefs = extractImageAttachments(keep);
+    const imageBlocks = loadImageBlocks(imageRefs);
+    if (imageBlocks.length > 0) {
+      log(`Loaded ${imageBlocks.length} image attachment(s) for multimodal turn`);
+    }
+
     const query = config.provider.query({
       prompt,
       continuation,
       cwd: config.cwd,
       systemContext: config.systemContext,
+      imageBlocks: imageBlocks.length > 0 ? imageBlocks : undefined,
     });
 
     // Process the query while concurrently polling for new messages
@@ -354,9 +404,7 @@ async function processQuery(
         if (!newMessages.some((m) => m.trigger === 1)) {
           // Don't markCompleted these — they need to ride along with the
           // next real trigger so the agent sees them as context.
-          log(
-            `Skipping ${newMessages.length} accumulate-only follow-up(s) — leaving pending until next trigger`,
-          );
+          log(`Skipping ${newMessages.length} accumulate-only follow-up(s) — leaving pending until next trigger`);
           return;
         }
 
@@ -398,7 +446,9 @@ async function processQuery(
           newMessages = sameSender;
           if (newMessages.length === 0) {
             if (deferred.length > 0 && !endedForCommand) {
-              log(`All pending messages are cross-sender — ending active query so outer loop can re-query for deferred sender`);
+              log(
+                `All pending messages are cross-sender — ending active query so outer loop can re-query for deferred sender`,
+              );
               endedForCommand = true;
               query.end();
             }
@@ -449,8 +499,20 @@ async function processQuery(
 
         const keptIds = keep.map((m) => m.id);
         const prompt = formatMessages(keep);
-        log(`Pushing ${keep.length} follow-up message(s) into active query`);
-        query.push(prompt);
+        // Load inbound image attachments for the follow-up batch too —
+        // operator can drop a screenshot mid-turn and the agent should see
+        // it without waiting for a fresh query. Same /workspace/inbox/ path
+        // shape as the initial turn.
+        const followupImageRefs = extractImageAttachments(keep);
+        const followupImageBlocks = loadImageBlocks(followupImageRefs);
+        if (followupImageBlocks.length > 0) {
+          log(
+            `Pushing ${keep.length} follow-up message(s) with ${followupImageBlocks.length} image(s) into active query`,
+          );
+        } else {
+          log(`Pushing ${keep.length} follow-up message(s) into active query`);
+        }
+        query.push(prompt, followupImageBlocks.length > 0 ? followupImageBlocks : undefined);
         markCompleted(keptIds);
         // Refresh routing.inReplyTo so subsequent outbound rows reply to the
         // most recent triggering message, not the one captured when this

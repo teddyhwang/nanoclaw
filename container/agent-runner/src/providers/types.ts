@@ -32,6 +32,20 @@ export interface QueryInput {
   prompt: string;
 
   /**
+   * Image content blocks to send with the initial user message as multimodal
+   * content. When non-empty, the provider sends `[{type:'text', text: prompt},
+   * ...imageBlocks]` instead of a text-only message. Used to deliver inbound
+   * chat image attachments (Discord/Slack/Telegram screenshots) to vision-
+   * capable models. Providers without vision support should ignore.
+   *
+   * Built by the poll-loop from `messages_in.attachments[].localPath` for
+   * any attachment with `type === 'image'`. The text prompt still references
+   * the image marker (`[image: name — saved to /workspace/inbox/<id>/<name>]`)
+   * so the model knows which file the bytes correspond to.
+   */
+  imageBlocks?: ImageContentBlock[];
+
+  /**
    * Opaque continuation token from a previous query. The provider decides
    * what this means (session ID, thread ID, nothing at all).
    */
@@ -46,6 +60,20 @@ export interface QueryInput {
    */
   systemContext?: {
     instructions?: string;
+  };
+}
+
+/**
+ * Anthropic-shaped image content block. The provider may translate to its
+ * own SDK's shape — we use Anthropic's because Claude is the primary
+ * vision-capable provider and the SDK accepts this verbatim.
+ */
+export interface ImageContentBlock {
+  type: 'image';
+  source: {
+    type: 'base64';
+    media_type: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
+    data: string;
   };
 }
 
@@ -80,8 +108,12 @@ export interface McpHttpServerConfig {
 }
 
 export interface AgentQuery {
-  /** Push a follow-up message into the active query. */
-  push(message: string): void;
+  /**
+   * Push a follow-up message into the active query. Pass `imageBlocks` to
+   * send a multimodal message (text + images) rather than text-only. Empty
+   * or omitted `imageBlocks` falls back to a text-only message.
+   */
+  push(message: string, imageBlocks?: ImageContentBlock[]): void;
 
   /** Signal that no more input will be sent. */
   end(): void;

@@ -58,6 +58,7 @@ export class MockProvider implements AgentProvider {
 
     return {
       push(message: string) {
+        // Mock provider ignores image blocks — vision is provider-specific.
         pending.push(message);
         waiting?.();
       },
