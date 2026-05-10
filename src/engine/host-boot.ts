@@ -15,6 +15,7 @@ import { engineEvents } from './events.js';
 import { enforceStartupBackoff, resetCircuitBreaker } from '../circuit-breaker.js';
 import { migrateGroupsToClaudeLocal } from '../claude-md-compose.js';
 import { initDb } from '../db/connection.js';
+import { backfillContainerConfigs } from '../backfill-container-configs.js';
 import { runMigrations } from '../db/migrations/index.js';
 import { applyPluginMigrations } from './db-extensions.js';
 import { ensureContainerRuntimeRunning, cleanupOrphans } from '../container-runtime.js';
@@ -68,6 +69,12 @@ export async function _bootForHost(opts: { managedSignals: boolean }): Promise<v
 
   // 1b. One-time filesystem cutover — idempotent.
   migrateGroupsToClaudeLocal();
+
+  // 1c. One-time backfill — seed container_configs rows from any pre-DB
+  //     `groups/<folder>/container.json` files. Idempotent: rows that
+  //     already exist are skipped. Runs here so embedded hosts (e.g.
+  //     Optimus) get the same behaviour as the standalone src/index.ts.
+  backfillContainerConfigs();
 
   // 2. Container runtime
   ensureContainerRuntimeRunning();
