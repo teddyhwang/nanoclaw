@@ -304,23 +304,70 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           width: (att as unknown as Record<string, unknown>).width,
           height: (att as unknown as Record<string, unknown>).height,
         };
+        // Two paths to populate `data`:
+        //   (1) `fetchData()` — preferred when the adapter exposes it;
+        //       handles auth automatically (Slack private URLs etc.).
+        //   (2) `url` fallback — public CDN URLs (Discord attachments).
+        //       Discord's chat-adapter populates `url` but does NOT expose
+        //       `fetchData`, so without this fallback every Discord image
+        //       lands in the container with metadata only and the agent
+        //       sees no bytes ("I can't pull the screenshot in"). Observed
+        //       live on 2026-05-09 with Adrian's Google-reconnect
+        //       screenshot in boysnight.
+        let buffer: Buffer | null = null;
         if (att.fetchData) {
           try {
-            const buffer = await att.fetchData();
-            entry.data = buffer.toString('base64');
-            // Transcribe voice/audio attachments host-side so the agent
-            // sees text instead of opaque base64. Mirrors v1 behavior
-            // (apps/nanoclaw/src/transcription.ts).
-            if (att.mimeType && att.mimeType.startsWith('audio/')) {
-              const { transcribeAudio } = await import('../media/transcription.js');
+            buffer = await att.fetchData();
+          } catch (err) {
+            log.warn('Failed to fetchData attachment', { type: att.type, name: att.name, err });
+          }
+        }
+        if (!buffer && att.url) {
+          try {
+            const res = await fetch(att.url);
+            if (!res.ok) {
+              throw new Error(`HTTP ${res.status} ${res.statusText}`);
+            }
+            buffer = Buffer.from(await res.arrayBuffer());
+          } catch (err) {
+            log.warn('Failed to fetch attachment by url', {
+              type: att.type,
+              name: att.name,
+              url: att.url,
+              err,
+            });
+          }
+        }
+        if (buffer) {
+          entry.data = buffer.toString('base64');
+          // Transcribe voice/audio attachments host-side so the agent sees
+          // text instead of opaque base64. Mirrors v1 behavior
+          // (apps/nanoclaw/src/transcription.ts).
+          if (att.mimeType && att.mimeType.startsWith('audio/')) {
+            const { transcribeAudio } = await import('../media/transcription.js');
+            try {
               entry.transcript = await transcribeAudio(buffer, {
                 mimeType: att.mimeType,
                 filename: att.name ?? 'voice.ogg',
               });
+            } catch (err) {
+              log.warn('Failed to transcribe audio attachment', {
+                name: att.name,
+                err,
+              });
             }
-          } catch (err) {
-            log.warn('Failed to download attachment', { type: att.type, err });
           }
+        } else if (att.type === 'image' || att.type === 'video' || att.type === 'audio') {
+          // Loud failure for media types — text/file we can fall through
+          // and the agent's formatter will render `[file: name]`. Media
+          // without bytes is silently broken from the agent's POV
+          // (the recurring "I can't pull the screenshot" failure mode).
+          log.error('Attachment media bytes unavailable — agent will see metadata only', {
+            type: att.type,
+            name: att.name,
+            hasFetchData: !!att.fetchData,
+            hasUrl: !!att.url,
+          });
         }
         enriched.push(entry);
       }
