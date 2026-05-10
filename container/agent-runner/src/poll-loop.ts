@@ -7,6 +7,7 @@ import { clearCurrentInReplyTo, setCurrentInReplyTo } from './current-batch.js';
 import {
   formatMessages,
   extractRouting,
+  pickInReplyToMessage,
   extractMessageSender,
   categorizeMessage,
   isClearCommand,
@@ -365,6 +366,21 @@ async function processQuery(
         // combined reply. Leave those rows pending; the outer loop re-queries
         // them after the current turn ends, where they get their own respond_to
         // marker and native platform reply-threading.
+        //
+        // **End the active query when ALL pending messages are cross-sender.**
+        // The query intentionally stays open across same-sender follow-ups to
+        // avoid re-spawning the SDK every turn. But when the only thing
+        // pending is from a different sender, the query has nothing to do —
+        // it just keeps deferring on every poll iteration. Without ending,
+        // the outer loop never gets to start a fresh query for the deferred
+        // sender, and the host's absolute-ceiling watchdog eventually kills
+        // the container after ~30 min. Symptom: pending escalation/task rows
+        // sit untouched while the log spams `Deferring N cross-sender
+        // follow-up(s)` every 500ms (boysnight 2026-05-09: Adrian's
+        // re-escalation request + a maintenance task pending 30 min before
+        // container kill). Ending the stream lets the outer for-await unwind,
+        // the outer loop re-queries fresh, and `activeSender` gets bound to
+        // the deferred sender so the right respond_to lands.
         if (activeSender) {
           const sameSender: typeof newMessages = [];
           const deferred: string[] = [];
@@ -380,7 +396,14 @@ async function processQuery(
             log(`Deferring ${deferred.length} cross-sender follow-up(s) — will re-process after active turn`);
           }
           newMessages = sameSender;
-          if (newMessages.length === 0) return;
+          if (newMessages.length === 0) {
+            if (deferred.length > 0 && !endedForCommand) {
+              log(`All pending messages are cross-sender — ending active query so outer loop can re-query for deferred sender`);
+              endedForCommand = true;
+              query.end();
+            }
+            return;
+          }
         }
 
         const newIds = newMessages.map((m) => m.id);
@@ -437,9 +460,15 @@ async function processQuery(
         // rendering Discord's reply pill against the oldest message in the
         // chain rather than the last @mention/reply that the agent is
         // actually responding to.
-        const newest = keep[0]; // formatMessages doesn't reorder; keep mirrors getRecent's seq DESC
-        if (newest?.id) {
-          routing.inReplyTo = newest.id;
+        //
+        // Pick the newest *triggering* row, not just the newest row. A
+        // non-trigger drive-by ("Sorta", emoji, ack) that arrives between
+        // an @mention and the agent's reply would otherwise capture the
+        // pill. See pickInReplyToMessage for the contract; the accumulate
+        // gate above guarantees `keep` has at least one trigger=1 row.
+        const target = pickInReplyToMessage(keep);
+        if (target?.id) {
+          routing.inReplyTo = target.id;
         }
       } catch (err) {
         // Without this catch the rejection escapes the void IIFE and Node

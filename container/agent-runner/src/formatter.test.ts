@@ -12,8 +12,13 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb } from './db/connection.js';
-import { getPendingMessages } from './db/messages-in.js';
-import { formatMessages, stripInternalTags, extractMessageSender } from './formatter.js';
+import { getPendingMessages, type MessageInRow } from './db/messages-in.js';
+import {
+  formatMessages,
+  stripInternalTags,
+  extractMessageSender,
+  pickInReplyToMessage,
+} from './formatter.js';
 import { TIMEZONE } from './timezone.js';
 
 beforeEach(() => {
@@ -199,5 +204,83 @@ describe('extractMessageSender', () => {
     const msgs = getPendingMessages();
     const m = msgs.find((m) => m.id === 'm-bad')!;
     expect(extractMessageSender(m)).toBeNull();
+  });
+});
+
+describe('pickInReplyToMessage', () => {
+  // Build a minimal MessageInRow inline. The function only inspects `id`
+  // and `trigger`, so other fields are stub values.
+  function row(id: string, trigger: 0 | 1, seq: number): MessageInRow {
+    return {
+      id,
+      seq,
+      kind: 'chat-sdk',
+      timestamp: '2026-05-09T20:36:00.000Z',
+      status: 'pending',
+      process_after: null,
+      recurrence: null,
+      tries: 0,
+      trigger,
+      platform_id: 'discord:1158397269079506955:1192937484582142012',
+      channel_type: 'discord',
+      thread_id: null,
+      content: '{}',
+    };
+  }
+
+  it('returns null on empty batch', () => {
+    expect(pickInReplyToMessage([])).toBeNull();
+  });
+
+  it('picks the only trigger=1 row when batch has one trigger', () => {
+    const m = pickInReplyToMessage([row('a', 1, 64)]);
+    expect(m?.id).toBe('a');
+  });
+
+  it('picks the newest trigger=1 row, skipping a newer trigger=0', () => {
+    // Caller passes seq DESC, so newer rows come first. The function must
+    // walk the array (in order) and pick the first trigger=1, skipping
+    // the trigger=0 drive-by ("Sorta") that arrived between a question
+    // and the agent's reply.
+    const messages = [
+      row('sorta', 0, 66), // newest, but a non-trigger drive-by
+      row('question', 1, 64), // older but the actual @mention/reply-to-bot
+      row('context', 0, 62), // older still, accumulate-only
+    ];
+    const m = pickInReplyToMessage(messages);
+    expect(m?.id).toBe('question');
+  });
+
+  it('falls back to the newest row when no trigger=1 is present', () => {
+    // Defensive: shouldn't normally happen because the accumulate gate
+    // upstream rejects all-trigger=0 batches. But if we ever get one,
+    // return *something* rather than null so callers writing
+    // `in_reply_to` always have an id.
+    const messages = [row('latest', 0, 70), row('older', 0, 68)];
+    const m = pickInReplyToMessage(messages);
+    expect(m?.id).toBe('latest');
+  });
+
+  it('handles a mix where multiple trigger=1 rows exist', () => {
+    // When two trigger=1 rows are in the batch (both real engages), the
+    // newest wins — that's the agent's most recent reason to be active.
+    const messages = [
+      row('newer-mention', 1, 70),
+      row('drive-by', 0, 68),
+      row('older-mention', 1, 64),
+    ];
+    const m = pickInReplyToMessage(messages);
+    expect(m?.id).toBe('newer-mention');
+  });
+
+  it('matches the boysnight repro: question + Sorta drive-by', () => {
+    // Live failure shape from 2026-05-09 ~8:36 PM ET in boys-night:
+    // - seq 60 trigger=1 (Teddy's @Optimus question — earlier turn, completed)
+    // - seq 64 trigger=1 ("What makes you think I'm busy on June 19?")
+    // - seq 66 trigger=0 ("Sorta" — drive-by reply to mackchiu, no @mention)
+    // The agent's correction reply should land on seq 64, not seq 66.
+    const messages = [row('seq66-sorta', 0, 66), row('seq64-question', 1, 64)];
+    const m = pickInReplyToMessage(messages);
+    expect(m?.id).toBe('seq64-question');
   });
 });

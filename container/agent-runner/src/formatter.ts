@@ -117,16 +117,52 @@ export interface RoutingContext {
 }
 
 /**
+ * Pick the message whose id should land in `in_reply_to` on outbound
+ * rows. The intent of an inbound batch's reply target is "the message
+ * the agent is responding to" — which is the *triggering* message
+ * (engage_mode match: @mention, reply-to-bot, pattern, etc.), not
+ * necessarily the newest message in the batch.
+ *
+ * Failure case this guards against: two near-simultaneous inbound
+ * messages where the newest is a non-trigger drive-by ("optimus is
+ * smarter again", "Sorta", emoji, ack) and the older one is the
+ * actual @mention the agent is answering. Caller passes messages in
+ * `seq DESC` (newest first); we walk to find the newest `trigger=1`
+ * row. If none exist (shouldn't happen for normal user-facing
+ * batches; possible for pure accumulate-only batches that the
+ * accumulate gate above this filter would have already rejected),
+ * fall back to the newest message overall so callers always get a
+ * non-null id when the batch is non-empty.
+ *
+ * Returns the picked message or null when the batch is empty.
+ */
+export function pickInReplyToMessage(
+  messages: MessageInRow[],
+): MessageInRow | null {
+  if (messages.length === 0) return null;
+  const trigger = messages.find((m) => m.trigger === 1);
+  return trigger ?? messages[0];
+}
+
+/**
  * Extract routing context from a batch of messages.
- * Uses the first message's routing fields.
+ *
+ * `platformId`, `channelType`, and `threadId` come from the first row
+ * (any row in the batch shares the same destination — the host scopes
+ * each session to a single messaging group). `inReplyTo` picks the
+ * newest *triggering* message via `pickInReplyToMessage` so the
+ * outbound reply pill points at the @mention/reply-to-bot the agent
+ * is actually answering, not at a non-trigger message that happened
+ * to arrive in the same batch.
  */
 export function extractRouting(messages: MessageInRow[]): RoutingContext {
   const first = messages[0];
+  const replyTarget = pickInReplyToMessage(messages);
   return {
     platformId: first?.platform_id ?? null,
     channelType: first?.channel_type ?? null,
     threadId: first?.thread_id ?? null,
-    inReplyTo: first?.id ?? null,
+    inReplyTo: replyTarget?.id ?? null,
   };
 }
 
