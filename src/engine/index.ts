@@ -61,6 +61,13 @@ export {
 } from './router-hooks.js';
 
 export {
+  addDestinationGuard,
+  type DestinationGuardFn,
+  type DestinationGuardCtx,
+  type DestinationGuardResult,
+} from './destination-guards.js';
+
+export {
   registerMultiChannelAdapter,
   type MultiChannelFactory,
   type MultiChannelRegistration,

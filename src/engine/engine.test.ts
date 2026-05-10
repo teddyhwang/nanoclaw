@@ -27,6 +27,12 @@ import {
 import { _resetSkillRootsForTests, addSkillRoot, getExtraSkillRoots } from './skill-roots.js';
 import { _resetWorkspaceResolverForTests, resolveWorkspace, setWorkspaceResolver } from './workspace.js';
 import { _resetRouterHooksForTests, addAccessGate, addSenderResolver } from './router-hooks.js';
+import {
+  _resetDestinationGuardsForTests,
+  addDestinationGuard,
+  runDestinationGuards,
+  type DestinationGuardCtx,
+} from './destination-guards.js';
 import { applyPlugins, createPluginContext, type NanoClawPlugin } from './plugin.js';
 import type { InboundEvent } from '../channels/adapter.js';
 
@@ -38,6 +44,7 @@ afterEach(() => {
   _resetSkillRootsForTests();
   _resetWorkspaceResolverForTests();
   _resetRouterHooksForTests();
+  _resetDestinationGuardsForTests();
 });
 
 describe('engine paths', () => {
@@ -161,6 +168,84 @@ describe('router hooks (composable gates)', () => {
     addAccessGate(() => ({ allowed: false, reason: 'rate-limit' }));
     addAccessGate(() => ({ allowed: true }));
     expect(true).toBe(true);
+  });
+});
+
+describe('destination guards', () => {
+  function makeCtx(overrides: Partial<DestinationGuardCtx> = {}): DestinationGuardCtx {
+    return {
+      agentGroupId: 'ag-1',
+      sessionId: 'sess-1',
+      messagingGroup: {
+        id: 'mg-1',
+        channel_type: 'discord',
+        platform_id: 'discord:1:2',
+        name: 'Boys Night',
+        is_group: 1,
+        unknown_sender_policy: 'strict',
+        created_at: '2026-05-10T00:00:00Z',
+      },
+      destination: { localName: 'shared:boysnight:discord', targetType: 'channel', targetId: 'mg-1' },
+      ...overrides,
+    };
+  }
+
+  it('returns allowed when no guards registered', async () => {
+    const r = await runDestinationGuards(makeCtx());
+    expect(r).toEqual({ allowed: true });
+  });
+
+  it('returns allowed when every guard allows', async () => {
+    addDestinationGuard(() => ({ allowed: true }));
+    addDestinationGuard(() => ({ allowed: true }));
+    const r = await runDestinationGuards(makeCtx());
+    expect(r).toEqual({ allowed: true });
+  });
+
+  it('first deny wins; later guards are not consulted', async () => {
+    let lateCalls = 0;
+    addDestinationGuard(() => ({ allowed: true }));
+    addDestinationGuard(() => ({ allowed: false, reason: 'no longer member' }));
+    addDestinationGuard(() => {
+      lateCalls += 1;
+      return { allowed: false, reason: 'should not be reached' };
+    });
+    const r = await runDestinationGuards(makeCtx());
+    expect(r).toEqual({ allowed: false, reason: 'no longer member' });
+    expect(lateCalls).toBe(0);
+  });
+
+  it('async guards work', async () => {
+    addDestinationGuard(async () => {
+      await new Promise((res) => setTimeout(res, 1));
+      return { allowed: false, reason: 'async deny' };
+    });
+    const r = await runDestinationGuards(makeCtx());
+    expect(r).toEqual({ allowed: false, reason: 'async deny' });
+  });
+
+  it('unregister fn removes the guard', async () => {
+    const unregister = addDestinationGuard(() => ({ allowed: false, reason: 'temp' }));
+    let r = await runDestinationGuards(makeCtx());
+    expect(r.allowed).toBe(false);
+    unregister();
+    r = await runDestinationGuards(makeCtx());
+    expect(r.allowed).toBe(true);
+  });
+
+  it('guard sees the full ctx including destination.localName', async () => {
+    let seen: DestinationGuardCtx | null = null;
+    addDestinationGuard((ctx) => {
+      seen = ctx;
+      return { allowed: true };
+    });
+    await runDestinationGuards(
+      makeCtx({ destination: { localName: 'shared:golf:whatsapp', targetType: 'channel', targetId: 'mg-2' } }),
+    );
+    expect(seen).not.toBeNull();
+    expect(seen!.destination.localName).toBe('shared:golf:whatsapp');
+    expect(seen!.destination.targetId).toBe('mg-2');
+    expect(seen!.agentGroupId).toBe('ag-1');
   });
 });
 

@@ -335,12 +335,36 @@ async function deliverMessage(
     if (!isOriginChat && hasTable(getDb(), 'agent_destinations')) {
       const row = getDb()
         .prepare(
-          'SELECT 1 FROM agent_destinations WHERE agent_group_id = ? AND target_type = ? AND target_id = ? LIMIT 1',
+          'SELECT local_name FROM agent_destinations WHERE agent_group_id = ? AND target_type = ? AND target_id = ? LIMIT 1',
         )
-        .get(session.agent_group_id, 'channel', mg.id);
+        .get(session.agent_group_id, 'channel', mg.id) as { local_name: string } | undefined;
       if (!row) {
         throw new Error(
           `unauthorized channel destination: ${session.agent_group_id} cannot send to ${mg.channel_type}/${mg.platform_id}`,
+        );
+      }
+      // Static row passed. Now run any registered host guards — these
+      // re-validate dynamic claims (e.g. Optimus's `shared:*` rows
+      // re-checking membership at send-time, since the static row is a
+      // session-creation snapshot and membership can flip mid-session).
+      // Guards run for every channel send so non-prefixed hosts can also
+      // register policy if they want; pure no-op cost when none are
+      // registered. Hosts that only care about specific local_name
+      // patterns gate themselves inside the guard fn.
+      const { runDestinationGuards } = await import('./engine/destination-guards.js');
+      const verdict = await runDestinationGuards({
+        agentGroupId: session.agent_group_id,
+        sessionId: session.id,
+        messagingGroup: mg,
+        destination: {
+          localName: row.local_name,
+          targetType: 'channel',
+          targetId: mg.id,
+        },
+      });
+      if (!verdict.allowed) {
+        throw new Error(
+          `destination guard rejected: ${session.agent_group_id} → ${mg.channel_type}/${mg.platform_id} (${row.local_name}) — ${verdict.reason}`,
         );
       }
     }
