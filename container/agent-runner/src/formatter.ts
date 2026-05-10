@@ -1,3 +1,6 @@
+import fs from 'fs';
+import path from 'path';
+
 import { findByRouting } from './destinations.js';
 import type { MessageInRow } from './db/messages-in.js';
 import { TIMEZONE, formatLocalTime } from './timezone.js';
@@ -290,18 +293,156 @@ function formatReplyContext(replyTo: any): string {
   return `\n  <quoted_message from="${escapeXml(sender)}">${escapeXml(text)}</quoted_message>\n`;
 }
 
+/**
+ * Inline-text limit for shared `.txt`/`.md`/`.json`/etc. attachments. Mirrors
+ * v1's `TEXT_INLINE_MAX_BYTES` in apps/nanoclaw/src/channels/discord-attachments.ts.
+ * Files at or below this size are decoded and embedded directly in an
+ * `<attached_file>` block inside the user message; bigger files keep the
+ * existing path/url marker so the agent can `bash Read` selectively.
+ */
+const TEXT_INLINE_MAX_BYTES = 64 * 1024;
+
+const TEXT_EXTENSIONS = new Set([
+  '.txt',
+  '.md',
+  '.markdown',
+  '.json',
+  '.jsonl',
+  '.csv',
+  '.tsv',
+  '.log',
+  '.xml',
+  '.yaml',
+  '.yml',
+  '.toml',
+  '.ini',
+  '.env',
+]);
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function formatAttachments(attachments: any[] | undefined): string {
+function isTextEligible(att: any): boolean {
+  const contentType = String(att?.mimeType || att?.contentType || '')
+    .split(';')[0]
+    .trim()
+    .toLowerCase();
+  if (contentType.startsWith('text/')) return true;
+  if (contentType === 'application/json' || contentType.endsWith('+json')) {
+    return true;
+  }
+  if (contentType === 'application/xml' || contentType.endsWith('+xml')) {
+    return true;
+  }
+  const name = String(att?.name || att?.filename || '');
+  const ext = path.extname(name).toLowerCase();
+  return TEXT_EXTENSIONS.has(ext);
+}
+
+/**
+ * Read text bytes for an inline-eligible attachment. Two paths:
+ *
+ *   1. `att.data` (base64) — chat-sdk-bridge enriches inbound messages with
+ *      this for every attachment regardless of channel (Discord, Slack,
+ *      Telegram via chat-sdk).
+ *   2. `att.localPath` — native adapters (WhatsApp) write to
+ *      `/workspace/attachments/...` and only set the path. Read from disk.
+ *
+ * Returns null when bytes are unavailable or oversized — caller falls
+ * back to the path/url marker.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function readInlineText(att: any): string | null {
+  if (typeof att?.data === 'string' && att.data.length > 0) {
+    // Base64-encoded length × 3/4 ≈ decoded length. Cheap pre-flight check
+    // to avoid materializing 5 MB into a Buffer just to throw it away.
+    const approxBytes = Math.floor((att.data.length * 3) / 4);
+    if (approxBytes > TEXT_INLINE_MAX_BYTES) return null;
+    try {
+      const buf = Buffer.from(att.data, 'base64');
+      if (buf.length === 0 || buf.length > TEXT_INLINE_MAX_BYTES) return null;
+      return decodeAttachmentText(buf);
+    } catch {
+      return null;
+    }
+  }
+  if (typeof att?.localPath === 'string' && att.localPath.length > 0) {
+    const abs = att.localPath.startsWith('/') ? att.localPath : `/workspace/${att.localPath}`;
+    try {
+      const stat = fs.statSync(abs);
+      if (!stat.isFile() || stat.size > TEXT_INLINE_MAX_BYTES) return null;
+      return decodeAttachmentText(fs.readFileSync(abs));
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function decodeAttachmentText(buffer: Buffer): string {
+  // Replace embedded NULs so the value is XML-safe; agents reading the
+  // block see the file's logical contents, not a binary smear if the
+  // mimeType lied.
+  return buffer.toString('utf8').split('\0').join('�');
+}
+
+/**
+ * Render the full `<attached_file>` block — name + path attributes plus
+ * the decoded body. The body's only escape concern is a literal
+ * `</attached_file>` substring sneaking in from a malicious file; we
+ * neutralize it the same way v1 did so the closing tag remains
+ * unambiguous. Other XML-special chars stay raw inside the body so the
+ * agent reads the file's actual contents.
+ */
+function formatInlineTextAttachmentBlock(name: string, workspacePath: string, text: string): string {
+  return [
+    `[Attached file content: ${name}]`,
+    `<attached_file name="${escapeXml(name)}" path="${escapeXml(workspacePath)}">`,
+    text.replace(/<\/attached_file>/gi, '<\\/attached_file>'),
+    '</attached_file>',
+  ].join('\n');
+}
+
+/**
+ * Render the attachments suffix appended to a `<message>` body. For each
+ * attachment:
+ *
+ *   - Text-eligible (mimeType or extension) AND bytes available AND ≤ 64 KB
+ *     → inline content inside `<attached_file>`. Mirrors v1's behavior in
+ *     `apps/nanoclaw/src/channels/discord-attachments.ts:formatInlineTextAttachment`,
+ *     which the v2 cutover dropped — leaving agents with `[file: name —
+ *     saved to /workspace/...]` markers and forcing them to `bash Read`
+ *     every shared file.
+ *   - Otherwise → existing path or URL marker. Images stay marker-only here
+ *     because the provider pulls them out as multimodal blocks downstream
+ *     (see `extractImageAttachments`).
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function formatAttachments(attachments: any[] | undefined): string {
   if (!Array.isArray(attachments) || attachments.length === 0) return '';
   const parts = attachments.map((a) => {
     const name = a.name || a.filename || 'attachment';
     const type = a.type || 'file';
     const localPath = a.localPath ? `/workspace/${a.localPath}` : '';
     const url = a.url || '';
-    if (localPath) {
-      return `[${type}: ${escapeXml(name)} — saved to ${escapeXml(localPath)}]`;
+    const baseMarker = localPath
+      ? `[${type}: ${escapeXml(name)} — saved to ${escapeXml(localPath)}]`
+      : url
+        ? `[${type}: ${escapeXml(name)} (${escapeXml(url)})]`
+        : `[${type}: ${escapeXml(name)}]`;
+    // Text inlining only applies to non-media attachments. Images, video,
+    // and audio have their own pipelines (multimodal blocks, transcription)
+    // that own those bytes; surfacing them again as text would duplicate.
+    if (type === 'image' || type === 'video' || type === 'audio') {
+      return baseMarker;
     }
-    return url ? `[${type}: ${escapeXml(name)} (${escapeXml(url)})]` : `[${type}: ${escapeXml(name)}]`;
+    if (!isTextEligible(a)) return baseMarker;
+    const text = readInlineText(a);
+    if (text === null || text.trim().length === 0) return baseMarker;
+    const block = formatInlineTextAttachmentBlock(
+      name,
+      localPath || (a.localPath ? `/workspace/${a.localPath}` : ''),
+      text,
+    );
+    return `${baseMarker}\n${block}`;
   });
   return '\n' + parts.join('\n');
 }
