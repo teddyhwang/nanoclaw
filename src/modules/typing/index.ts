@@ -19,6 +19,7 @@
  */
 import fs from 'fs';
 
+import { registerDeliveryAction } from '../../delivery.js';
 import { heartbeatPath } from '../../session-manager.js';
 
 const TYPING_REFRESH_MS = 4000;
@@ -163,3 +164,20 @@ export function stopTypingRefresh(sessionId: string): void {
   clearInterval(entry.interval);
   typingRefreshers.delete(sessionId);
 }
+
+// Register the silent-turn-complete delivery action here (not in
+// delivery.ts) so the handler ships with the module that owns
+// stopTypingRefresh — no cross-module wiring, no glue from embedding
+// hosts. The action fires when the container finishes a turn that
+// produced no user-facing output (e.g. a reflection task that emitted
+// only `<internal>` content); without this signal, the typing
+// indicator keeps refreshing on heartbeat freshness for the full
+// HEARTBEAT_FRESH_MS window after the turn ends, leaving the user
+// staring at "is typing…" with no message.
+//
+// Local fork patch (Optimus): upstream NanoClaw doesn't run reflection
+// turns and so doesn't expose this UX gap. Stays in the typing module
+// because that's where the fix is — not a behavior other hosts need.
+registerDeliveryAction('silent_turn_complete', async (_content, session) => {
+  stopTypingRefresh(session.id);
+});

@@ -675,6 +675,18 @@ export function dispatchResultText(text: string, routing: RoutingContext): void 
   if (sent === 0 && scratchpad) {
     log(`WARNING: agent output had no <message to="..."> blocks — emitting via safety-net to origin channel`);
     deliverSafetyNet(scratchpad, routing);
+    return;
+  }
+
+  // Truly silent turn: no <message> blocks AND no user-facing scratchpad
+  // (e.g. agent emitted only `<internal>...</internal>`, or returned an
+  // empty result). Tell the host the turn is over so it can stop the
+  // typing indicator immediately, instead of letting it refresh on
+  // heartbeat freshness for the full HEARTBEAT_FRESH_MS window after the
+  // container goes idle. The host's typing module registers the
+  // matching `silent_turn_complete` delivery-action handler.
+  if (sent === 0) {
+    emitSilentTurnComplete();
   }
 }
 
@@ -691,6 +703,30 @@ export function dispatchResultText(text: string, routing: RoutingContext): void 
  * contract on purpose; this is Optimus-side belt-and-suspenders against
  * agent-prompt drift.
  */
+/**
+ * Emit a system-kind control row that tells the host this turn finished
+ * with no user-facing output. The host's typing module picks it up via a
+ * registered delivery-action handler and clears the typing indicator
+ * immediately — without this, the indicator keeps refreshing on
+ * heartbeat freshness for ~6s after the container goes idle, leaving the
+ * user staring at "is typing…" with no message coming.
+ *
+ * Sent as kind='system' so the host's existing `kind === 'system'` branch
+ * routes it to `handleSystemAction` → registered handler. No channel
+ * delivery, no platform_id/channel_type needed.
+ */
+function emitSilentTurnComplete(): void {
+  writeMessageOut({
+    id: generateId(),
+    in_reply_to: null,
+    kind: 'system',
+    platform_id: null,
+    channel_type: null,
+    thread_id: null,
+    content: JSON.stringify({ action: 'silent_turn_complete' }),
+  });
+}
+
 function deliverSafetyNet(body: string, routing: RoutingContext): void {
   if (!routing.platformId || !routing.channelType) {
     log(`safety-net: no origin channel in routing context, dropping`);

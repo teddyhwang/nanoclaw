@@ -436,15 +436,20 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(text).not.toContain('[degraded');
   });
 
-  it('does not emit safety-net for empty/whitespace-only result text', () => {
+  it('emits silent_turn_complete control row (no chat) for empty/whitespace-only result text', () => {
     insertChannelDestination('boys-night');
 
     dispatchResultText('   \n\n   ', ROUTING);
 
-    expect(getUndeliveredMessages()).toHaveLength(0);
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].kind).toBe('system');
+    expect(out[0].channel_type).toBeNull();
+    expect(out[0].platform_id).toBeNull();
+    expect(JSON.parse(out[0].content)).toEqual({ action: 'silent_turn_complete' });
   });
 
-  it('does not emit safety-net for <internal>-only output (private maintenance turn)', () => {
+  it('emits silent_turn_complete (not safety-net chat) for <internal>-only output (private maintenance turn)', () => {
     insertChannelDestination('boys-night');
 
     dispatchResultText(
@@ -452,10 +457,16 @@ describe('dispatchResultText safety net (local fork patch)', () => {
       ROUTING,
     );
 
-    expect(getUndeliveredMessages()).toHaveLength(0);
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].kind).toBe('system');
+    expect(JSON.parse(out[0].content).action).toBe('silent_turn_complete');
+    // Must NOT have produced a chat message — the indicator-clear is the
+    // only outbound; nothing user-facing.
+    expect(out[0].channel_type).toBeNull();
   });
 
-  it('does not emit safety-net when only <internal> tags + whitespace remain after strip', () => {
+  it('emits silent_turn_complete when only <internal> tags + whitespace remain after strip', () => {
     insertChannelDestination('boys-night');
 
     dispatchResultText(
@@ -463,7 +474,31 @@ describe('dispatchResultText safety net (local fork patch)', () => {
       ROUTING,
     );
 
-    expect(getUndeliveredMessages()).toHaveLength(0);
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).action).toBe('silent_turn_complete');
+  });
+
+  it('does NOT emit silent_turn_complete when a <message> block was sent (typing pause comes from delivery instead)', () => {
+    insertChannelDestination('boys-night');
+
+    dispatchResultText('<message to="boys-night">Done.</message>', ROUTING);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].kind).toBe('chat');
+    expect(JSON.parse(out[0].content).text).toBe('Done.');
+  });
+
+  it('does NOT emit silent_turn_complete when the safety-net fires (chat reply IS being sent)', () => {
+    insertChannelDestination('boys-night');
+
+    dispatchResultText('Bare unwrapped reply that should be safety-netted.', ROUTING);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].kind).toBe('chat');
+    expect(JSON.parse(out[0].content).text).toContain('[degraded');
   });
 
   it('drops with log when routing has no origin channel (defensive)', () => {
