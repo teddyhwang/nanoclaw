@@ -153,10 +153,14 @@ function getMessageContentLookup(): ((id: string, jid: string) => SentLookupResu
           // eslint-disable-next-line @typescript-eslint/no-require-imports
           const { getAgentGroup } = require('../db/agent-groups.js') as typeof import('../db/agent-groups.js');
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { readContainerConfig } = require('../container-config.js') as typeof import('../container-config.js');
+          const { getContainerConfig } =
+            require('../db/container-configs.js') as typeof import('../db/container-configs.js');
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const { configFromDb } = require('../container-config.js') as typeof import('../container-config.js');
           const ag = getAgentGroup(agentGroupId);
-          if (ag) {
-            const cfg = readContainerConfig(ag);
+          const row = ag ? getContainerConfig(ag.id) : undefined;
+          if (ag && row) {
+            const cfg = configFromDb(row, ag);
             assistantName = cfg.assistantName;
             assistantPrefixSeparator = cfg.assistantPrefixSeparator;
           }

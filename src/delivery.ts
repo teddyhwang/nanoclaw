@@ -11,7 +11,8 @@ import type Database from 'better-sqlite3';
 
 import { getRunningSessions, getActiveSessions, createPendingQuestion } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
-import { readContainerConfig } from './container-config.js';
+import { configFromDb } from './container-config.js';
+import { getContainerConfig } from './db/container-configs.js';
 import { getDb, hasTable } from './db/connection.js';
 import { getMessagingGroupByPlatform, getMessagingGroupAgentByPair } from './db/messaging-groups.js';
 import {
@@ -415,10 +416,13 @@ async function deliverMessage(
   try {
     const agentGroup = getAgentGroup(session.agent_group_id);
     if (agentGroup) {
-      const cfg = readContainerConfig(agentGroup);
-      assistantName = cfg.assistantName;
-      assistantPrefixSeparator = cfg.assistantPrefixSeparator;
-      suppressEmbeds = cfg.suppressEmbeds;
+      const row = getContainerConfig(agentGroup.id);
+      if (row) {
+        const cfg = configFromDb(row, agentGroup);
+        assistantName = cfg.assistantName;
+        assistantPrefixSeparator = cfg.assistantPrefixSeparator;
+        suppressEmbeds = cfg.suppressEmbeds;
+      }
     }
   } catch (err) {
     log.debug('Failed to resolve per-session assistantName', { err, sessionId: session.id });
