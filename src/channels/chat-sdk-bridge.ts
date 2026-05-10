@@ -48,9 +48,17 @@ export interface ReplyContext {
   messageId?: string;
 }
 
-/** Extract reply context from a platform-specific raw message. Return null if no reply. */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type ReplyContextExtractor = (raw: Record<string, any>) => ReplyContext | null;
+/**
+ * Extract reply context from a platform-specific raw message. Return null if no reply.
+ *
+ * May return a Promise — extractors that need to walk the reply chain via
+ * platform API calls (Discord's `messages.fetch`) can be async. Sync
+ * extractors continue to work unchanged.
+ */
+export type ReplyContextExtractor = (
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  raw: Record<string, any>,
+) => ReplyContext | null | Promise<ReplyContext | null>;
 
 export interface ChatSdkBridgeConfig {
   adapter: Adapter;
@@ -383,10 +391,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       serialized.attachments = enriched;
     }
 
-    // Extract reply context via platform-specific hook
+    // Extract reply context via platform-specific hook. Awaited so async
+    // extractors (e.g. Discord's reply-chain walker) can fetch ancestors
+    // before we hand the serialized message to the router.
     if (config.extractReplyContext && message.raw) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const replyTo = config.extractReplyContext(message.raw as Record<string, any>);
+      const replyTo = await config.extractReplyContext(message.raw as Record<string, any>);
       if (replyTo) serialized.replyTo = replyTo;
     }
 
