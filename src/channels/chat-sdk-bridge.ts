@@ -350,17 +350,54 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           // Resize oversized images (>~3.5MB raw) so the base64 payload
           // stays under Anthropic's 5MB per-image cap. Static formats
           // (JPEG/PNG/WebP) get resized to 1024px-max + JPEG q85;
-          // animated formats pass through. Mirrors v1's
+          // animated formats need ffmpeg (next branch). Mirrors v1's
           // `resizeToJpegBuffer` in apps/nanoclaw/src/shared/image-processing.ts.
           if (att.type === 'image' && att.mimeType) {
             const { maybeResizeImage } = await import('../media/image-processing.js');
             buffer = await maybeResizeImage(buffer, att.mimeType);
           }
-          entry.data = buffer.toString('base64');
+          // Animated content transcode — see media/image-processing.ts for
+          // the full rationale. Three cases land here:
+          //   1. Tenor/Giphy "gifv" embeds: att.type='video' mimeType='video/mp4'.
+          //      Discord serves animated content as MP4 even when the user
+          //      pasted a GIF; Anthropic rejects MP4 bytes with a 400.
+          //   2. WhatsApp "GIFs": att.type='image' mimeType='image/gif' but
+          //      the bytes are MP4-encoded video under Baileys. Same 400.
+          //   3. Oversize real GIFs: att.type='image' mimeType='image/gif',
+          //      >3.5 MB raw, sharp can't shrink while preserving motion.
+          // On success the attachment is rewritten as image/gif so the
+          // container's extractImageAttachments sees an accepted format;
+          // on failure (ffmpeg missing/failed/output oversize) we drop the
+          // bytes so the agent doesn't get an attachment reference pointing
+          // at content Anthropic will reject. v1 parity.
+          if (att.mimeType) {
+            const { shouldTranscodeAnimated, maybeTranscodeAnimated } = await import('../media/image-processing.js');
+            if (shouldTranscodeAnimated(att.type, att.mimeType, buffer.length)) {
+              const result = await maybeTranscodeAnimated(buffer, att.mimeType);
+              if (result.ok && result.buffer && result.mimeType) {
+                buffer = result.buffer;
+                entry.mimeType = result.mimeType;
+                entry.type = 'image';
+              } else {
+                log.warn('Animated attachment transcode failed; dropping bytes', {
+                  name: att.name,
+                  sourceType: att.type,
+                  sourceMime: att.mimeType,
+                  reason: result.reason,
+                });
+                // Skip the data payload. The bridge still emits the metadata
+                // entry below — but without `data`, the container poll-loop's
+                // image extractor passes over it and the agent sees nothing
+                // rather than a broken reference.
+                buffer = null;
+              }
+            }
+          }
+          if (buffer) entry.data = buffer.toString('base64');
           // Transcribe voice/audio attachments host-side so the agent sees
           // text instead of opaque base64. Mirrors v1 behavior
           // (apps/nanoclaw/src/transcription.ts).
-          if (att.mimeType && att.mimeType.startsWith('audio/')) {
+          if (buffer && att.mimeType && att.mimeType.startsWith('audio/')) {
             const { transcribeAudio } = await import('../media/transcription.js');
             try {
               entry.transcript = await transcribeAudio(buffer, {
