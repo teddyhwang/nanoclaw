@@ -496,13 +496,28 @@ export type DeliveryActionHandler = (
   inDb: Database.Database,
 ) => Promise<void>;
 
-const actionHandlers = new Map<string, DeliveryActionHandler>();
+// Lazy-initialized via a hoisted `var` so callers that touch this module
+// under a circular import (delivery.ts → modules/typing/index.ts →
+// delivery.ts) don't hit a TDZ. Modules self-register at module-load
+// time, which lands mid-evaluation of this file; `let`/`const` would
+// still throw ReferenceError before the binding is reached. `var`
+// hoists with an initial `undefined`, which the helper coerces to a
+// fresh Map on first use.
+// eslint-disable-next-line no-var
+var actionHandlersSingleton: Map<string, DeliveryActionHandler> | undefined;
+function getActionHandlers(): Map<string, DeliveryActionHandler> {
+  if (!actionHandlersSingleton) {
+    actionHandlersSingleton = new Map<string, DeliveryActionHandler>();
+  }
+  return actionHandlersSingleton;
+}
 
 export function registerDeliveryAction(action: string, handler: DeliveryActionHandler): void {
-  if (actionHandlers.has(action)) {
+  const handlers = getActionHandlers();
+  if (handlers.has(action)) {
     log.warn('Delivery action handler overwritten', { action });
   }
-  actionHandlers.set(action, handler);
+  handlers.set(action, handler);
 }
 
 /**
@@ -518,7 +533,7 @@ async function handleSystemAction(
   const action = content.action as string;
   log.info('System action from agent', { sessionId: session.id, action });
 
-  const registered = actionHandlers.get(action);
+  const registered = getActionHandlers().get(action);
   if (registered) {
     await registered(content, session, inDb);
     return;

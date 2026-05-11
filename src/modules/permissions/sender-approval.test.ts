@@ -34,6 +34,10 @@ vi.mock('../../delivery.js', () => ({
   getDeliveryAdapter: () => ({
     deliver: deliverMock,
   }),
+  // Stub the registry so modules that self-register on import (typing,
+  // scheduling, self-mod, agent-to-agent) don't crash at module-load
+  // under this partial mock. Tests here don't exercise delivery actions.
+  registerDeliveryAction: vi.fn(),
 }));
 
 // Mock ensureUserDm to return the approver's existing messaging group
