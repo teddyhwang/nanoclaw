@@ -19,6 +19,38 @@ export interface EngineEventMap {
   'session.cleared': { sessionId: string; agentGroupId: string };
   'inbound.routed': { event: InboundEvent; userId: string | null };
   'inbound.written': { sessionId: string; agentGroupId: string; messageId: string; trigger: boolean };
+  /**
+   * Fires when the host applies a `schedule_task` delivery action, after
+   * the `messages_in` row is written. Symmetric with `task.fired`: lets
+   * plugins capture per-task creator state at schedule-time (e.g. owner
+   * identity) before the container ever fires the task.
+   *
+   * `taskId` and `seriesId` are equal on schedule (insertTask sets
+   * `series_id = id`); they diverge only when the recurrence loop
+   * creates the next occurrence. `taskContent` is the same JSON blob
+   * persisted to `messages_in.content` — readers should parse defensively.
+   */
+  'task.scheduled': { agentGroupId: string; sessionId: string; taskId: string; seriesId: string; taskContent: string };
+  /**
+   * Fires when a scheduled task row (`messages_in.kind='task'`) becomes
+   * due and the host is about to wake the container to run it. Emitted
+   * once per due task row per sweep tick, before `wakeContainer`. Plugins
+   * use this to stamp per-task state (e.g. sender-identity) that the
+   * fresh container poll will read on its first iteration.
+   *
+   * `taskId` is the `messages_in.id` of the due row. `seriesId` is the
+   * recurrence series root id (same as `taskId` for one-shot tasks and
+   * for the first row of a recurring series). `taskContent` is the
+   * raw content blob — readers should parse defensively since the
+   * shape evolves with the scheduling-tools contract.
+   */
+  'task.fired': {
+    sessionId: string;
+    agentGroupId: string;
+    taskId: string;
+    seriesId: string | null;
+    taskContent: string;
+  };
   'inbound.dropped': { reason: string; channelType: string; platformId: string; userId: string | null };
   'outbound.delivered': { sessionId: string; agentGroupId: string; channelType: string; platformId: string };
   'outbound.failed': { sessionId: string; agentGroupId: string; channelType: string; platformId: string; err: unknown };

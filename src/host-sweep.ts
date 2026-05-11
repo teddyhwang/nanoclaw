@@ -35,6 +35,7 @@ import {
   countDueMessages,
   deleteOrphanProcessingClaims,
   getContainerState,
+  getDueTaskRows,
   getMessageForRetry,
   getProcessingClaims,
   markMessageFailed,
@@ -202,6 +203,21 @@ async function sweepSession(session: Session): Promise<void> {
     // and the wake would never fire.
     const dueCount = countDueMessages(inDb);
     if (dueCount > 0 && !isContainerRunning(session.id)) {
+      // Fire one `task.fired` per due task row before the wake so plugins
+      // can stamp per-task pre-wake state (e.g. sender-identity) that
+      // the fresh container poll reads on its first iteration. This is
+      // emitted unconditionally — plugins are no-ops when no listener
+      // is registered (`emitEngineEvent` short-circuits).
+      const dueTasks = getDueTaskRows(inDb);
+      for (const t of dueTasks) {
+        emitEngineEvent('task.fired', {
+          sessionId: session.id,
+          agentGroupId: session.agent_group_id,
+          taskId: t.id,
+          seriesId: t.series_id,
+          taskContent: t.content,
+        });
+      }
       log.info('Waking container for due messages', { sessionId: session.id, count: dueCount });
       // wakeContainer never throws — transient spawn failures (OneCLI down,
       // etc.) return false and leave messages pending for the next tick.

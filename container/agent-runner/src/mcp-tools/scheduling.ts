@@ -5,6 +5,8 @@
  * Scheduling operations are sent as system actions via messages_out — the host
  * reads them during delivery and applies the changes to inbound.db.
  */
+import fs from 'fs';
+
 import { getInboundDb } from '../db/connection.js';
 import { writeMessageOut } from '../db/messages-out.js';
 import { getSessionRouting } from '../db/session-routing.js';
@@ -14,6 +16,27 @@ import type { McpToolDefinition } from './types.js';
 
 function log(msg: string): void {
   console.error(`[mcp-tools] ${msg}`);
+}
+
+/**
+ * Read the requesting user's dashboard account id from the per-session
+ * sender-identity file the host writes per inbound message. Returns null
+ * when the file is missing/malformed or the sender is not linked to a
+ * dashboard account — in those cases the task is still scheduled but
+ * the host records no owner, and per-user MCP routes refuse at fire-time
+ * (matches v1 security posture for synthetic/orphaned tasks).
+ *
+ * The container mounts the file at `/workspace/sender-identity.json` (per-
+ * session) — see the host's optimus-sender-identity plugin.
+ */
+function readRequestingUserId(): string | null {
+  try {
+    const raw = fs.readFileSync('/workspace/sender-identity.json', 'utf-8');
+    const parsed = JSON.parse(raw) as { user?: { id?: string } | null; account?: { id?: string } | null };
+    return parsed.user?.id ?? parsed.account?.id ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function generateId(): string {
@@ -92,6 +115,11 @@ export const scheduleTask: McpToolDefinition = {
         platformId: r.platform_id,
         channelType: r.channel_type,
         threadId: r.thread_id,
+        // Pass the requesting user's dashboard account id through so a
+        // host plugin can record (taskId, agentGroupId, userId) and stamp
+        // the per-session sender-identity at fire-time. Null when the
+        // sender is unlinked — host treats that as "no owner."
+        createdByUserId: readRequestingUserId(),
       }),
     });
 

@@ -147,6 +147,27 @@ export function countDueMessages(db: Database.Database): number {
   ).count;
 }
 
+/**
+ * Enumerate the due task rows for a session. Used by host-sweep to emit
+ * one `task.fired` event per due task before waking the container, so
+ * plugins (e.g. per-task sender identity) can stamp pre-wake state.
+ *
+ * Filtered to `kind='task'` because non-task wakes (channel inbound, agent-
+ * to-agent replies) don't need per-task identity. Pending + trigger=1 +
+ * `process_after` elapsed mirrors `countDueMessages`.
+ */
+export function getDueTaskRows(db: Database.Database): { id: string; series_id: string | null; content: string }[] {
+  return db
+    .prepare(
+      `SELECT id, series_id, content FROM messages_in
+       WHERE status = 'pending'
+         AND kind = 'task'
+         AND trigger = 1
+         AND (process_after IS NULL OR datetime(process_after) <= datetime('now'))`,
+    )
+    .all() as { id: string; series_id: string | null; content: string }[];
+}
+
 export function markMessageFailed(db: Database.Database, messageId: string): void {
   db.prepare("UPDATE messages_in SET status = 'failed' WHERE id = ?").run(messageId);
 }

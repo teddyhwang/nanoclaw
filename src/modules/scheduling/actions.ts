@@ -11,6 +11,7 @@ import type Database from 'better-sqlite3';
 
 import { wakeContainer } from '../../container-runner.js';
 import { getSession } from '../../db/sessions.js';
+import { emitEngineEvent } from '../../engine/events.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { Session } from '../../types.js';
@@ -18,7 +19,7 @@ import { cancelTask, insertTask, pauseTask, resumeTask, updateTask, type TaskUpd
 
 export async function handleScheduleTask(
   content: Record<string, unknown>,
-  _session: Session,
+  session: Session,
   inDb: Database.Database,
 ): Promise<void> {
   const taskId = content.taskId as string;
@@ -26,7 +27,13 @@ export async function handleScheduleTask(
   const script = content.script as string | null;
   const processAfter = content.processAfter as string;
   const recurrence = (content.recurrence as string) || null;
+  // Optional dashboard-account id the agent captured from sender-identity
+  // at schedule-time. Plugins use this at task.fired-time to stamp a
+  // per-task identity so the task runs as the creator, not "whoever last
+  // messaged the group." Pass-through field — engine never reads it.
+  const createdByUserId = typeof content.createdByUserId === 'string' ? content.createdByUserId : null;
 
+  const taskContent = JSON.stringify({ prompt, script, createdByUserId });
   insertTask(inDb, {
     id: taskId,
     processAfter,
@@ -34,9 +41,19 @@ export async function handleScheduleTask(
     platformId: (content.platformId as string) ?? null,
     channelType: (content.channelType as string) ?? null,
     threadId: (content.threadId as string) ?? null,
-    content: JSON.stringify({ prompt, script }),
+    content: taskContent,
   });
-  log.info('Scheduled task created', { taskId, processAfter, recurrence });
+  log.info('Scheduled task created', { taskId, processAfter, recurrence, createdByUserId });
+  // Notify plugins. seriesId equals taskId on schedule (insertTask sets
+  // series_id = id); recurrence diverges them later. Host-side owner
+  // tracking listens here to persist (agentGroupId, seriesId) → accountId.
+  emitEngineEvent('task.scheduled', {
+    agentGroupId: session.agent_group_id,
+    sessionId: session.id,
+    taskId,
+    seriesId: taskId,
+    taskContent,
+  });
 }
 
 export async function handleCancelTask(
