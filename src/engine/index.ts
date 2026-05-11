@@ -184,4 +184,13 @@ export type { MessagingGroupAgent } from '../types.js';
 // Session lifecycle for importers seeding cold sessions (writes routing +
 // initializes per-session DBs). Hosts that want to enqueue messages into an
 // existing session should keep using the higher-level router instead.
-export { resolveSession, writeSessionRouting } from '../session-manager.js';
+//
+// Exception: `writeSessionMessage` is exposed for deep-backfill plugins
+// (e.g. discord_channel_history) that need to inject historical messages
+// directly with `trigger: 0`. Backfill volumes (potentially tens of
+// thousands of rows) make the engine's full per-message wake/access-gate
+// evaluation excessive; direct write keeps the cost linear in row count.
+// The `isBackfill` flag on InboundEvent remains the safety net for the
+// `adapter.onInbound → routeInbound` path where engagement evaluation
+// still runs.
+export { resolveSession, writeSessionMessage, writeSessionRouting } from '../session-manager.js';
