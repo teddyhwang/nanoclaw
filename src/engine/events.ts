@@ -52,6 +52,33 @@ export interface EngineEventMap {
     taskContent: string;
   };
   'inbound.dropped': { reason: string; channelType: string; platformId: string; userId: string | null };
+  /**
+   * Fires once per row a backfill writer (e.g. Optimus's deep-history
+   * plugin via discrawl) stamps into a session's `inbound.db` via
+   * `writeSessionMessage` — i.e. the bulk-write path that skips the
+   * router. Symmetric to `inbound.routed` in *intent* (a new message is
+   * known to the host) but separate in *origin* so projection / indexer
+   * plugins can opt into bulk indexing without conflating it with live
+   * routing semantics (engage evaluation, sender resolution, etc.).
+   *
+   * `ts` is the message's source timestamp (the Discord/Telegram/WhatsApp
+   * message timestamp), not the import wall clock — backfilled rows
+   * should sort by their real authoring time in any cross-session index.
+   * `content` is the same JSON blob persisted to `messages_in.content`;
+   * downstream listeners should parse defensively (text + sender shape
+   * varies per channel adapter).
+   */
+  'backfill.written': {
+    sessionId: string;
+    agentGroupId: string;
+    channelType: string;
+    platformId: string;
+    threadId: string | null;
+    messageId: string;
+    kind: string;
+    ts: string;
+    content: string;
+  };
   'outbound.delivered': { sessionId: string; agentGroupId: string; channelType: string; platformId: string };
   'outbound.failed': { sessionId: string; agentGroupId: string; channelType: string; platformId: string; err: unknown };
   'container.spawn': { sessionId: string; agentGroupId: string };
