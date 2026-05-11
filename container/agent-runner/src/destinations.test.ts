@@ -60,4 +60,20 @@ describe('buildSystemPromptAddendum — multi-destination routing guidance', () 
     expect(prompt).toContain('Default routing');
     expect(prompt).toContain('`casa`');
   });
+
+  it('teaches both <internal> as the private channel AND the [degraded] safety-net consequence', () => {
+    seedDestination('casa', 'Casa', 'whatsapp', 'group-1@g.us');
+
+    const prompt = buildSystemPromptAddendum('Casa');
+
+    // <internal> is presented as a hard guarantee, not a soft suggestion.
+    expect(prompt).toContain('<internal>...</internal>');
+    expect(prompt).toContain('stripped before delivery');
+    // The agent must know that NOT wrapping leaks: this is what blocks the
+    // 2026-05-10 WhatsApp incident where unwrapped meta-narration ("Address
+    // saved to Darius's profile. No reply sent — the question was for
+    // Optimus.") got broadcast as a [degraded] message.
+    expect(prompt).toContain('[degraded]');
+    expect(prompt).toContain('broadcast');
+  });
 });

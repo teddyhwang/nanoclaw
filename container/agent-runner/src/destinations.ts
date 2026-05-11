@@ -117,8 +117,8 @@ function buildDestinationsSection(): string {
   lines.push('');
   lines.push('**Every response must be wrapped** in a `<message to="name">...</message>` block.');
   lines.push('You can include multiple `<message>` blocks in one response to send to multiple destinations.');
-  lines.push('Text outside of `<message>` blocks is scratchpad — logged but not sent anywhere.');
-  lines.push('Use `<internal>...</internal>` to make scratchpad intent explicit.');
+  lines.push('Any text you want to keep private MUST be wrapped in `<internal>...</internal>` — that content is stripped before delivery, never reaches any user, and only appears in host operator logs.');
+  lines.push('Plain text outside BOTH `<message>` and `<internal>` (including meta-narration like "no reply needed", "saved to profile", or any explanation of what you decided to do) WILL be broadcast to the originating channel with a `[degraded]` label. The runner cannot tell the difference between a real reply that forgot the `<message>` wrap and self-narration; it errs on the side of delivering rather than silently dropping. So: every character is either inside `<message>` (sent to a named destination) or inside `<internal>` (kept private). Nothing else. If you have nothing to say, emit a single `<internal>silent turn</internal>` and stop.');
   lines.push('');
   lines.push(
     '**Default routing**: when replying to an incoming message, address the same destination the message came `from` — every inbound `<message>` tag carries a `from="name"` attribute that names the origin destination. Only address a different destination when the request itself asks you to (e.g., "tell Laura that…").',
