@@ -69,6 +69,17 @@ export interface InboundEvent {
      * loop bot outputs back) leave this undefined.
      */
     isBotMessage?: boolean;
+    /**
+     * True when this inbound is replayed historical context, not a live
+     * arrival. Set by deep-backfill callers (e.g. on-registration channel
+     * history sync) that want messages stored as accumulated context
+     * without triggering engagement evaluation — otherwise a historical
+     * @-mention or reply-to-bot would wake the agent for a year-old
+     * conversation. The router stores the row with trigger=0 unconditionally
+     * when this is true and never invokes `evaluateEngage`. Live adapters
+     * leave this undefined.
+     */
+    isBackfill?: boolean;
   };
   replyTo?: DeliveryAddress;
 }
@@ -103,6 +114,13 @@ export interface InboundMessage {
    * its own replies.
    */
   isBotMessage?: boolean;
+  /**
+   * True when this inbound is replayed historical context, not a live
+   * arrival. See `InboundEvent.message.isBackfill` for the full contract.
+   * Deep-backfill callers (on-registration history sync) set this so the
+   * router stores the row with trigger=0 and skips `evaluateEngage`.
+   */
+  isBackfill?: boolean;
 }
 
 /** A file attachment to deliver alongside a message. */

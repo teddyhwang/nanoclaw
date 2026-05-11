@@ -561,6 +561,82 @@ describe('router', () => {
     expect(getMessagingGroupByPlatform('slack', 'C-LOOPBACK')).toBeUndefined();
   });
 
+  it('does not engage when isBackfill=true, even on an @-mention', async () => {
+    // Deep-history replay (on-registration channel sync) writes messages
+    // through the same `onInbound` path live ingestion uses. Without the
+    // isBackfill gate, a historical @-mention would fire evaluateEngage
+    // and wake the agent for a year-old conversation. The row must still
+    // be stored (accumulate policy) so the agent sees it as context when
+    // a real future trigger fires.
+    const { routeInbound } = await import('./router.js');
+    const { wakeContainer } = await import('./container-runner.js');
+    const wakeMock = wakeContainer as ReturnType<typeof vi.fn>;
+    wakeMock.mockClear();
+
+    // Flip the wiring to mention + accumulate so we can prove (a) wake
+    // skipped despite a positive engage signal and (b) row landed for
+    // future context. With the default 'pattern' wiring above (matches
+    // everything), accumulate also lets us assert the row landed.
+    const { updateMessagingGroupAgent } = await import('./db/messaging-groups.js');
+    updateMessagingGroupAgent('mga-1', {
+      engage_mode: 'mention',
+      ignored_message_policy: 'accumulate',
+    });
+
+    await routeInbound({
+      channelType: 'discord',
+      platformId: 'chan-123',
+      threadId: null,
+      message: {
+        id: 'msg-backfill-mention',
+        kind: 'chat',
+        content: JSON.stringify({ sender: 'User', text: '@Bot historic ping' }),
+        timestamp: now(),
+        isMention: true,
+        isBackfill: true,
+      },
+    });
+
+    // Container should NOT wake — even though isMention=true would normally
+    // engage 'mention' mode.
+    expect(wakeMock).not.toHaveBeenCalled();
+
+    // Row should land with trigger=0 (stored as accumulated context).
+    const session = findSession('mg-1', null);
+    expect(session).toBeDefined();
+    const db = new Database(inboundDbPath('ag-1', session!.id));
+    const rows = db.prepare('SELECT id, trigger FROM messages_in').all() as Array<{
+      id: string;
+      trigger: number;
+    }>;
+    db.close();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].trigger).toBe(0);
+  });
+
+  it('skips auto-create when an unwired channel sees only backfill', async () => {
+    // Replaying a historical @-mention from a now-unwired chat must not
+    // spawn a messaging_group row — the relationship was never approved,
+    // backfill alone is not a registration signal.
+    const { routeInbound } = await import('./router.js');
+    const { getMessagingGroupByPlatform } = await import('./db/messaging-groups.js');
+
+    await routeInbound({
+      channelType: 'slack',
+      platformId: 'C-BACKFILL-ONLY',
+      threadId: null,
+      message: {
+        id: 'msg-backfill-unwired',
+        kind: 'chat',
+        content: JSON.stringify({ sender: 'User', text: '@bot from the past' }),
+        timestamp: now(),
+        isMention: true,
+        isBackfill: true,
+      },
+    });
+    expect(getMessagingGroupByPlatform('slack', 'C-BACKFILL-ONLY')).toBeUndefined();
+  });
+
   it('should route multiple messages to the same session', async () => {
     const { routeInbound } = await import('./router.js');
 

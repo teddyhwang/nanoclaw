@@ -96,6 +96,7 @@ export async function _bootForHost(opts: { managedSignals: boolean }): Promise<v
             isMention: message.isMention,
             isGroup: message.isGroup,
             isBotMessage: message.isBotMessage,
+            isBackfill: message.isBackfill,
           },
         }).catch((err) => {
           log.error('Failed to route inbound message', { channelType: adapter.channelType, err });

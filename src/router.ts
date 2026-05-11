@@ -190,6 +190,15 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   // outbound came back as inbound.
   const isBotLoopback = event.message.isBotMessage === true;
 
+  // Backfill short-circuit: deep-history replay (on-registration channel
+  // sync, agent-requested gap heal) writes messages as accumulated context
+  // only. Without this gate a year-old @-mention in the replay stream would
+  // fire `evaluateEngage` and wake the agent for a stale conversation.
+  // The store-with-trigger=0 path below is the same as the
+  // `ignored_message_policy='accumulate'` branch, so the agent still sees
+  // backfilled rows when it engages on a real future trigger.
+  const isBackfill = event.message.isBackfill === true;
+
   // 1. Combined lookup: messaging_group row + count of wired agents in a
   //    single query. Cheap short-circuit for the common "unwired channel"
   //    case — one DB read and we're out, no auto-create, no sender
@@ -203,8 +212,10 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     // attention (the bot was addressed — @mention or DM). Plain chatter in
     // channels we merely sit in stays silent — no row, no DB writes.
     // Loopback also stays silent: a bot self-reply on an unwired channel
-    // shouldn't spawn a row.
-    if (!isMention || isBotLoopback) return;
+    // shouldn't spawn a row. Backfill stays silent too: replaying a
+    // historical mention through here would spawn a row for an unwired
+    // chat we never had a relationship with.
+    if (!isMention || isBotLoopback || isBackfill) return;
     const mgId = `mg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     mg = {
       id: mgId,
@@ -231,8 +242,10 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   // 1b. No wirings — either silent drop (plain chatter / denied channel) or
   //     escalate to owner for channel-registration approval. Loopback never
   //     escalates — the bot's own reply isn't a registration request.
+  //     Backfill never escalates — historical mentions in a now-unwired
+  //     channel aren't a request to register.
   if (agentCount === 0) {
-    if (!isMention || isBotLoopback) return;
+    if (!isMention || isBotLoopback || isBackfill) return;
     if (mg.denied_at) {
       log.debug('Message dropped — channel was denied by owner', {
         messagingGroupId: mg.id,
@@ -320,7 +333,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       !isBotLoopback && replyToMessageId
         ? isReplyToOurBot(agent.agent_group_id, mg.id, event.threadId, replyToMessageId)
         : false;
-    const engages = isBotLoopback ? false : evaluateEngage(agent, messageText, isMention, isReplyToBot);
+    const engages = isBotLoopback || isBackfill ? false : evaluateEngage(agent, messageText, isMention, isReplyToBot);
 
     const accessOk = engages && (!accessGate || accessGate(event, userId, mg, agent.agent_group_id).allowed);
     const scopeOk = engages && (!senderScopeGate || senderScopeGate(event, userId, mg, agent).allowed);
