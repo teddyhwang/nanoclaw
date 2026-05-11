@@ -203,11 +203,11 @@ describe('extractMessageSender', () => {
 describe('pickInReplyToMessage', () => {
   // Build a minimal MessageInRow inline. The function only inspects `id`
   // and `trigger`, so other fields are stub values.
-  function row(id: string, trigger: 0 | 1, seq: number): MessageInRow {
+  function row(id: string, trigger: 0 | 1, seq: number, kind: string = 'chat-sdk'): MessageInRow {
     return {
       id,
       seq,
-      kind: 'chat-sdk',
+      kind,
       timestamp: '2026-05-09T20:36:00.000Z',
       status: 'pending',
       process_after: null,
@@ -260,6 +260,33 @@ describe('pickInReplyToMessage', () => {
     const messages = [row('newer-mention', 1, 70), row('drive-by', 0, 68), row('older-mention', 1, 64)];
     const m = pickInReplyToMessage(messages);
     expect(m?.id).toBe('newer-mention');
+  });
+
+  it('skips task rows when a chat row is also present', () => {
+    // Repro: ai-friends RSS recurring task fired and Discord rendered the
+    // reply pill pointing at the channel's last real message. The task
+    // row's id is a fresh UUID, not a platform message id — using it as
+    // a reply target is meaningless and visually wrong. Falls back to
+    // the chat row even when it's trigger=0 (in practice the poll-loop
+    // drops trigger=0 chat from task-only batches before this is called).
+    const messages = [
+      row('t-task', 1, 70, 'task'),
+      row('m-chat-old', 0, 64), // accumulated chat, trigger=0
+    ];
+    const m = pickInReplyToMessage(messages);
+    expect(m?.id).toBe('m-chat-old');
+  });
+
+  it('returns null when batch has only task rows', () => {
+    const messages = [row('t-task-1', 1, 70, 'task'), row('t-task-2', 1, 68, 'task')];
+    const m = pickInReplyToMessage(messages);
+    expect(m).toBeNull();
+  });
+
+  it('picks a real chat trigger over a task row', () => {
+    const messages = [row('t-task', 1, 80, 'task'), row('m-mention', 1, 72), row('m-context', 0, 64)];
+    const m = pickInReplyToMessage(messages);
+    expect(m?.id).toBe('m-mention');
   });
 
   it('matches the boysnight repro: question + Sorta drive-by', () => {

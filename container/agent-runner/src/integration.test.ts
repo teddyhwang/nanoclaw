@@ -22,7 +22,11 @@ afterEach(() => {
   closeSessionDb();
 });
 
-function insertMessage(id: string, content: object, opts?: { platformId?: string; channelType?: string; threadId?: string }) {
+function insertMessage(
+  id: string,
+  content: object,
+  opts?: { platformId?: string; channelType?: string; threadId?: string },
+) {
   getInboundDb()
     .prepare(
       `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, thread_id, content)
@@ -33,7 +37,11 @@ function insertMessage(id: string, content: object, opts?: { platformId?: string
 
 describe('poll loop integration', () => {
   it('should pick up a message, process it, and write a response', async () => {
-    insertMessage('m1', { sender: 'Alice', text: 'What is the meaning of life?' }, { platformId: 'chan-1', channelType: 'discord', threadId: 'thread-1' });
+    insertMessage(
+      'm1',
+      { sender: 'Alice', text: 'What is the meaning of life?' },
+      { platformId: 'chan-1', channelType: 'discord', threadId: 'thread-1' },
+    );
 
     const provider = new MockProvider({}, () => '<message to="discord-test">42</message>');
 
@@ -85,12 +93,21 @@ describe('poll loop integration', () => {
       .run();
 
     // Insert messages from each destination with distinct thread IDs
-    insertMessage('m-discord', { sender: 'Alice', text: 'from discord' }, { platformId: 'chan-1', channelType: 'discord', threadId: 'discord-thread-1' });
-    insertMessage('m-slack', { sender: 'Bob', text: 'from slack' }, { platformId: 'chan-2', channelType: 'slack', threadId: 'slack-thread-99' });
+    insertMessage(
+      'm-discord',
+      { sender: 'Alice', text: 'from discord' },
+      { platformId: 'chan-1', channelType: 'discord', threadId: 'discord-thread-1' },
+    );
+    insertMessage(
+      'm-slack',
+      { sender: 'Bob', text: 'from slack' },
+      { platformId: 'chan-2', channelType: 'slack', threadId: 'slack-thread-99' },
+    );
 
     // Agent replies to both destinations
-    const provider = new MockProvider({}, () =>
-      '<message to="discord-test">reply-d</message><message to="slack-test">reply-s</message>',
+    const provider = new MockProvider(
+      {},
+      () => '<message to="discord-test">reply-d</message><message to="slack-test">reply-s</message>',
     );
     const controller = new AbortController();
     const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
@@ -195,7 +212,11 @@ describe('poll loop integration', () => {
       .run();
 
     // Only insert a message from discord — slack-new has never sent anything
-    insertMessage('m1', { sender: 'Alice', text: 'tell slack' }, { platformId: 'chan-1', channelType: 'discord', threadId: 'discord-thread' });
+    insertMessage(
+      'm1',
+      { sender: 'Alice', text: 'tell slack' },
+      { platformId: 'chan-1', channelType: 'discord', threadId: 'discord-thread' },
+    );
 
     const provider = new MockProvider({}, () => '<message to="slack-new">hello slack</message>');
     const controller = new AbortController();
@@ -214,8 +235,16 @@ describe('poll loop integration', () => {
 
   it('resolves most recent thread_id when destination has multiple inbound messages', async () => {
     // Two messages from same destination, different threads
-    insertMessage('m-old', { sender: 'Alice', text: 'old' }, { platformId: 'chan-1', channelType: 'discord', threadId: 'thread-old' });
-    insertMessage('m-new', { sender: 'Alice', text: 'new' }, { platformId: 'chan-1', channelType: 'discord', threadId: 'thread-new' });
+    insertMessage(
+      'm-old',
+      { sender: 'Alice', text: 'old' },
+      { platformId: 'chan-1', channelType: 'discord', threadId: 'thread-old' },
+    );
+    insertMessage(
+      'm-new',
+      { sender: 'Alice', text: 'new' },
+      { platformId: 'chan-1', channelType: 'discord', threadId: 'thread-new' },
+    );
 
     const provider = new MockProvider({}, () => '<message to="discord-test">reply</message>');
     const controller = new AbortController();
@@ -255,7 +284,8 @@ describe('poll loop integration', () => {
 
     const provider = new MockProvider(
       {},
-      () => '<internal>thinking about this...</internal><message to="discord-test">answer</message><internal>done thinking</internal>',
+      () =>
+        '<internal>thinking about this...</internal><message to="discord-test">answer</message><internal>done thinking</internal>',
     );
     const controller = new AbortController();
     const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
@@ -291,6 +321,52 @@ describe('poll loop integration', () => {
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
     expect(out[0].platform_id).toBe('chan-1');
+
+    await loopPromise.catch(() => {});
+  });
+
+  it('task-only wake leaves accumulated trigger=0 chat pending', async () => {
+    // Repro: shit-talk 2026-05-11 04:01 — accumulated trigger=0 chat from
+    // the previous evening got pulled into the prompt when the daily
+    // silent-maintenance task fired, and the agent posted a chat reply
+    // despite the task's explicit "do NOT send any messages" instruction.
+    // The fix: drop trigger=0 chat rows from the batch when the only
+    // trigger=1 row(s) are tasks. The chat rows stay pending for the
+    // next real user-triggered wake.
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, trigger, platform_id, channel_type, content)
+         VALUES ('m-accum', 'chat', datetime('now', '-1 hour'), 'pending', 0, 'chan-1', 'discord', ?)`,
+      )
+      .run(JSON.stringify({ sender: 'mackchiu', text: 'Not at hole in ones' }));
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, trigger, platform_id, channel_type, content)
+         VALUES ('t-silent', 'task', datetime('now'), 'pending', 1, 'chan-1', 'discord', ?)`,
+      )
+      .run(JSON.stringify({ prompt: 'silent maintenance — do not send messages' }));
+
+    let capturedPrompt = '';
+    const provider = new MockProvider({}, (prompt: string) => {
+      capturedPrompt = prompt;
+      // Agent obeys: no <message to=...> blocks, no outbound.
+      return 'noted';
+    });
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
+
+    await sleep(1500);
+    controller.abort();
+
+    // The task row should have been processed; the accumulated chat should still be pending.
+    const stillPending = getPendingMessages();
+    const accumStill = stillPending.find((m) => m.id === 'm-accum');
+    expect(accumStill).toBeDefined();
+    expect(accumStill?.trigger).toBe(0);
+
+    // The agent's prompt must NOT contain mackchiu's accumulated chat content.
+    expect(capturedPrompt).not.toContain('Not at hole in ones');
+    expect(capturedPrompt).not.toContain('mackchiu');
 
     await loopPromise.catch(() => {});
   });

@@ -141,8 +141,15 @@ export interface RoutingContext {
  */
 export function pickInReplyToMessage(messages: MessageInRow[]): MessageInRow | null {
   if (messages.length === 0) return null;
-  const trigger = messages.find((m) => m.trigger === 1);
-  return trigger ?? messages[0];
+  // Task rows are synthesized by the scheduler — their id is a fresh UUID,
+  // not a platform message id, so using it as a reply target is meaningless
+  // for chat adapters and harmful for Discord, which falls back to replying
+  // to the channel's most-recent real message (observed on recurring RSS
+  // posts in ai-friends, 2026-05-11). Exclude them at the picker level.
+  const chatLike = messages.filter((m) => m.kind !== 'task');
+  if (chatLike.length === 0) return null;
+  const trigger = chatLike.find((m) => m.trigger === 1);
+  return trigger ?? chatLike[0];
 }
 
 /**

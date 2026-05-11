@@ -135,10 +135,33 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       continue;
     }
 
-    const ids = messages.map((m) => m.id);
+    // Task-fire isolation: when the only trigger=1 rows in the batch are
+    // tasks (recurring or one-shot), drop trigger=0 chat rows from this
+    // batch. The chat rows stay pending — they'll ride along the next
+    // real user-triggered wake. Without this, silent-maintenance tasks
+    // ("do NOT send any messages") get accumulated chat shoved into the
+    // prompt and the model overrides the silence instruction to reply
+    // to what looks like a live user turn (shit-talk 2026-05-11 04:01:
+    // mackchiu's accumulated chats from May 10 20:42 dragged into the
+    // 04:02 maintenance wake; agent posted a chat reply despite the
+    // explicit silent-task instruction). RSS-style tasks that *do* want
+    // to post still post via MCP send_message — the gate only removes
+    // chat-as-context from the prompt, not outbound delivery.
+    const triggerRows = messages.filter((m) => m.trigger === 1);
+    const taskOnlyWake = triggerRows.every((m) => m.kind === 'task');
+    let batch = messages;
+    if (taskOnlyWake) {
+      const dropped = messages.filter((m) => m.trigger === 0 && (m.kind === 'chat' || m.kind === 'chat-sdk'));
+      if (dropped.length > 0) {
+        log(`Task-only wake: dropping ${dropped.length} accumulated chat row(s) from prompt (left pending)`);
+        batch = messages.filter((m) => !(m.trigger === 0 && (m.kind === 'chat' || m.kind === 'chat-sdk')));
+      }
+    }
+
+    const ids = batch.map((m) => m.id);
     markProcessing(ids);
 
-    const routing = extractRouting(messages);
+    const routing = extractRouting(batch);
 
     // Command handling: the host router gates filtered and unauthorized
     // admin commands before they reach the container. The only command
@@ -146,7 +169,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     const normalMessages: MessageInRow[] = [];
     const commandIds: string[] = [];
 
-    for (const msg of messages) {
+    for (const msg of batch) {
       if ((msg.kind === 'chat' || msg.kind === 'chat-sdk') && isClearCommand(msg)) {
         log('Clearing session (resetting continuation)');
         continuation = undefined;
@@ -172,7 +195,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     if (normalMessages.length === 0) {
       const remainingIds = ids.filter((id) => !commandIds.includes(id));
       if (remainingIds.length > 0) markCompleted(remainingIds);
-      log(`All ${messages.length} message(s) were commands, skipping query`);
+      log(`All ${batch.length} message(s) were commands, skipping query`);
       continue;
     }
 
