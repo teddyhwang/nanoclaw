@@ -489,6 +489,34 @@ describe('formatAttachments — text inlining', () => {
     }
   });
 
+  it('inlines a WA documentMessage shape: localPath + Baileys mimetype, no data', () => {
+    // WhatsApp's native adapter writes the file to disk and reports
+    // `mimetype` from Baileys' documentMessage. The agent should see the
+    // bytes inline rather than a bare marker, even when the upload's
+    // filename has no recognizable extension.
+    const fs = require('fs') as typeof import('fs');
+    const os = require('os') as typeof import('os');
+    const pathMod = require('path') as typeof import('path');
+    const tmpDir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'fmt-wa-test-'));
+    const abs = pathMod.join(tmpDir, 'meeting-notes');
+    fs.writeFileSync(abs, 'topic: standup\nattendees: 3\n');
+    try {
+      const out = formatAttachments([
+        {
+          type: 'document',
+          name: 'meeting-notes',
+          mimeType: 'text/plain',
+          localPath: abs,
+        },
+      ]);
+      expect(out).toContain('[Attached file content: meeting-notes]');
+      expect(out).toContain('<attached_file name="meeting-notes"');
+      expect(out).toContain('topic: standup');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it('falls through to marker when att.data exceeds 64 KB', () => {
     // 100 KB of A's, base64-encoded — exceeds the inline ceiling.
     const big = 'A'.repeat(100 * 1024);

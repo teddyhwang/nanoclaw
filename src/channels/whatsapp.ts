@@ -414,14 +414,14 @@ registerChannelAdapter('whatsapp', {
     async function downloadInboundMedia(
       msg: WAMessage,
       normalized: any,
-    ): Promise<Array<{ type: string; name: string; localPath: string }>> {
+    ): Promise<Array<{ type: string; name: string; localPath: string; mimeType?: string }>> {
       const mediaTypes: Array<{ key: string; type: string; ext: string }> = [
         { key: 'imageMessage', type: 'image', ext: '.jpg' },
         { key: 'videoMessage', type: 'video', ext: '.mp4' },
         { key: 'audioMessage', type: 'audio', ext: '.ogg' },
         { key: 'documentMessage', type: 'document', ext: '' },
       ];
-      const results: Array<{ type: string; name: string; localPath: string }> = [];
+      const results: Array<{ type: string; name: string; localPath: string; mimeType?: string }> = [];
       for (const { key, type, ext } of mediaTypes) {
         if (!normalized[key]) continue;
         try {
@@ -442,7 +442,14 @@ registerChannelAdapter('whatsapp', {
           fs.mkdirSync(attachDir, { recursive: true });
           const filePath = path.join(attachDir, filename);
           fs.writeFileSync(filePath, buffer);
-          results.push({ type, name: filename, localPath: `attachments/${filename}` });
+          // Propagate the Baileys-reported mimetype so the container formatter's
+          // text-inline path can fire on `documentMessage` uploads whose
+          // filename has no recognizable extension. Without this, `report` or
+          // `notes-2026-05` files fall through to the bare marker even when
+          // their bytes are plain text.
+          const rawMime = normalized[key].mimetype;
+          const mimeType = typeof rawMime === 'string' && rawMime.length > 0 ? rawMime : undefined;
+          results.push({ type, name: filename, localPath: `attachments/${filename}`, mimeType });
           log.info('Media downloaded', { type, filename });
         } catch (err) {
           log.warn('Failed to download media', { type, err });
