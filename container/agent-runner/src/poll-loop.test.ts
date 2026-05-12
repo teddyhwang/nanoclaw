@@ -20,14 +20,36 @@ function insertMessage(
   id: string,
   kind: string,
   content: object,
-  opts?: { processAfter?: string; trigger?: 0 | 1; onWake?: 0 | 1 },
+  opts?: { processAfter?: string; trigger?: 0 | 1; onWake?: 0 | 1; timestamp?: string },
 ) {
   getInboundDb()
     .prepare(
       `INSERT INTO messages_in (id, kind, timestamp, status, process_after, trigger, on_wake, content)
-     VALUES (?, ?, datetime('now'), 'pending', ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)`,
     )
-    .run(id, kind, opts?.processAfter ?? null, opts?.trigger ?? 1, opts?.onWake ?? 0, JSON.stringify(content));
+    .run(
+      id,
+      kind,
+      opts?.timestamp ?? new Date().toISOString(),
+      opts?.processAfter ?? null,
+      opts?.trigger ?? 1,
+      opts?.onWake ?? 0,
+      JSON.stringify(content),
+    );
+}
+
+/**
+ * Insert + read-back as a plain MessageInRow shape. Used by tests that
+ * need to exercise the formatter on row kinds that `getPendingMessages`
+ * filters out (notably `kind='system'`, which is excluded at the SQL
+ * layer so unconsumed MCP-tool responses can't starve the LIMIT —
+ * production code never reaches formatMessages with a system row).
+ */
+function readMessageInRow(id: string, kind: string, content: object) {
+  insertMessage(id, kind, content);
+  return getInboundDb()
+    .prepare('SELECT * FROM messages_in WHERE id = ?')
+    .get(id) as Parameters<typeof formatMessages>[0][number];
 }
 
 describe('formatter', () => {
@@ -68,8 +90,18 @@ describe('formatter', () => {
   });
 
   it('should format system messages', () => {
-    insertMessage('m1', 'system', { action: 'register_group', status: 'success', result: { id: 'ag-1' } });
-    const messages = getPendingMessages();
+    // System rows are MCP-tool responses that don't reach the agent
+    // via the poll loop (it strips them, and `getPendingMessages` now
+    // excludes them at the SQL layer to keep them from counting toward
+    // the LIMIT). The formatter retains a kind='system' branch for
+    // tests / future use; call it directly here.
+    const messages = [
+      readMessageInRow(
+        'm1',
+        'system',
+        { action: 'register_group', status: 'success', result: { id: 'ag-1' } },
+      ),
+    ];
     const prompt = formatMessages(messages);
     expect(prompt).toContain('<system_response');
     expect(prompt).toContain('action="register_group"');
@@ -77,9 +109,15 @@ describe('formatter', () => {
 
   it('should handle mixed kinds', () => {
     insertMessage('m1', 'chat', { sender: 'John', text: 'Hello' });
-    insertMessage('m2', 'system', { action: 'test', status: 'ok', result: null });
-    const messages = getPendingMessages();
-    const prompt = formatMessages(messages);
+    const chatMessages = getPendingMessages();
+    // System row read directly — see above re: getPendingMessages
+    // excluding kind='system'.
+    const systemMessage = readMessageInRow(
+      'm2',
+      'system',
+      { action: 'test', status: 'ok', result: null },
+    );
+    const prompt = formatMessages([...chatMessages, systemMessage]);
     expect(prompt).toContain('sender="John"');
     expect(prompt).toContain('<system_response');
   });
@@ -122,6 +160,58 @@ describe('accumulate gate (trigger column)', () => {
     expect(messages.some((m) => m.trigger === 1)).toBe(true);
     // Both messages are present for the formatter → agent sees the prior context.
     expect(messages.map((m) => m.id).sort()).toEqual(['m1', 'm2']);
+  });
+
+  it('age-out: trigger=0 row older than 24h is excluded', () => {
+    // Stale accumulate context shouldn't ride along forever. Without
+    // the age cap, sessions that accumulate weeks/months of group
+    // chatter compete with fresh context inside the LIMIT and waste
+    // prompt budget on dead messages — observed S331 in #boysnight.
+    const twoDaysAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
+    insertMessage(
+      'old-noise',
+      'chat',
+      { sender: 'A', text: 'ancient chitchat' },
+      { trigger: 0, timestamp: twoDaysAgo },
+    );
+    insertMessage('fresh-trigger', 'chat', { sender: 'B', text: 'actual mention' }, { trigger: 1 });
+
+    const messages = getPendingMessages();
+    expect(messages.map((m) => m.id)).toEqual(['fresh-trigger']);
+  });
+
+  it('age-out: trigger=1 row older than 24h is still included (due work, age does not matter)', () => {
+    // Trigger=1 represents work the host queued (recurring tasks like
+    // dream-* maintenance, or replayed wake messages). Even if a
+    // recurring task fired hours/days ago and never got picked up
+    // (the bug S331 fixed), the row should still be visible — it
+    // represents work that needs to happen, not context that's gone
+    // stale. The age cap only applies to trigger=0 accumulate rows.
+    const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
+    insertMessage(
+      'old-task',
+      'task',
+      { prompt: 'maintenance' },
+      { trigger: 1, timestamp: threeDaysAgo },
+    );
+
+    const messages = getPendingMessages();
+    expect(messages.map((m) => m.id)).toEqual(['old-task']);
+  });
+
+  it('age-out: trigger=0 row inside 24h window is included normally', () => {
+    // Sanity check that the age cap doesn't drop recent context.
+    const oneHourAgo = new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString();
+    insertMessage(
+      'recent-noise',
+      'chat',
+      { sender: 'A', text: 'recent chitchat' },
+      { trigger: 0, timestamp: oneHourAgo },
+    );
+    insertMessage('fresh-trigger', 'chat', { sender: 'B', text: 'mention' }, { trigger: 1 });
+
+    const messages = getPendingMessages();
+    expect(messages.map((m) => m.id).sort()).toEqual(['fresh-trigger', 'recent-noise']);
   });
 
   it('trigger column defaults to 1 for legacy inserts without explicit value', () => {
@@ -270,9 +360,16 @@ describe('origin metadata (from= attribute)', () => {
   });
 
   it('system message includes from= when destination matches', () => {
+    // Same caveat as the formatter > system messages test: getPendingMessages
+    // excludes kind='system' at the SQL layer to prevent unconsumed MCP-tool
+    // responses from starving the LIMIT. Pull the row directly for the
+    // formatter check.
     seedDestination('discord-main', 'discord', 'chan-1');
     insertWithRouting('s1', 'system', { action: 'test', status: 'ok', result: null }, 'discord', 'chan-1');
-    const prompt = formatMessages(getPendingMessages());
+    const row = getInboundDb()
+      .prepare('SELECT * FROM messages_in WHERE id = ?')
+      .get('s1') as Parameters<typeof formatMessages>[0][number];
+    const prompt = formatMessages([row]);
     expect(prompt).toContain('<system_response');
     expect(prompt).toContain('from="discord-main"');
   });
