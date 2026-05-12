@@ -126,6 +126,35 @@ describe('reply_to + quoted_message rendering', () => {
   });
 });
 
+describe('sender attribute precedence', () => {
+  it('prefers senderName over sender (raw platform id)', () => {
+    insertMessage('m1', 'chat', {
+      sender: '255593654804579@lid',
+      senderName: 'Janice Kimchi',
+      text: 'hi',
+    });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('sender="Janice Kimchi"');
+    expect(result).not.toContain('sender="255593654804579@lid"');
+  });
+
+  it('falls back to sender when senderName is absent', () => {
+    insertMessage('m1', 'chat', { sender: 'Alice', text: 'hi' });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('sender="Alice"');
+  });
+
+  it('prefers author.fullName over sender when senderName is absent', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'raw-id',
+      author: { fullName: 'Author Full' },
+      text: 'hi',
+    });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('sender="Author Full"');
+  });
+});
+
 describe('XML escaping', () => {
   it('escapes <, >, &, " in sender and body', () => {
     insertMessage('m1', 'chat', {
