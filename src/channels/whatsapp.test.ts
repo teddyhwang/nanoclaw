@@ -5,7 +5,12 @@
  */
 import { describe, it, expect } from 'vitest';
 
-import { extractWhatsAppContextInfo, extractWhatsAppReplyContext, isWhatsAppBotMentioned } from './whatsapp.js';
+import {
+  extractWhatsAppContextInfo,
+  extractWhatsAppReplyContext,
+  hasWhatsAppTextMention,
+  isWhatsAppBotMentioned,
+} from './whatsapp.js';
 
 describe('extractWhatsAppContextInfo', () => {
   it('returns null when the normalized envelope has no recognised message type', () => {
@@ -52,6 +57,36 @@ describe('isWhatsAppBotMentioned', () => {
   it('does not blow up on malformed entries', () => {
     const ctx = { mentionedJid: [null, 42, undefined, '159867859914790@lid'] };
     expect(isWhatsAppBotMentioned(ctx, '159867859914790', undefined)).toBe(true);
+  });
+});
+
+describe('hasWhatsAppTextMention', () => {
+  it('matches a literal @<name> mention case-insensitively', () => {
+    expect(hasWhatsAppTextMention('@optimus look up my flight', 'Optimus')).toBe(true);
+    expect(hasWhatsAppTextMention('hey @Optimus, what time?', 'Optimus')).toBe(true);
+    expect(hasWhatsAppTextMention('@OPTIMUS', 'optimus')).toBe(true);
+  });
+
+  it('requires a word boundary after the name', () => {
+    expect(hasWhatsAppTextMention('@optimusly', 'Optimus')).toBe(false);
+    expect(hasWhatsAppTextMention('@optimus123', 'Optimus')).toBe(false);
+  });
+
+  it('does not match without the @ sigil', () => {
+    expect(hasWhatsAppTextMention('hey optimus', 'Optimus')).toBe(false);
+    expect(hasWhatsAppTextMention('optimus@example.com', 'Optimus')).toBe(false);
+  });
+
+  it('returns false on empty/missing inputs', () => {
+    expect(hasWhatsAppTextMention('', 'Optimus')).toBe(false);
+    expect(hasWhatsAppTextMention(undefined, 'Optimus')).toBe(false);
+    expect(hasWhatsAppTextMention('@optimus', '')).toBe(false);
+  });
+
+  it('escapes regex metacharacters in the assistant name', () => {
+    expect(hasWhatsAppTextMention('@C.AI hi', 'C.AI')).toBe(true);
+    // The dot is escaped, so a different char in that slot does not match.
+    expect(hasWhatsAppTextMention('@CXAI hi', 'C.AI')).toBe(false);
   });
 });
 

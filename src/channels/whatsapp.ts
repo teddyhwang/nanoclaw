@@ -289,6 +289,22 @@ export function extractWhatsAppContextInfo(normalized: any): any | null {
 }
 
 /**
+ * Detect whether a WhatsApp message contains a literal text mention of the
+ * assistant (e.g. `@optimus`). Used as a fallback for shared-number
+ * deployments where the bot has no distinct WA contact entry — no popup
+ * mention is possible, so a `mentionedJid` array entry can never appear.
+ * Users can only type `@<name>` as plain text. Case-insensitive. Requires
+ * a word boundary after the name so `@optimusly` doesn't match.
+ *
+ * Exported for testing.
+ */
+export function hasWhatsAppTextMention(text: string | undefined, assistantName: string): boolean {
+  if (!text || !assistantName) return false;
+  const escaped = assistantName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`@${escaped}\\b`, 'i').test(text);
+}
+
+/**
  * Detect whether a WhatsApp message platform-mentions the bot.
  *
  * WhatsApp's tap-to-mention UI populates `contextInfo.mentionedJid` with the
@@ -932,7 +948,19 @@ registerChannelAdapter('whatsapp', {
             // `mention-sticky`'s `isReplyToBot` branch trigger when a user
             // quote-replies to a previous bot message.
             const ctxInfo = extractWhatsAppContextInfo(normalized);
-            const isMention = isWhatsAppBotMentioned(ctxInfo, botLidUser, botPhoneUser);
+            // Platform-mention detection (real WA @-popup) covers the
+            // ASSISTANT_HAS_OWN_NUMBER=true case where the bot is a distinct
+            // WA contact that can be @-tagged. In shared-number deployments
+            // there's no separate contact in the roster, so users can never
+            // produce a `mentionedJid` entry — they can only type literal
+            // `@optimus` text. Fall back to a case-insensitive text check on
+            // `@<ASSISTANT_NAME>` so `engage_mode='mention'` and
+            // `'mention-sticky'` work for shared-number too. Safe for
+            // own-number mode as well: a literal `@optimus` always indicates
+            // intent regardless of whether the platform mention popup fired.
+            const isMention =
+              isWhatsAppBotMentioned(ctxInfo, botLidUser, botPhoneUser) ||
+              hasWhatsAppTextMention(content, ASSISTANT_NAME);
             const replyTo = extractWhatsAppReplyContext(ctxInfo);
 
             const inbound: InboundMessage = {
