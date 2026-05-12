@@ -23,6 +23,8 @@ import {
   createSession,
   getSession,
   findSession,
+  findSessionForAgent,
+  findMostRecentClosedSessionForAgent,
   getSessionsByAgentGroup,
   getActiveSessions,
   getRunningSessions,
@@ -345,6 +347,54 @@ describe('sessions', () => {
     createSession(sess());
     createSession({ ...sess(), id: 'sess-closed', status: 'closed', thread_id: 'thread-x' });
     expect(getActiveSessions()).toHaveLength(1);
+  });
+
+  // Regression for S335: `isReplyToOurBot` was scoped to active sessions
+  // only, so a user reply (quote-reply on WA / native reply pill on Discord
+  // / Telegram) to a bot message from a previously-closed session — operator
+  // clear-session, container idle-teardown that flips status to 'closed' —
+  // returned false. mention/mention-sticky wirings then silently dropped
+  // the reply (wake=false) even though the intent is obviously to continue
+  // the thread. The audit-preserved closed-session inbound.db still has the
+  // `delivered` row; we just need a session lookup that includes it.
+  it('finds the most-recent closed session per agent + messaging group + thread', () => {
+    const earlier = '2026-05-01T00:00:00.000Z';
+    const later = '2026-05-12T00:00:00.000Z';
+    createSession({ ...sess(), id: 'sess-old', status: 'closed', created_at: earlier });
+    createSession({ ...sess(), id: 'sess-new', status: 'closed', created_at: later });
+    const result = findMostRecentClosedSessionForAgent('ag-1', 'mg-1', null);
+    expect(result).toBeDefined();
+    expect(result!.id).toBe('sess-new');
+  });
+
+  it('closed-session lookup ignores active rows so active+closed coexisting is fine', () => {
+    createSession({ ...sess(), id: 'sess-active', status: 'active' });
+    createSession({ ...sess(), id: 'sess-closed', status: 'closed' });
+    expect(findSessionForAgent('ag-1', 'mg-1', null)!.id).toBe('sess-active');
+    expect(findMostRecentClosedSessionForAgent('ag-1', 'mg-1', null)!.id).toBe('sess-closed');
+  });
+
+  it('closed-session lookup respects thread scoping', () => {
+    createSession({
+      ...sess(),
+      id: 'sess-thread-a',
+      status: 'closed',
+      thread_id: 'thread-a',
+    });
+    createSession({
+      ...sess(),
+      id: 'sess-thread-b',
+      status: 'closed',
+      thread_id: 'thread-b',
+    });
+    expect(findMostRecentClosedSessionForAgent('ag-1', 'mg-1', 'thread-a')!.id).toBe('sess-thread-a');
+    expect(findMostRecentClosedSessionForAgent('ag-1', 'mg-1', 'thread-b')!.id).toBe('sess-thread-b');
+    expect(findMostRecentClosedSessionForAgent('ag-1', 'mg-1', null)).toBeUndefined();
+  });
+
+  it('closed-session lookup returns undefined when no closed rows exist', () => {
+    createSession({ ...sess(), status: 'active' });
+    expect(findMostRecentClosedSessionForAgent('ag-1', 'mg-1', null)).toBeUndefined();
   });
 
   it('should list running sessions', () => {

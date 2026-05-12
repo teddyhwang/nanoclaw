@@ -27,7 +27,7 @@ import {
   getMessagingGroupAgents,
   getMessagingGroupWithAgentCount,
 } from './db/messaging-groups.js';
-import { findSessionForAgent } from './db/sessions.js';
+import { findMostRecentClosedSessionForAgent, findSessionForAgent } from './db/sessions.js';
 import { wasDeliveredByBot } from './db/session-db.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
@@ -442,14 +442,31 @@ function isReplyToOurBot(
   threadId: string | null,
   platformMessageId: string,
 ): boolean {
-  const session = findSessionForAgent(agentGroupId, messagingGroupId, threadId);
-  if (!session) return false;
-  try {
-    const db = openInboundDb(agentGroupId, session.id);
-    return wasDeliveredByBot(db, platformMessageId);
-  } catch {
-    return false;
+  // Try the active session first — common path during a live conversation.
+  // If no active session exists (operator clear-session, or container idle-
+  // teardown that closed the row), fall back to the most-recent closed
+  // session. The user can quote-reply to a bot message that was delivered
+  // in that closed session, and the `inbound.db` is audit-preserved on
+  // disk (S330), so `wasDeliveredByBot` can still answer. Without this
+  // fallback, `mention`/`mention-sticky` wirings silently drop replies to
+  // archived bot messages (wake=false) even though the operator intent is
+  // obviously to continue the thread.
+  const sessions: Array<{ id: string }> = [];
+  const active = findSessionForAgent(agentGroupId, messagingGroupId, threadId);
+  if (active) sessions.push(active);
+  const closed = findMostRecentClosedSessionForAgent(agentGroupId, messagingGroupId, threadId);
+  if (closed) sessions.push(closed);
+  for (const session of sessions) {
+    try {
+      const db = openInboundDb(agentGroupId, session.id);
+      if (wasDeliveredByBot(db, platformMessageId)) return true;
+    } catch {
+      // Closed session dir may have been GC'd by a future cleanup pass.
+      // Treat as a miss and keep looking; the active session lookup is
+      // already covered above.
+    }
   }
+  return false;
 }
 
 function evaluateEngage(agent: MessagingGroupAgent, text: string, isMention: boolean, isReplyToBot: boolean): boolean {

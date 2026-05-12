@@ -402,6 +402,22 @@ registerChannelAdapter('whatsapp', {
     // Sent message cache for retry/re-encrypt requests
     const sentMessageCache = new Map<string, any>();
 
+    // Inbound message key cache — used to build the `quoted` field on
+    // outbound replies so the agent's response renders as a native
+    // quote-reply pill in WhatsApp instead of an orphaned message. Keyed
+    // by `msg.key.id` (the same id the router writes as the message's
+    // platform id and the agent stamps on the OutboundMessage as
+    // `inReplyTo`). Bounded to keep memory steady on busy groups.
+    const INBOUND_KEY_CACHE_MAX = 1000;
+    const inboundKeyCache = new Map<string, { remoteJid: string; participant?: string; fromMe: boolean }>();
+    function rememberInboundKey(id: string, key: { remoteJid: string; participant?: string; fromMe: boolean }): void {
+      inboundKeyCache.set(id, key);
+      if (inboundKeyCache.size > INBOUND_KEY_CACHE_MAX) {
+        const oldest = inboundKeyCache.keys().next().value!;
+        inboundKeyCache.delete(oldest);
+      }
+    }
+
     // Group metadata cache with TTL
     const groupMetadataCache = new Map<string, { metadata: GroupMetadata; expiresAt: number }>();
 
@@ -567,14 +583,38 @@ registerChannelAdapter('whatsapp', {
       return results;
     }
 
-    async function sendRawMessage(jid: string, text: string): Promise<string | undefined> {
+    // Construct a Baileys `quoted` field for a known inbound message id.
+    // Returns null when the id isn't in cache (older than cache window, or
+    // a bot-sent id) — caller should send a plain message in that case
+    // rather than fail. The empty `message.conversation` is fine: Baileys
+    // references the quoted message by `key.id`, not by replaying body.
+    function buildQuoted(
+      messageId: string | null | undefined,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ): { key: any; message: any } | null {
+      if (!messageId) return null;
+      const cached = inboundKeyCache.get(messageId);
+      if (!cached) return null;
+      return {
+        key: {
+          remoteJid: cached.remoteJid,
+          id: messageId,
+          fromMe: cached.fromMe,
+          ...(cached.participant ? { participant: cached.participant } : {}),
+        },
+        message: { conversation: '' },
+      };
+    }
+
+    async function sendRawMessage(jid: string, text: string, inReplyTo?: string | null): Promise<string | undefined> {
       if (!connected) {
         outgoingQueue.push({ jid, text });
         log.info('WA disconnected, message queued', { jid, queueSize: outgoingQueue.length });
         return;
       }
       try {
-        const sent = await sock.sendMessage(jid, { text });
+        const quoted = buildQuoted(inReplyTo);
+        const sent = await sock.sendMessage(jid, { text }, quoted ? { quoted } : undefined);
         if (sent?.key?.id && sent.message) {
           sentMessageCache.set(sent.key.id, sent.message);
           if (sentMessageCache.size > SENT_MESSAGE_CACHE_MAX) {
@@ -947,6 +987,22 @@ registerChannelAdapter('whatsapp', {
             // sensitive and per-host, not per-group). `replyTo` lets
             // `mention-sticky`'s `isReplyToBot` branch trigger when a user
             // quote-replies to a previous bot message.
+            // Cache the inbound key shape so a future outbound message can
+            // build a Baileys `quoted` field referencing this message id —
+            // gives the bot's reply a native quote-reply pill in the WA UI
+            // and keeps threading visible to participants on long groups.
+            // Group messages carry `participant`; DMs do not. The `fromMe`
+            // bit is always false at this point — we only cache user-sent
+            // messages here (bot's own outbound is captured separately in
+            // `sentMessageCache`).
+            if (msg.key.id) {
+              rememberInboundKey(msg.key.id, {
+                remoteJid: chatJid,
+                participant: msg.key.participant ?? undefined,
+                fromMe: false,
+              });
+            }
+
             const ctxInfo = extractWhatsAppContextInfo(normalized);
             // Platform-mention detection (real WA @-popup) covers the
             // ASSISTANT_HAS_OWN_NUMBER=true case where the bot is a distinct
@@ -1096,15 +1152,24 @@ registerChannelAdapter('whatsapp', {
 
         if (!text && !hasFiles) return;
 
+        // Only the FIRST outbound message of the turn quotes the triggering
+        // inbound. If the agent sends multiple messages back-to-back, the
+        // rest are plain — a chain of quote pills to the same source looks
+        // noisy and breaks WA's per-message threading affordance.
+        const replyTarget = buildQuoted(message.inReplyTo);
+        const replyOpts = replyTarget ? { quoted: replyTarget } : undefined;
+
         // Send file attachments (first file gets the caption, rest are captionless)
         if (hasFiles) {
           let captionUsed = false;
+          let firstSend = true;
           for (const file of message.files!) {
             try {
               const ext = path.extname(file.filename).toLowerCase();
               const caption = !captionUsed ? text : undefined;
               const mediaMsg = buildMediaMessage(file.data, file.filename, ext, caption);
-              const sent = await sock.sendMessage(platformId, mediaMsg);
+              const sent = await sock.sendMessage(platformId, mediaMsg, firstSend ? replyOpts : undefined);
+              firstSend = false;
               if (sent?.key?.id && sent.message) {
                 sentMessageCache.set(sent.key.id, sent.message);
               }
@@ -1121,7 +1186,11 @@ registerChannelAdapter('whatsapp', {
           const name = message.assistantName ?? ASSISTANT_NAME;
           const sep = message.assistantPrefixSeparator ?? ': ';
           const prefixed = ASSISTANT_HAS_OWN_NUMBER ? formatted : `${name}${sep}${formatted}`;
-          return sendRawMessage(platformId, prefixed);
+          // Files-with-caption already consumed the reply target above and
+          // returned; if we fall through, it means no files (or files
+          // without caption). The reply target is still valid for the
+          // plain-text path in the no-files case. Pass it through.
+          return sendRawMessage(platformId, prefixed, hasFiles ? null : message.inReplyTo);
         }
       },
 
