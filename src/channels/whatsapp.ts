@@ -34,6 +34,7 @@ import type { GroupMetadata, WAMessageKey, WAMessage, WASocket } from '@whiskeys
 
 import { isSafeAttachmentName } from '../attachment-safety.js';
 import { ASSISTANT_HAS_OWN_NUMBER, ASSISTANT_NAME, DATA_DIR } from '../config.js';
+import { emitEngineEvent } from '../engine/events.js';
 import { getEnginePaths } from '../engine/paths.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
@@ -642,6 +643,80 @@ registerChannelAdapter('whatsapp', {
 
       sock.ev.on('creds.update', saveCreds);
 
+      // Bulk history sync. Fires after pair-time + on certain reconnects
+      // when WhatsApp's app-state protocol pushes a backlog of recent
+      // messages. Without `syncFullHistory: true` in the socket options
+      // this is typically a small recent window (hours-to-days); with it
+      // (a Phase 2 re-pair), WhatsApp pushes months. Either way, we want
+      // to feed these into the host's indexer the same way live messages
+      // flow, with `historical: true` so consumers can distinguish.
+      sock.ev.on('messaging-history.set', async ({ messages, isLatest }) => {
+        for (const msg of messages ?? []) {
+          try {
+            if (!msg.message || !msg.key.remoteJid) continue;
+            const rawJid = msg.key.remoteJid;
+            if (rawJid === 'status@broadcast') continue;
+            const normalized = normalizeMessageContent(msg.message);
+            if (!normalized) continue;
+
+            const chatJid = await translateJid(rawJid);
+            const isGroup = chatJid.endsWith('@g.us');
+            const ts = new Date(Number(msg.messageTimestamp) * 1000).toISOString();
+
+            const text =
+              normalized.conversation ||
+              normalized.extendedTextMessage?.text ||
+              normalized.imageMessage?.caption ||
+              normalized.videoMessage?.caption ||
+              '';
+
+            // History-sync messages skip the media-download path. The
+            // historical attachment URLs are no longer fetchable (Baileys
+            // can't re-derive the media key for messages it didn't ack);
+            // the persistent store gets the content text + sender id,
+            // which is what `search_conversations` needs anyway.
+            if (!text) continue;
+
+            const sender = msg.key.participant || rawJid;
+            const senderName = msg.pushName ?? sender.split('@')[0];
+            const fromMe = msg.key.fromMe || false;
+            const isBotMessage = ASSISTANT_HAS_OWN_NUMBER
+              ? fromMe
+              : text.startsWith(`${ASSISTANT_NAME}:`) || text.startsWith('🤖');
+
+            emitEngineEvent('channel.message_observed', {
+              channelType: 'whatsapp',
+              platformId: chatJid,
+              threadId: null,
+              messageId: msg.key.id || `wa-hist-${ts}`,
+              senderId: sender,
+              senderName,
+              ts,
+              isGroup,
+              isFromMe: fromMe,
+              isBotMessage,
+              historical: true,
+              content: JSON.stringify({
+                text,
+                sender,
+                senderName,
+                fromMe,
+                isBotMessage,
+                isGroup,
+                chatJid,
+              }),
+            });
+          } catch (err) {
+            log.warn('messaging-history.set: emit failed', { err });
+          }
+        }
+        if (isLatest) {
+          log.info('WhatsApp messaging-history.set complete', {
+            count: messages?.length ?? 0,
+          });
+        }
+      });
+
       // Inbound messages
       sock.ev.on('messages.upsert', async ({ messages }) => {
         for (const msg of messages) {
@@ -750,6 +825,31 @@ registerChannelAdapter('whatsapp', {
               isBotMessage,
               isGroup,
             };
+
+            // Emit `channel.message_observed` BEFORE the router so the
+            // host can persist every message (registered or not) into an
+            // indexer store. The router's `onInbound` gate drops messages
+            // for unregistered chats, but a host-side replay store needs
+            // them all — see Optimus's whatsapp-history plugin.
+            try {
+              emitEngineEvent('channel.message_observed', {
+                channelType: 'whatsapp',
+                platformId: chatJid,
+                threadId: null,
+                messageId: inbound.id,
+                senderId: sender,
+                senderName: senderName ?? null,
+                ts: timestamp,
+                isGroup,
+                isFromMe: fromMe,
+                isBotMessage,
+                historical: false,
+                content: JSON.stringify(inbound.content),
+              });
+            } catch (err) {
+              // Best-effort: event bus failure must not block the router.
+              log.warn('channel.message_observed emit failed', { err });
+            }
 
             // WhatsApp doesn't use threads — threadId is null
             setupConfig.onInbound(chatJid, null, inbound);

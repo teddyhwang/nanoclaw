@@ -98,6 +98,51 @@ export interface EngineEventMap {
     name: string | undefined;
     isGroup: boolean | undefined;
   };
+  /**
+   * Fires when a channel adapter observes a message — typed for either a
+   * live receive (`messages.upsert`-equivalent) or a history sync burst
+   * from the platform (e.g. WhatsApp's `messaging-history.set` event
+   * during the initial pair-time sync). Fires regardless of whether the
+   * chat is currently registered with any agent group, so indexers can
+   * build a persistent store ahead of registration.
+   *
+   * Symmetric in *intent* with `inbound.routed` but earlier in the
+   * pipeline: `inbound.routed` fires only for messages the router
+   * accepts; `channel.message_observed` fires for every message the
+   * adapter sees, including ones that get dropped by the registration
+   * filter or `unknown_sender_policy`. Host plugins (e.g. Optimus's
+   * `whatsapp-history`) persist the observed stream so a later
+   * `whatsapp_chat_history` delivery action can replay it into a
+   * freshly registered chat's session inbound.db.
+   *
+   * `historical` distinguishes a live receive (`false`) from a pair-time
+   * / reconnect bulk sync (`true`). Indexers may want to count or
+   * rate-limit differently between the two.
+   *
+   * `content` is the platform-shaped chat-sdk content blob the adapter
+   * was about to emit via `onInbound` — same JSON the router writes into
+   * `messages_in.content`. Carrying it on the event lets a host plugin
+   * persist the canonical shape without a platform-specific re-parse
+   * later.
+   */
+  'channel.message_observed': {
+    channelType: string;
+    platformId: string;
+    threadId: string | null;
+    messageId: string;
+    /** Sender's stable platform id (e.g. WhatsApp JID, Discord snowflake). */
+    senderId: string;
+    /** Best-effort display name at observation time. */
+    senderName: string | null;
+    /** ISO 8601 from the platform's timestamp. */
+    ts: string;
+    isGroup: boolean;
+    isFromMe: boolean;
+    isBotMessage: boolean;
+    historical: boolean;
+    /** Full chat-sdk content blob, JSON-stringified. */
+    content: string;
+  };
   'outbound.delivered': { sessionId: string; agentGroupId: string; channelType: string; platformId: string };
   'outbound.failed': { sessionId: string; agentGroupId: string; channelType: string; platformId: string; err: unknown };
   'container.spawn': { sessionId: string; agentGroupId: string };
