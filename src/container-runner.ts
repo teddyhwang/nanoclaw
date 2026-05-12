@@ -24,6 +24,7 @@ import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars } from './db/container-configs.js';
 import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
 import { composeGroupClaudeMd } from './claude-md-compose.js';
+import { getExtraSkillRoots } from './engine/skill-roots.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
 import { initGroupFilesystem } from './group-init.js';
@@ -446,7 +447,16 @@ function syncSkillSymlinks(claudeDir: string, containerConfig: import('./contain
     fs.mkdirSync(skillsDir, { recursive: true });
   }
 
-  // Determine desired skill set
+  // Determine desired skill set from built-in /app/skills + extra skill roots
+  // (plugin-registered). The Claude SDK only discovers skills via
+  // ~/.claude/skills/ symlinks — directories merely bind-mounted into the
+  // container don't surface as skills. Hosts like Optimus that ship skills
+  // outside container/skills/ register them via `addSkillRoot`, and we have
+  // to link those targets here too. Skipping the extra roots was an
+  // invisible footgun: tools mounted, MCP servers registered, but the
+  // agent's skill_listing was empty for the entire integration set, so the
+  // agent had no idea those tools existed and fell through to onecli-gateway
+  // / Bash for tasks the dedicated skills should have handled.
   const containerSourceDir = process.env.NANOCLAW_CONTAINER_SOURCE_DIR
     ? path.resolve(process.env.NANOCLAW_CONTAINER_SOURCE_DIR)
     : path.join(
@@ -454,23 +464,41 @@ function syncSkillSymlinks(claudeDir: string, containerConfig: import('./contain
         'container',
       );
   const sharedSkillsDir = path.join(containerSourceDir, 'skills');
-  let desired: string[];
-  if (containerConfig.skills === 'all') {
-    // Recompute from shared dir — newly-added upstream skills appear automatically
-    desired = fs.existsSync(sharedSkillsDir)
-      ? fs.readdirSync(sharedSkillsDir).filter((e) => {
-          try {
-            return fs.statSync(path.join(sharedSkillsDir, e)).isDirectory();
-          } catch {
-            return false;
-          }
-        })
-      : [];
-  } else {
-    desired = containerConfig.skills;
-  }
 
-  const desiredSet = new Set(desired);
+  // Map skill name → container path. Built-in /app/skills/<name> wins on
+  // duplicate names so a host can't accidentally shadow a NanoClaw skill.
+  const skillTargets = new Map<string, string>();
+  if (containerConfig.skills === 'all') {
+    if (fs.existsSync(sharedSkillsDir)) {
+      for (const entry of fs.readdirSync(sharedSkillsDir)) {
+        try {
+          if (fs.statSync(path.join(sharedSkillsDir, entry)).isDirectory()) {
+            skillTargets.set(entry, `/app/skills/${entry}`);
+          }
+        } catch {
+          /* skip unreadable */
+        }
+      }
+    }
+    for (const root of getExtraSkillRoots()) {
+      if (!fs.existsSync(root.hostPath)) continue;
+      for (const entry of fs.readdirSync(root.hostPath)) {
+        if (skillTargets.has(entry)) continue;
+        if (root.skillFilter && !root.skillFilter(entry)) continue;
+        try {
+          if (fs.statSync(path.join(root.hostPath, entry)).isDirectory()) {
+            skillTargets.set(entry, `${root.containerPath}/${entry}`);
+          }
+        } catch {
+          /* skip unreadable */
+        }
+      }
+    }
+  } else {
+    for (const skill of containerConfig.skills) {
+      skillTargets.set(skill, `/app/skills/${skill}`);
+    }
+  }
 
   // Remove symlinks not in the desired set
   for (const entry of fs.readdirSync(skillsDir)) {
@@ -481,24 +509,29 @@ function syncSkillSymlinks(claudeDir: string, containerConfig: import('./contain
     } catch {
       continue;
     }
-    if (isSymlink && !desiredSet.has(entry)) {
+    if (isSymlink && !skillTargets.has(entry)) {
       fs.unlinkSync(entryPath);
     }
   }
 
   // Create symlinks for desired skills (container path targets)
-  for (const skill of desired) {
+  for (const [skill, target] of skillTargets) {
     const linkPath = path.join(skillsDir, skill);
-    let exists = false;
+    let existingTarget: string | null = null;
     try {
-      fs.lstatSync(linkPath);
-      exists = true;
+      existingTarget = fs.readlinkSync(linkPath);
     } catch {
-      /* missing */
+      /* missing or not a symlink */
     }
-    if (!exists) {
-      fs.symlinkSync(`/app/skills/${skill}`, linkPath);
+    if (existingTarget === target) continue;
+    if (existingTarget !== null) {
+      try {
+        fs.unlinkSync(linkPath);
+      } catch {
+        /* fall through, symlink call below will surface the error */
+      }
     }
+    fs.symlinkSync(target, linkPath);
   }
 }
 
