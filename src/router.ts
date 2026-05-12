@@ -458,7 +458,13 @@ function evaluateEngage(agent: MessagingGroupAgent, text: string, isMention: boo
       const pat = agent.engage_pattern ?? '.';
       if (pat === '.') return true;
       try {
-        return new RegExp(pat).test(text);
+        // Case-insensitive by default. @-mention patterns are the common
+        // case ('@optimus'), and platform mentions are case-insensitive
+        // everywhere (Discord/Slack/Telegram all match case-insensitively).
+        // A case-sensitive regex on a typed `@Optimus` would miss it,
+        // which is the kind of footgun that strands operator messages
+        // until the container idles out.
+        return new RegExp(pat, 'i').test(text);
       } catch {
         // Bad regex: fail open so admin sees the agent responding + can fix.
         return true;
@@ -589,3 +595,8 @@ function messageIdForAgent(baseId: string | undefined, agentGroupId: string): st
   const id = baseId && baseId.length > 0 ? baseId : generateId();
   return `${id}:${agentGroupId}`;
 }
+
+// Test-only exports.
+export const _internals = {
+  evaluateEngage,
+};

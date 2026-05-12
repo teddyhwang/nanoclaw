@@ -266,6 +266,85 @@ function buildMediaMessage(data: Buffer, filename: string, ext: string, caption?
   return { document: data, fileName: filename, caption, mimetype: 'application/octet-stream' };
 }
 
+/**
+ * Pull the WhatsApp `contextInfo` proto off a normalized message envelope.
+ * `contextInfo` is the same shape across message types but lives on a
+ * different field for each (`extendedTextMessage.contextInfo`,
+ * `imageMessage.contextInfo`, …). Returns null when none is set — most
+ * plain conversation messages have no contextInfo.
+ *
+ * Exported for testing only.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function extractWhatsAppContextInfo(normalized: any): any | null {
+  if (!normalized) return null;
+  return (
+    normalized.extendedTextMessage?.contextInfo ||
+    normalized.imageMessage?.contextInfo ||
+    normalized.videoMessage?.contextInfo ||
+    normalized.documentMessage?.contextInfo ||
+    normalized.audioMessage?.contextInfo ||
+    null
+  );
+}
+
+/**
+ * Detect whether a WhatsApp message platform-mentions the bot.
+ *
+ * WhatsApp's tap-to-mention UI populates `contextInfo.mentionedJid` with the
+ * tagged participants' JIDs. The bot can appear there as its LID
+ * (`<lid>@lid`) or its phone JID (`<phone>@s.whatsapp.net`) depending on
+ * which side of WA's LID rollout the chat is on. Check both.
+ */
+export function isWhatsAppBotMentioned(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  contextInfo: any,
+  botLidUser: string | undefined,
+  botPhoneUser: string | undefined,
+): boolean {
+  if (!contextInfo) return false;
+  const mentioned = contextInfo.mentionedJid;
+  if (!Array.isArray(mentioned) || mentioned.length === 0) return false;
+  for (const jid of mentioned) {
+    if (typeof jid !== 'string') continue;
+    const user = jid.split('@')[0].split(':')[0];
+    if (botLidUser && user === botLidUser) return true;
+    if (botPhoneUser && user === botPhoneUser) return true;
+  }
+  return false;
+}
+
+/**
+ * Extract a reply context from a WhatsApp message's `contextInfo`. Returns
+ * null when the message isn't a reply.
+ *
+ * Shape matches the rest of nanoclaw (`{ text, sender, messageId }`) so the
+ * router's `replyTo.messageId` lookup and the formatter's `quoted_message`
+ * rendering both work without any WA-specific code path.
+ *
+ * `stanzaId` is the WhatsApp protocol message id of the quoted message;
+ * matches `msg.key.id` of the original. `participant` is the quoted
+ * sender's JID. The quoted text is extracted from whichever of the proto
+ * message types Baileys reconstructed.
+ */
+export function extractWhatsAppReplyContext(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  contextInfo: any,
+): { text: string; sender: string; messageId: string } | null {
+  if (!contextInfo) return null;
+  const stanzaId = typeof contextInfo.stanzaId === 'string' ? contextInfo.stanzaId : null;
+  if (!stanzaId) return null;
+  const participant = typeof contextInfo.participant === 'string' ? contextInfo.participant : '';
+  const quoted = contextInfo.quotedMessage;
+  const text =
+    (typeof quoted?.conversation === 'string' && quoted.conversation) ||
+    (typeof quoted?.extendedTextMessage?.text === 'string' && quoted.extendedTextMessage.text) ||
+    (typeof quoted?.imageMessage?.caption === 'string' && quoted.imageMessage.caption) ||
+    (typeof quoted?.videoMessage?.caption === 'string' && quoted.videoMessage.caption) ||
+    '';
+  return { text: text || '', sender: participant, messageId: stanzaId };
+}
+
 registerChannelAdapter('whatsapp', {
   factory: () => {
     const env = readEnvFile(['WHATSAPP_PHONE_NUMBER', 'WHATSAPP_ENABLED', 'WA_SYNC_FULL_HISTORY']);
@@ -295,6 +374,10 @@ registerChannelAdapter('whatsapp', {
     // LID → phone JID mapping (WhatsApp's new ID system)
     const lidToPhoneMap: Record<string, string> = {};
     let botLidUser: string | undefined;
+    // Phone-side bot identity (no `@s.whatsapp.net` suffix). Set alongside
+    // botLidUser on first connect. Used to detect platform mentions of the
+    // bot — `contextInfo.mentionedJid` can carry either form.
+    let botPhoneUser: string | undefined;
 
     // Outgoing queue for messages sent while disconnected
     const outgoingQueue: Array<{ jid: string; text: string }> = [];
@@ -636,6 +719,7 @@ registerChannelAdapter('whatsapp', {
             if (lidUser && phoneUser) {
               setLidPhoneMapping(lidUser, `${phoneUser}@s.whatsapp.net`);
               botLidUser = lidUser;
+              botPhoneUser = phoneUser;
             }
           }
 
@@ -839,6 +923,18 @@ registerChannelAdapter('whatsapp', {
               }
             }
 
+            // Platform-mention + reply-context extraction. Both come from
+            // the same `contextInfo` proto attached to whatever message
+            // type Baileys recovered. `isMention` lets `engage_mode='mention'`
+            // and `'mention-sticky'` fire on WhatsApp without depending on
+            // the host-wide ASSISTANT_NAME text rewrite (which is case-
+            // sensitive and per-host, not per-group). `replyTo` lets
+            // `mention-sticky`'s `isReplyToBot` branch trigger when a user
+            // quote-replies to a previous bot message.
+            const ctxInfo = extractWhatsAppContextInfo(normalized);
+            const isMention = isWhatsAppBotMentioned(ctxInfo, botLidUser, botPhoneUser);
+            const replyTo = extractWhatsAppReplyContext(ctxInfo);
+
             const inbound: InboundMessage = {
               id: msg.key.id || `wa-${Date.now()}`,
               kind: 'chat',
@@ -847,6 +943,7 @@ registerChannelAdapter('whatsapp', {
                 sender,
                 senderName,
                 ...(attachments.length > 0 && { attachments }),
+                ...(replyTo && { replyTo }),
                 fromMe,
                 isBotMessage,
                 isGroup,
@@ -859,6 +956,7 @@ registerChannelAdapter('whatsapp', {
               // existing readers expect content.isBotMessage.
               isBotMessage,
               isGroup,
+              ...(isMention && { isMention: true }),
             };
 
             // Emit `channel.message_observed` BEFORE the router so the
