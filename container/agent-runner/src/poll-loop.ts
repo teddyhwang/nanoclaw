@@ -481,6 +481,39 @@ async function processQuery(
           }
         }
 
+        // Task-wake deferral: maintenance task rows (kind='task',
+        // typically reflection/dream/recurring) that arrive mid-user-turn
+        // must NOT be pushed into the active query. The SDK folds the
+        // task prompt onto the live conversation, which produces a
+        // second result event with a near-duplicate <message> block —
+        // the user sees the same reply twice ~3 sec apart (observed
+        // 2026-05-12 Tico+Janathan WA group: reflection fired at 13:17:44
+        // between two outbound rows for Janice's "lol but how do I
+        // listen", agent re-replied with the same Suno suggestion).
+        // The "DO NOT MESSAGE THE USER" prompt instruction is backstop,
+        // not gate — the model can rationalize a second reply when the
+        // immediately-prior user turn is still vivid in context. Leave
+        // task rows pending; the outer loop picks them up on the next
+        // iteration where they get their own respond_to context and a
+        // task-only batch (chat row is already markCompleted, so won't
+        // ride along). Same shape as the cross-sender deferral above.
+        if (activeSender) {
+          const userOnly: typeof newMessages = [];
+          const taskDeferred: string[] = [];
+          for (const m of newMessages) {
+            if (m.kind === 'task' && m.trigger === 1) {
+              taskDeferred.push(m.id);
+            } else {
+              userOnly.push(m);
+            }
+          }
+          if (taskDeferred.length > 0) {
+            log(`Deferring ${taskDeferred.length} maintenance task wake(s) — will re-process after active user turn`);
+          }
+          newMessages = userOnly;
+          if (newMessages.length === 0) return;
+        }
+
         const newIds = newMessages.map((m) => m.id);
         markProcessing(newIds);
 
@@ -661,6 +694,15 @@ export function dispatchResultText(text: string, routing: RoutingContext): void 
   let sent = 0;
   let lastIndex = 0;
   const scratchpadParts: string[] = [];
+  // Per-turn dedup: model occasionally emits two near-identical
+  // <message to="X">…</message> blocks in a single result (observed
+  // 2026-05-12 in the Tico+Janathan WA group — second block differed
+  // only by a single trailing whitespace before \n). Without this guard
+  // both blocks dispatch and the user sees the same reply twice. Key by
+  // destination + whitespace-normalized body so the common LLM
+  // redundant-block pattern is caught while still allowing intentional
+  // repeats that differ in substance.
+  const seen = new Set<string>();
 
   while ((match = MESSAGE_RE.exec(text)) !== null) {
     if (match.index > lastIndex) {
@@ -676,6 +718,12 @@ export function dispatchResultText(text: string, routing: RoutingContext): void 
       scratchpadParts.push(`[dropped: unknown destination "${toName}"] ${body}`);
       continue;
     }
+    const dedupKey = `${toName} ${body.replace(/\s+/g, ' ')}`;
+    if (seen.has(dedupKey)) {
+      log(`Suppressing duplicate <message to="${toName}"> block within one turn`);
+      continue;
+    }
+    seen.add(dedupKey);
     sendToDestination(dest, body, routing);
     sent++;
   }

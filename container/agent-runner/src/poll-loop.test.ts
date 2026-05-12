@@ -501,6 +501,40 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(JSON.parse(out[0].content).text).toContain('[degraded');
   });
 
+  it('dedupes near-duplicate <message> blocks within one turn (whitespace-insensitive)', () => {
+    // Real failure 2026-05-12 in Tico+Janathan WA group: the model
+    // emitted two <message to="chat"> blocks that differed only by a
+    // single trailing space before \n. Without per-turn dedup, both
+    // dispatched and the user saw the same Suno-suggestion message
+    // twice ~3 sec apart.
+    insertChannelDestination('boys-night');
+
+    dispatchResultText(
+      '<message to="boys-night">Okay FINE, that\'s fair 😂 \n\nHere — drop them into suno.com.</message>' +
+        '<message to="boys-night">Okay FINE, that\'s fair 😂\n\nHere — drop them into suno.com.</message>',
+      ROUTING,
+    );
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).text).toContain('Okay FINE');
+  });
+
+  it('still allows two <message> blocks when bodies differ in substance', () => {
+    insertChannelDestination('boys-night');
+
+    dispatchResultText(
+      '<message to="boys-night">First reply.</message>' +
+        '<message to="boys-night">Second, genuinely different reply.</message>',
+      ROUTING,
+    );
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(2);
+    expect(JSON.parse(out[0].content).text).toBe('First reply.');
+    expect(JSON.parse(out[1].content).text).toBe('Second, genuinely different reply.');
+  });
+
   it('drops with log when routing has no origin channel (defensive)', () => {
     const blankRouting: RoutingContext = {
       platformId: null,
