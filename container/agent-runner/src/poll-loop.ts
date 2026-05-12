@@ -429,7 +429,28 @@ async function processQuery(
         if (!newMessages.some((m) => m.trigger === 1)) {
           // Don't markCompleted these — they need to ride along with the
           // next real trigger so the agent sees them as context.
-          log(`Skipping ${newMessages.length} accumulate-only follow-up(s) — leaving pending until next trigger`);
+          //
+          // End the active query so the outer loop can unwind. Without
+          // this, the SDK turn stays open indefinitely and this poll
+          // interval keeps firing every 500ms forever — observed
+          // 2026-05-12 ai_friends container in a 500ms hot loop
+          // logging "Skipping 7 accumulate-only follow-up(s)" after
+          // the agent had already returned a result; ambient Discord
+          // chatter kept arriving as trigger=0 rows but no trigger=1
+          // wake came. Stream lifecycle does NOT affect Anthropic
+          // prompt-cache lifetime (5-min server-side TTL keyed on
+          // prefix hash, see comment ~L376), so close+reopen within
+          // 5 min still gets cache hits. Same shape as the
+          // cross-sender stream-end below; accumulate-only is the
+          // other "nothing to do here, let the outer loop sleep
+          // cleanly" condition.
+          log(
+            `Ending active query — ${newMessages.length} accumulate-only follow-up(s) pending, no trigger=1 work`,
+          );
+          if (!endedForCommand) {
+            endedForCommand = true;
+            query.end();
+          }
           return;
         }
 
