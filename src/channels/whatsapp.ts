@@ -268,8 +268,17 @@ function buildMediaMessage(data: Buffer, filename: string, ext: string, caption?
 
 registerChannelAdapter('whatsapp', {
   factory: () => {
-    const env = readEnvFile(['WHATSAPP_PHONE_NUMBER', 'WHATSAPP_ENABLED']);
+    const env = readEnvFile(['WHATSAPP_PHONE_NUMBER', 'WHATSAPP_ENABLED', 'WA_SYNC_FULL_HISTORY']);
     const phoneNumber = env.WHATSAPP_PHONE_NUMBER;
+    // Opt-in: when set to a truthy value, the next FRESH pair (no creds
+    // yet) requests WhatsApp's server-side history burst on first
+    // connect. WhatsApp pushes weeks-to-months of recent messages
+    // through `messaging-history.set`, which the engine emits as
+    // `channel.message_observed` events for any host indexer plugin
+    // (e.g. Optimus's whatsapp-history). Ignored if creds.json already
+    // exists — Baileys honors syncFullHistory only on initial pair, so
+    // toggling it on an already-paired install is a no-op.
+    const syncFullHistory = env.WA_SYNC_FULL_HISTORY === 'true' || env.WA_SYNC_FULL_HISTORY === '1';
     const authDir = resolveAuthDir();
 
     // Skip if no existing auth, no phone number for pairing, and not explicitly enabled (QR mode)
@@ -504,6 +513,16 @@ registerChannelAdapter('whatsapp', {
         defaultQueryTimeoutMs: 60_000,
         connectTimeoutMs: 20_000,
         keepAliveIntervalMs: 30_000,
+        // Only fires meaningfully on a fresh pair. Once `creds.json` exists
+        // and `state.creds.registered === true`, WhatsApp won't re-push
+        // history; the flag is harmless to keep on. To seed history on an
+        // existing install: stop the host, delete `<authDir>/creds.json`
+        // (plus the rest of authDir is fine to drop too), set
+        // WA_SYNC_FULL_HISTORY=true, restart, scan the new QR/pair code
+        // from the operator's phone. Baileys will then receive months of
+        // history via `messaging-history.set`, which the adapter emits
+        // as `channel.message_observed` per row.
+        syncFullHistory,
         cachedGroupMetadata: async (jid: string) => getNormalizedGroupMetadata(jid),
         getMessage: async (key: WAMessageKey) => {
           // Check in-memory cache first (recently sent messages).
