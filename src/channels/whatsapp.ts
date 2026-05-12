@@ -1227,6 +1227,56 @@ registerChannelAdapter('whatsapp', {
           return [];
         }
       },
+
+      // Fetch group roster + profile picture URLs. Baileys' inbound message
+      // path delivers `pushName` per message (which is how display names
+      // populate `observed_chat_members.display_name` automatically), but
+      // no profile-picture data — that has to come from a separate
+      // `sock.profilePictureUrl()` call per participant. Without this
+      // host-side backfill, every WA group's member avatars stay NULL and
+      // dashboard cards render letter-stubs (T N J) instead of pictures.
+      // Ported from v1 `src/channels/whatsapp.ts:fetchGroupRoster` (commit
+      // 347d8a11) which v2 dropped during the apps/nanoclaw deletion at
+      // d55d3d22 and never re-added.
+      //
+      // Avatar URLs are signed CDN links that expire; callers should
+      // re-run periodically to refresh, not just once at register time.
+      async fetchGroupRoster(platformId: string) {
+        if (!platformId.endsWith('@g.us')) return null;
+        if (!connected) return null;
+        try {
+          const metadata = await sock.groupMetadata(platformId);
+          if (!metadata) return null;
+          const entries = await Promise.all(
+            metadata.participants.map(async (participant) => {
+              let avatarUrl: string | null = null;
+              try {
+                const url = await sock.profilePictureUrl(participant.id, 'image');
+                avatarUrl = url ?? null;
+              } catch {
+                // Privacy settings / no picture / transient error — leave
+                // null and the next sync gets another shot.
+              }
+              return {
+                senderId: participant.id,
+                // groupMetadata doesn't carry display names — they only
+                // arrive on real messages via `pushName`. The inbound
+                // path keeps display_name fresh; this routine is
+                // avatar-only by design.
+                displayName: null,
+                avatarUrl,
+              };
+            }),
+          );
+          return entries;
+        } catch (err) {
+          log.warn('whatsapp fetchGroupRoster failed', {
+            platformId,
+            err: err instanceof Error ? err.message : String(err),
+          });
+          return null;
+        }
+      },
     };
 
     return adapter;

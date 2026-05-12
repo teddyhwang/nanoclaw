@@ -81,6 +81,7 @@ export {
   unregisterChannelAdapter,
   addChannelAdapterAtRuntime,
   getActiveAdapters,
+  getChannelAdapter,
   getRegisteredChannelNames,
 } from '../channels/channel-registry.js';
 export {

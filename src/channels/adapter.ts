@@ -251,6 +251,27 @@ export interface ChannelAdapter {
     lookbackMs: number;
     limit: number;
   }): Promise<{ recoveredCount: number; earliestTimestamp?: string }>;
+
+  /**
+   * Fetch the participant roster for a group chat, including each member's
+   * profile picture URL when the platform exposes one. Used by host-side
+   * member-snapshot plugins to backfill `observed_chat_members.avatar_url`
+   * for chats where the inbound message path can't carry an avatar (e.g.,
+   * WhatsApp — Baileys delivers `pushName` per message but not a
+   * profile-picture URL; the URL has to come from a separate
+   * `sock.profilePictureUrl()` call). Adapters whose inbound path already
+   * stamps avatars on the `InboundMessage` (Discord, Slack) can omit this
+   * — callers treat absence as "no separate roster sync needed."
+   *
+   * Returns null when the platform id isn't a group, the adapter isn't
+   * connected, or the upstream call throws — callers should treat null
+   * as a soft miss and retry on the next tick.
+   */
+  fetchGroupRoster?(platformId: string): Promise<Array<{
+    senderId: string;
+    displayName: string | null;
+    avatarUrl: string | null;
+  }> | null>;
 }
 
 /** Factory function that creates a channel adapter (returns null if credentials missing). */
