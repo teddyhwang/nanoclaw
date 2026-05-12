@@ -79,6 +79,25 @@ export interface EngineEventMap {
     ts: string;
     content: string;
   };
+  /**
+   * Fires when a channel adapter reports metadata (display name, group
+   * flag) for a `platformId`. WhatsApp's Baileys adapter emits one event
+   * per group via `groupFetchAllParticipating` on every reconnect, plus
+   * per-chat events when group subjects change; Discord's adapter emits
+   * on guild/channel/DM discovery. Used by inventory plugins to keep the
+   * dashboard Add-Agent picker fresh without polling the channel API
+   * from a sidecar.
+   *
+   * `isGroup=true` means this is a chat with multiple participants
+   * (WhatsApp `@g.us` JID, Discord guild channel, etc.); `false` means a
+   * DM. `name` may be empty when only existence is being signaled.
+   */
+  'channel.metadata': {
+    channelType: string;
+    platformId: string;
+    name: string | undefined;
+    isGroup: boolean | undefined;
+  };
   'outbound.delivered': { sessionId: string; agentGroupId: string; channelType: string; platformId: string };
   'outbound.failed': { sessionId: string; agentGroupId: string; channelType: string; platformId: string; err: unknown };
   'container.spawn': { sessionId: string; agentGroupId: string };

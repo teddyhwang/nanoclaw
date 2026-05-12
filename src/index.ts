@@ -16,6 +16,7 @@ import { ensureContainerRuntimeRunning, cleanupOrphans } from './container-runti
 import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, stopDeliveryPolls } from './delivery.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
 import { routeInbound } from './router.js';
+import { emitEngineEvent } from './engine/events.js';
 import { log } from './log.js';
 
 // Response + shutdown registries live in response-registry.ts to break the
@@ -118,6 +119,12 @@ async function main(): Promise<void> {
       },
       onMetadata(platformId, name, isGroup) {
         log.info('Channel metadata discovered', {
+          channelType: adapter.channelType,
+          platformId,
+          name,
+          isGroup,
+        });
+        emitEngineEvent('channel.metadata', {
           channelType: adapter.channelType,
           platformId,
           name,

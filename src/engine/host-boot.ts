@@ -11,7 +11,7 @@
 import path from 'path';
 
 import { getEnginePaths } from './paths.js';
-import { engineEvents } from './events.js';
+import { engineEvents, emitEngineEvent } from './events.js';
 import { enforceStartupBackoff, resetCircuitBreaker } from '../circuit-breaker.js';
 import { migrateGroupsToClaudeLocal } from '../claude-md-compose.js';
 import { initDb } from '../db/connection.js';
@@ -113,6 +113,12 @@ export async function _bootForHost(opts: { managedSignals: boolean }): Promise<v
       },
       onMetadata(platformId, name, isGroup) {
         log.info('Channel metadata discovered', {
+          channelType: adapter.channelType,
+          platformId,
+          name,
+          isGroup,
+        });
+        emitEngineEvent('channel.metadata', {
           channelType: adapter.channelType,
           platformId,
           name,
