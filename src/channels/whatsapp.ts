@@ -696,6 +696,15 @@ registerChannelAdapter('whatsapp', {
             // which is what `search_conversations` needs anyway.
             if (!text) continue;
 
+            // Group protocol events (subject/icon changes, member adds,
+            // etc.) have no `participant` and `remoteJid === <group>@g.us`,
+            // so falling back to rawJid stamps the group itself as the
+            // sender. That row then surfaces in the dashboard
+            // observed_chat_members roster as a phantom 5th "member"
+            // (observed 2026-05-12 in Tico+Janathan: the group JID
+            // 120363424546637419@g.us appeared in the Observed segment).
+            // Drop these — they're not user messages.
+            if (!msg.key.participant && isGroup) continue;
             const sender = msg.key.participant || rawJid;
             const senderName = msg.pushName ?? sender.split('@')[0];
             const fromMe = msg.key.fromMe || false;
@@ -781,6 +790,13 @@ registerChannelAdapter('whatsapp', {
             // Skip empty protocol messages (no text and no attachments)
             if (!content && attachments.length === 0) continue;
 
+            // Same group-protocol-event guard as the history path above:
+            // missing `participant` on a group chat means the message is
+            // a group-level event (subject change, member add, etc.),
+            // not a user message. Dropping these prevents the group JID
+            // from getting stamped as a sender. The check uses isGroup
+            // which is already computed from `chatJid.endsWith('@g.us')`.
+            if (!msg.key.participant && isGroup) continue;
             const sender = msg.key.participant || msg.key.remoteJid || '';
             const senderName = msg.pushName || sender.split('@')[0];
             const fromMe = msg.key.fromMe || false;

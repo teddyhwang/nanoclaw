@@ -46,6 +46,22 @@ export function getAllDestinations(): DestinationEntry[] {
   return rows.map(rowToEntry);
 }
 
+/**
+ * Does this session reach at least one channel of the given type?
+ * Used to gate channel-specific MCP tools (e.g. `discord_channel_history`
+ * only registers when there's a discord destination wired). 'agent'-type
+ * destinations are excluded — agent-to-agent rows don't correspond to
+ * any real platform.
+ */
+export function hasChannelDestination(channelType: string): boolean {
+  const row = getInboundDb()
+    .prepare(
+      "SELECT 1 FROM destinations WHERE type = 'channel' AND channel_type = ? LIMIT 1",
+    )
+    .get(channelType);
+  return row !== undefined;
+}
+
 export function findByName(name: string): DestinationEntry | undefined {
   const row = getInboundDb().prepare('SELECT * FROM destinations WHERE name = ?').get(name) as DestRow | undefined;
   return row ? rowToEntry(row) : undefined;
