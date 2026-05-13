@@ -348,11 +348,14 @@ function isTextEligible(att: any): boolean {
 /**
  * Read text bytes for an inline-eligible attachment. Two paths:
  *
- *   1. `att.data` (base64) — chat-sdk-bridge enriches inbound messages with
- *      this for every attachment regardless of channel (Discord, Slack,
- *      Telegram via chat-sdk).
- *   2. `att.localPath` — native adapters (WhatsApp) write to
- *      `/workspace/attachments/...` and only set the path. Read from disk.
+ *   1. `att.data` (base64) — present at the inbound-event boundary
+ *      before the engine writes the file. Rare in steady-state; mostly
+ *      seen by tests that bypass the engine's `materializeInbox`.
+ *   2. `att.localPath` — every channel (Discord, Telegram, Slack via
+ *      chat-sdk-bridge; WhatsApp native) lands per-session attachments
+ *      at `<sessionDir>/inbox/<messageId>/<filename>`, surfaced to the
+ *      container as `localPath: 'inbox/<messageId>/<filename>'` and
+ *      mounted under `/workspace/`. Read from disk.
  *
  * Returns null when bytes are unavailable or oversized — caller falls
  * back to the path/url marker.

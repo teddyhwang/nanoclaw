@@ -277,6 +277,89 @@ function buildMediaMessage(data: Buffer, filename: string, ext: string, caption?
  * Exported for testing only.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
+/**
+ * Process an inbound WhatsApp media buffer for forwarding to the engine.
+ *
+ * Mirrors the chat-sdk-bridge pipeline (`packages/nanoclaw/src/channels/
+ * chat-sdk-bridge.ts:295-429`) so WhatsApp lands attachments in the same
+ * shape every other channel does:
+ *
+ *   1. Resize oversized images so the base64 payload fits Anthropic's
+ *      5 MB per-image cap. Static formats only (JPEG/PNG/WebP).
+ *   2. Transcode animated content (gifv-as-mp4, WhatsApp "GIF"s that are
+ *      MP4 under the hood) to `image/gif` so Anthropic accepts the bytes.
+ *      On transcode failure, returns `null` — the caller drops the
+ *      attachment rather than emit a broken reference.
+ *   3. Emit base64 `data` on the attachment record, NOT a flat-disk
+ *      `localPath`. The engine's `session-manager.materializeInbox`
+ *      walks `data` fields and writes per-session inbox files at
+ *      `<sessionDir>/inbox/<messageId>/<filename>`, so each agent group
+ *      gets its own attachment-scoped tree and the cross-tenant
+ *      attachment dir under `<dataDir>/attachments/` is no longer used.
+ *
+ * Returns null when the attachment should be dropped (failed transcode).
+ *
+ * Exported for unit testing — the production caller `downloadInboundMedia`
+ * is a closure inside the channel adapter.
+ */
+export async function processInboundMediaBuffer(
+  buffer: Buffer,
+  type: string,
+  mimeType: string | undefined,
+  filename: string,
+  deps?: {
+    maybeResizeImage?: (buffer: Buffer, mimeType: string | undefined) => Promise<Buffer>;
+    shouldTranscodeAnimated?: (type: string | undefined, mimeType: string | undefined, size: number) => boolean;
+    maybeTranscodeAnimated?: (
+      buffer: Buffer,
+      mimeType: string,
+    ) => Promise<{ ok: boolean; buffer?: Buffer; mimeType?: string; reason?: string }>;
+  },
+): Promise<{ type: string; name: string; data: string; mimeType?: string } | null> {
+  // Default to the live media-processing module; tests inject stubs.
+  const resize = deps?.maybeResizeImage ?? (await import('../media/image-processing.js')).maybeResizeImage;
+  const shouldTranscode =
+    deps?.shouldTranscodeAnimated ?? (await import('../media/image-processing.js')).shouldTranscodeAnimated;
+  const transcode =
+    deps?.maybeTranscodeAnimated ?? (await import('../media/image-processing.js')).maybeTranscodeAnimated;
+
+  let outBuffer = buffer;
+  let outType = type;
+  let outMime = mimeType;
+
+  // Resize static images so the base64 payload stays under Anthropic's cap.
+  if (type === 'image' && mimeType) {
+    outBuffer = await resize(outBuffer, mimeType);
+  }
+
+  // Transcode animated content (gifv MP4, WhatsApp animated images that
+  // are MP4-under-the-hood) to a format Anthropic accepts. On failure we
+  // drop the attachment — same posture as chat-sdk-bridge:382-393.
+  if (mimeType && shouldTranscode(type, mimeType, outBuffer.length)) {
+    const result = await transcode(outBuffer, mimeType);
+    if (result.ok && result.buffer && result.mimeType) {
+      outBuffer = result.buffer;
+      outMime = result.mimeType;
+      outType = 'image';
+    } else {
+      log.warn('Animated attachment transcode failed; dropping bytes', {
+        filename,
+        sourceType: type,
+        sourceMime: mimeType,
+        reason: result.reason,
+      });
+      return null;
+    }
+  }
+
+  return {
+    type: outType,
+    name: filename,
+    data: outBuffer.toString('base64'),
+    mimeType: outMime,
+  };
+}
+
 export function extractWhatsAppContextInfo(normalized: any): any | null {
   if (!normalized) return null;
   return (
@@ -581,48 +664,54 @@ registerChannelAdapter('whatsapp', {
       }
     }
 
-    /** Download media from an inbound message, save to /workspace/attachments/. */
+    /**
+     * Download inbound WhatsApp media and emit attachment records carrying
+     * base64 `data` (NOT a flat-disk `localPath`). The engine's
+     * `session-manager.materializeInbox` walks `data` and writes
+     * per-session inbox files at `<sessionDir>/inbox/<messageId>/<file>`
+     * — same code path Discord/Telegram (chat-sdk-bridge) hit. See
+     * `processInboundMediaBuffer` above for the resize/transcode pipeline
+     * (mirrors chat-sdk-bridge:295-429).
+     */
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     async function downloadInboundMedia(
       msg: WAMessage,
       normalized: any,
-    ): Promise<Array<{ type: string; name: string; localPath: string; mimeType?: string }>> {
+    ): Promise<Array<{ type: string; name: string; data: string; mimeType?: string }>> {
       const mediaTypes: Array<{ key: string; type: string; ext: string }> = [
         { key: 'imageMessage', type: 'image', ext: '.jpg' },
         { key: 'videoMessage', type: 'video', ext: '.mp4' },
         { key: 'audioMessage', type: 'audio', ext: '.ogg' },
         { key: 'documentMessage', type: 'document', ext: '' },
       ];
-      const results: Array<{ type: string; name: string; localPath: string; mimeType?: string }> = [];
+      const results: Array<{ type: string; name: string; data: string; mimeType?: string }> = [];
       for (const { key, type, ext } of mediaTypes) {
         if (!normalized[key]) continue;
         try {
           const buffer = await downloadMediaMessage(msg, 'buffer', {});
           // documentMessage.fileName is attacker-controlled and rides through
-          // WhatsApp's E2E channel — Meta can't sanitize it server-side. Without
-          // this guard, a `..`-laden fileName escapes attachDir on path.join.
+          // WhatsApp's E2E channel — Meta can't sanitize it server-side.
+          // Sanitize before the engine puts it on disk under
+          // `<sessionDir>/inbox/<messageId>/<filename>`.
           const rawFilename = normalized[key].fileName;
           const fallback = `${type}-${Date.now()}${ext}`;
           const filename = isSafeAttachmentName(rawFilename) ? rawFilename : fallback;
           if (rawFilename && filename !== rawFilename) {
-            log.warn('Refused unsafe attachment filename — would escape attachments dir', {
+            log.warn('Refused unsafe attachment filename — would escape inbox dir', {
               rawFilename,
               replacement: filename,
             });
           }
-          const attachDir = path.join(DATA_DIR, 'attachments');
-          fs.mkdirSync(attachDir, { recursive: true });
-          const filePath = path.join(attachDir, filename);
-          fs.writeFileSync(filePath, buffer);
-          // Propagate the Baileys-reported mimetype so the container formatter's
-          // text-inline path can fire on `documentMessage` uploads whose
-          // filename has no recognizable extension. Without this, `report` or
-          // `notes-2026-05` files fall through to the bare marker even when
-          // their bytes are plain text.
+          // Propagate the Baileys-reported mimetype so the container
+          // formatter's text-inline path can fire on `documentMessage`
+          // uploads whose filename has no recognizable extension.
           const rawMime = normalized[key].mimetype;
           const mimeType = typeof rawMime === 'string' && rawMime.length > 0 ? rawMime : undefined;
-          results.push({ type, name: filename, localPath: `attachments/${filename}`, mimeType });
-          log.info('Media downloaded', { type, filename });
+          const processed = await processInboundMediaBuffer(buffer, type, mimeType, filename);
+          if (processed) {
+            results.push(processed);
+            log.info('Media downloaded', { type: processed.type, filename });
+          }
         } catch (err) {
           log.warn('Failed to download media', { type, err });
         }

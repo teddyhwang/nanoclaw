@@ -10,6 +10,7 @@ import {
   extractWhatsAppReplyContext,
   hasWhatsAppTextMention,
   isWhatsAppBotMentioned,
+  processInboundMediaBuffer,
 } from './whatsapp.js';
 
 describe('extractWhatsAppContextInfo', () => {
@@ -141,5 +142,102 @@ describe('extractWhatsAppReplyContext', () => {
       sender: 'p@lid',
       messageId: 'wa-empty',
     });
+  });
+});
+
+describe('processInboundMediaBuffer', () => {
+  // Identity stubs — no-op resize, no-op transcode-needed predicate.
+  // Lets us assert the steady-state pipeline shape without spinning up
+  // sharp/ffmpeg.
+  const passthroughDeps = {
+    maybeResizeImage: async (buffer: Buffer) => buffer,
+    shouldTranscodeAnimated: () => false,
+    maybeTranscodeAnimated: async () => ({ ok: false }),
+  };
+
+  it('emits base64 data + the source filename + mimeType on a static image', async () => {
+    const buffer = Buffer.from('binary-image-bytes');
+    const result = await processInboundMediaBuffer(buffer, 'image', 'image/jpeg', 'photo.jpg', passthroughDeps);
+    expect(result).toEqual({
+      type: 'image',
+      name: 'photo.jpg',
+      data: buffer.toString('base64'),
+      mimeType: 'image/jpeg',
+    });
+  });
+
+  it('omits mimeType when the source had none (documentMessage with no mime)', async () => {
+    const buffer = Buffer.from('# Markdown report\n\nbody');
+    const result = await processInboundMediaBuffer(buffer, 'document', undefined, 'notes-2026-05.md', passthroughDeps);
+    expect(result?.type).toBe('document');
+    expect(result?.name).toBe('notes-2026-05.md');
+    expect(result?.mimeType).toBeUndefined();
+    expect(result?.data).toBe(buffer.toString('base64'));
+  });
+
+  it('routes images through resize before base64-encoding', async () => {
+    const original = Buffer.from('huge-original');
+    const resized = Buffer.from('tiny');
+    const calls: Array<{ buffer: Buffer; mimeType: string | undefined }> = [];
+    const result = await processInboundMediaBuffer(original, 'image', 'image/jpeg', 'big.jpg', {
+      maybeResizeImage: async (buffer, mimeType) => {
+        calls.push({ buffer, mimeType });
+        return resized;
+      },
+      shouldTranscodeAnimated: () => false,
+      maybeTranscodeAnimated: async () => ({ ok: false }),
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual({ buffer: original, mimeType: 'image/jpeg' });
+    expect(result?.data).toBe(resized.toString('base64'));
+  });
+
+  it('skips resize for non-image types', async () => {
+    const buffer = Buffer.from('audio-bytes');
+    let resizeCalled = false;
+    await processInboundMediaBuffer(buffer, 'audio', 'audio/ogg', 'voice.ogg', {
+      ...passthroughDeps,
+      maybeResizeImage: async (b) => {
+        resizeCalled = true;
+        return b;
+      },
+    });
+    expect(resizeCalled).toBe(false);
+  });
+
+  it('transcodes animated content and rewrites type+mimeType on success', async () => {
+    const inputMp4 = Buffer.from('animated-mp4');
+    const outputGif = Buffer.from('static-gif');
+    const result = await processInboundMediaBuffer(inputMp4, 'video', 'video/mp4', 'tenor.mp4', {
+      maybeResizeImage: async (b) => b,
+      shouldTranscodeAnimated: () => true,
+      maybeTranscodeAnimated: async () => ({
+        ok: true,
+        buffer: outputGif,
+        mimeType: 'image/gif',
+      }),
+    });
+    expect(result).toEqual({
+      type: 'image',
+      name: 'tenor.mp4',
+      data: outputGif.toString('base64'),
+      mimeType: 'image/gif',
+    });
+  });
+
+  it('returns null when animated transcode fails — caller drops the attachment', async () => {
+    const input = Buffer.from('oversize-gif');
+    const result = await processInboundMediaBuffer(input, 'image', 'image/gif', 'big.gif', {
+      maybeResizeImage: async (b) => b,
+      shouldTranscodeAnimated: () => true,
+      maybeTranscodeAnimated: async () => ({ ok: false, reason: 'ffmpeg-missing' }),
+    });
+    expect(result).toBeNull();
+  });
+
+  it('never emits a localPath field (regression guard for the pre-fix flat-dir shape)', async () => {
+    const buffer = Buffer.from('any-bytes');
+    const result = await processInboundMediaBuffer(buffer, 'image', 'image/png', 'x.png', passthroughDeps);
+    expect(result).not.toHaveProperty('localPath');
   });
 });
