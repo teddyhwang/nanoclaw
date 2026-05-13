@@ -2,7 +2,16 @@ import { findByName, getAllDestinations, type DestinationEntry } from './destina
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
 import { writeMessageOut } from './db/messages-out.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
-import { clearContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
+import {
+  clearContinuation,
+  clearContinuationStartedAt,
+  getContinuationStartedAt,
+  migrateLegacyContinuation,
+  setContinuation,
+  setContinuationStartedAt,
+} from './db/session-state.js';
+import { computeRotationDate, evaluateRotation } from './session-rotation.js';
+import { TIMEZONE } from './timezone.js';
 import { clearCurrentInReplyTo, setCurrentInReplyTo } from './current-batch.js';
 import fs from 'fs';
 import {
@@ -174,6 +183,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         log('Clearing session (resetting continuation)');
         continuation = undefined;
         clearContinuation(config.providerName);
+        clearContinuationStartedAt(config.providerName);
         writeMessageOut({
           id: generateId(),
           kind: 'chat',
@@ -261,6 +271,43 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       log(`Loaded ${imageBlocks.length} image attachment(s) for multimodal turn`);
     }
 
+    // Lazy session rotation — fires BEFORE provider.query() so the current
+    // turn always runs on a coherent thread (rotating mid-flight would
+    // destroy the in-memory `resume` id while the SDK is still using it).
+    //
+    // Rationale: the host-side 04:00 dream task already calls the
+    // `rotate_session` MCP tool for the common "session has gotten too old"
+    // case. This hook adds the v1 drift-trigger axes that 04:00 alone can't
+    // cover — a single very chatty day that compacts multiple times before
+    // the next dream pass arrives. The original ai-friends 2026-04-16
+    // incident (4 days / 2+ compacts / 7.6 MB) is the canonical shape.
+    //
+    // The provider owns the stats reader (see AgentProvider.readSessionStats);
+    // a provider that returns EMPTY_STATS effectively degrades to "rotate
+    // only at the 04:00 day boundary," which is the v2-only baseline.
+    if (continuation) {
+      const stats = config.provider.readSessionStats(continuation);
+      const startedAt = getContinuationStartedAt(config.providerName);
+      const decision = evaluateRotation(new Date(), TIMEZONE, startedAt, stats);
+      if (decision.reason !== 'no-session' && decision.reason !== 'same-day') {
+        log(
+          `Rotation evaluator: reason=${decision.reason} ` +
+            `rotate=${decision.rotate} compactCount=${stats.compactCount} ` +
+            `sizeBytes=${stats.sizeBytes} tokensUsed=${stats.tokensUsed ?? 'n/a'} ` +
+            `startedAt=${startedAt ?? 'unstamped'}`,
+        );
+      }
+      if (decision.rotate) {
+        log(
+          `Rotating session before query: ${decision.reason} ` +
+            `(previous continuation: ${continuation})`,
+        );
+        clearContinuation(config.providerName);
+        clearContinuationStartedAt(config.providerName);
+        continuation = undefined;
+      }
+    }
+
     const query = config.provider.query({
       prompt,
       continuation,
@@ -278,8 +325,19 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     try {
       const result = await processQuery(query, routing, processingIds, config.providerName, activeSender);
       if (result.continuation && result.continuation !== continuation) {
+        const isNewThread = continuation === undefined;
         continuation = result.continuation;
         setContinuation(config.providerName, continuation);
+        // Stamp the rotation-day this continuation started on. Only on a
+        // newly-adopted thread — resuming an existing one keeps the
+        // original stamp so the day-boundary check measures from when the
+        // thread truly began, not when this container happened to attach.
+        if (isNewThread) {
+          setContinuationStartedAt(
+            config.providerName,
+            computeRotationDate(new Date(), TIMEZONE),
+          );
+        }
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -292,6 +350,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         log(`Stale session detected (${continuation}) — clearing for next retry`);
         continuation = undefined;
         clearContinuation(config.providerName);
+        clearContinuationStartedAt(config.providerName);
       }
 
       if (shouldSendErrorResponseForBatch(keep)) {

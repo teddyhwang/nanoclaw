@@ -1,3 +1,5 @@
+import type { SessionStats } from '../session-stats.js';
+
 export interface AgentProvider {
   /**
    * True if the provider's underlying SDK handles slash commands natively and
@@ -14,6 +16,21 @@ export interface AgentProvider {
    * (missing transcript, unknown session, etc.) and should be cleared.
    */
   isSessionInvalid(err: unknown): boolean;
+
+  /**
+   * Snapshot the on-disk state of the given continuation so the lazy
+   * rotation evaluator (in `../session-rotation.ts`) can decide whether to
+   * clear it before the next turn. Each provider owns its on-disk shape
+   * (jsonl scan, state-db query, etc.) and returns the union shape in
+   * `SessionStats`.
+   *
+   * Implementations MUST be cheap (this runs on every dequeue) and MUST NOT
+   * throw — return `EMPTY_STATS` on any error so a malformed transcript
+   * never blocks message processing. Providers that don't track on-disk
+   * stats can return `EMPTY_STATS` unconditionally; their sessions then
+   * rotate only on the day-boundary signal.
+   */
+  readSessionStats(continuation: string): SessionStats;
 }
 
 /**
@@ -134,6 +151,11 @@ export interface AgentQuery {
   /** Force-stop the query. */
   abort(): void;
 }
+
+// Re-export so providers in skill-installed branches can implement the
+// stats reader without reaching across to the sibling module path.
+export type { SessionStats };
+export { EMPTY_STATS } from '../session-stats.js';
 
 export type ProviderEvent =
   | { type: 'init'; continuation: string }

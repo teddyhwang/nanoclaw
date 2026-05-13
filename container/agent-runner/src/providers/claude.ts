@@ -1,9 +1,11 @@
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
 import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 
 import { clearContainerToolInFlight, setContainerToolInFlight, touchHeartbeat } from '../db/connection.js';
+import { EMPTY_STATS, type SessionStats } from '../session-stats.js';
 import { registerProvider } from './provider-registry.js';
 import type {
   AgentProvider,
@@ -306,6 +308,20 @@ const CLAUDE_CODE_AUTO_COMPACT_WINDOW = process.env.CLAUDE_CODE_AUTO_COMPACT_WIN
  */
 const STALE_SESSION_RE = /no conversation found|ENOENT.*\.jsonl|session.*not found/i;
 
+/**
+ * The container's SDK is launched with cwd `/workspace/agent` (see
+ * `agent-runner/src/index.ts`). The SDK encodes that cwd into the project
+ * directory name it writes transcripts under — slashes become dashes, the
+ * leading slash produces a leading dash. Hard-coded here to keep
+ * `readSessionStats` a pure function of the continuation id; if the
+ * container ever moves to a different cwd, update both sites.
+ */
+const CLAUDE_AGENT_CWD = '/workspace/agent';
+
+function encodeProjectDir(absoluteCwd: string): string {
+  return absoluteCwd.replace(/\//g, '-');
+}
+
 export class ClaudeProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = true;
 
@@ -331,6 +347,48 @@ export class ClaudeProvider implements AgentProvider {
   isSessionInvalid(err: unknown): boolean {
     const msg = err instanceof Error ? err.message : String(err);
     return STALE_SESSION_RE.test(msg);
+  }
+
+  /**
+   * Scan the SDK's project transcript jsonl for the rotation evaluator. The
+   * SDK writes each session as `$HOME/.claude/projects/<encoded-cwd>/<sessionId>.jsonl`
+   * where `<encoded-cwd>` is the absolute cwd with `/` replaced by `-`. In
+   * this container the cwd is `/workspace/agent`, so the encoded path is
+   * `-workspace-agent`.
+   *
+   * `compactCount` is the number of `isCompactSummary: true` synthetic user
+   * turns — even one means the conversation has been summarized and is at
+   * elevated drift risk on the next chained compact. Substring check before
+   * any JSON parse keeps this cheap; the marker string is distinctive enough
+   * that false positives are essentially impossible.
+   *
+   * Errors (missing file, permission denied, malformed jsonl) return
+   * `EMPTY_STATS` so the dequeue path never throws on a transcript hiccup.
+   */
+  readSessionStats(continuation: string): SessionStats {
+    const jsonlPath = path.join(
+      os.homedir(),
+      '.claude',
+      'projects',
+      encodeProjectDir(CLAUDE_AGENT_CWD),
+      `${continuation}.jsonl`,
+    );
+    if (!fs.existsSync(jsonlPath)) return { ...EMPTY_STATS };
+    const stats: SessionStats = { ...EMPTY_STATS };
+    try {
+      const content = fs.readFileSync(jsonlPath, 'utf-8');
+      stats.sizeBytes = Buffer.byteLength(content, 'utf-8');
+      for (const line of content.split('\n')) {
+        if (!line.trim()) continue;
+        stats.turnCount++;
+        if (line.includes('"isCompactSummary":true')) {
+          stats.compactCount++;
+        }
+      }
+    } catch {
+      return { ...EMPTY_STATS };
+    }
+    return stats;
   }
 
   query(input: QueryInput): AgentQuery {

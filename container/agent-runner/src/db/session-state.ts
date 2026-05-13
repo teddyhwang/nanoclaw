@@ -17,6 +17,15 @@ function continuationKey(providerName: string): string {
   return `continuation:${providerName.toLowerCase()}`;
 }
 
+/**
+ * Calendar date (`YYYY-MM-DD`) the provider's current continuation was first
+ * adopted. Used by the lazy rotation evaluator to detect a day-boundary
+ * crossing. Written next to `continuation:<provider>` and wiped in lockstep.
+ */
+function continuationStartedAtKey(providerName: string): string {
+  return `continuation_started_at:${providerName.toLowerCase()}`;
+}
+
 function getValue(key: string): string | undefined {
   const row = getOutboundDb()
     .prepare('SELECT value FROM session_state WHERE key = ?')
@@ -78,13 +87,39 @@ export function clearContinuation(providerName: string): void {
   deleteValue(continuationKey(providerName));
 }
 
+export function getContinuationStartedAt(providerName: string): string | undefined {
+  return getValue(continuationStartedAtKey(providerName));
+}
+
+export function setContinuationStartedAt(providerName: string, date: string): void {
+  setValue(continuationStartedAtKey(providerName), date);
+}
+
+export function clearContinuationStartedAt(providerName: string): void {
+  deleteValue(continuationStartedAtKey(providerName));
+}
+
 /**
- * Clear every provider's continuation row at once. Used by the
- * `rotate_session` MCP tool to wipe the conversation handle so the
- * next turn starts a fresh provider conversation across all providers,
- * not just the currently-active one.
+ * Wipe every provider's continuation row AND its `started_at` stamp in one
+ * shot. Two reasons this is a single function rather than two:
+ *
+ *   - Lockstep — a continuation without its `started_at` stamp would look
+ *     pre-fix to the rotation evaluator (no-session branch) and stay
+ *     un-rotatable on disk-quiet days. A `started_at` without its
+ *     continuation is harmless but pointless.
+ *   - Surface — the `rotate_session` MCP tool is the agent-visible API for
+ *     "reset this session's drift state." It needs to clear both shapes;
+ *     forcing the tool to call two functions invites a future caller to
+ *     forget one.
+ *
+ * Used by the `rotate_session` MCP tool and by the lazy rotation hook in
+ * the poll-loop. Returns the number of rows deleted (sum of both shapes).
  */
-export function clearAllContinuations(): number {
-  const result = getOutboundDb().prepare("DELETE FROM session_state WHERE key LIKE 'continuation:%'").run();
+export function clearAllSessionTrackingState(): number {
+  const result = getOutboundDb()
+    .prepare(
+      "DELETE FROM session_state WHERE key LIKE 'continuation:%' OR key LIKE 'continuation_started_at:%'",
+    )
+    .run();
   return result.changes;
 }

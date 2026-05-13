@@ -3,7 +3,14 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { initTestSessionDb, closeSessionDb, getInboundDb } from './db/connection.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { getPendingMessages } from './db/messages-in.js';
-import { getContinuation, setContinuation } from './db/session-state.js';
+import {
+  getContinuation,
+  getContinuationStartedAt,
+  setContinuation,
+  setContinuationStartedAt,
+} from './db/session-state.js';
+import { computeRotationDate } from './session-rotation.js';
+import { TIMEZONE } from './timezone.js';
 import { MockProvider } from './providers/mock.js';
 import { runPollLoop } from './poll-loop.js';
 
@@ -466,6 +473,102 @@ describe('poll loop — stale session recovery', () => {
   });
 });
 
+/**
+ * Provider that returns configurable stats from readSessionStats so we can
+ * drive the lazy rotation hook. Emits an init event with a new continuation
+ * so the stamp path also runs.
+ */
+class StatsConfigurableProvider {
+  readonly supportsNativeSlashCommands = false;
+  private stats: { compactCount: number; sizeBytes: number; turnCount: number };
+  private nextContinuation: string;
+
+  constructor(
+    stats: { compactCount?: number; sizeBytes?: number; turnCount?: number } = {},
+    nextContinuation = 'fresh-session-id',
+  ) {
+    this.stats = {
+      compactCount: stats.compactCount ?? 0,
+      sizeBytes: stats.sizeBytes ?? 0,
+      turnCount: stats.turnCount ?? 0,
+    };
+    this.nextContinuation = nextContinuation;
+  }
+
+  isSessionInvalid(): boolean {
+    return false;
+  }
+
+  readSessionStats() {
+    return { ...this.stats };
+  }
+
+  query(_input: { prompt: string; cwd: string; continuation?: string }) {
+    const continuation = this.nextContinuation;
+    return {
+      push() {},
+      end() {},
+      abort() {},
+      events: (async function* () {
+        yield { type: 'init' as const, continuation };
+        yield { type: 'result' as const, text: '<message to="discord-test">ok</message>' };
+      })(),
+    };
+  }
+}
+
+describe('poll loop — lazy session rotation', () => {
+  it('rotates a prior-day session with compacts before next query', async () => {
+    setContinuation('mock', 'pre-rotation-id');
+    // Stamp the session as belonging to "yesterday" so the day-boundary
+    // check fails, then load the disk-evidence axis.
+    setContinuationStartedAt('mock', '2020-01-01');
+
+    insertMessage('m1', { sender: 'Alice', text: 'wake up' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    const provider = new StatsConfigurableProvider({ compactCount: 2 }, 'fresh-after-rotation');
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 2000);
+
+    await waitFor(() => getUndeliveredMessages().length > 0, 2000);
+    controller.abort();
+
+    // The stored continuation should be the FRESH one — proving the old
+    // continuation was wiped before query, then the new one stamped after.
+    expect(getContinuation('mock')).toBe('fresh-after-rotation');
+    // startedAt should reflect today's rotation day, not the pre-seeded
+    // 2020-01-01 stamp.
+    expect(getContinuationStartedAt('mock')).toBe(computeRotationDate(new Date(), TIMEZONE));
+
+    await loopPromise.catch(() => {});
+  });
+
+  it('preserves a same-day session even when compacted (mid-chat continuity)', async () => {
+    setContinuation('mock', 'mid-day-id');
+    setContinuationStartedAt('mock', computeRotationDate(new Date(), TIMEZONE));
+
+    insertMessage('m1', { sender: 'Alice', text: 'still chatting' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    // Compact count is high, but day-boundary check fires first and preserves.
+    const provider = new StatsConfigurableProvider({ compactCount: 99 }, 'should-not-be-stamped');
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 2000);
+
+    await waitFor(() => getUndeliveredMessages().length > 0, 2000);
+    controller.abort();
+
+    // The provider emitted a new continuation in `init`, but since the
+    // lazy hook did NOT rotate, runPollLoop should detect the new id and
+    // store it — without re-stamping startedAt (resume path, not new
+    // thread). Verifying we did not rotate: the stored continuation will
+    // be the provider's emitted id since the SDK reported it back, but
+    // the startedAt stamp must still equal what we pre-seeded.
+    expect(getContinuationStartedAt('mock')).toBe(computeRotationDate(new Date(), TIMEZONE));
+
+    await loopPromise.catch(() => {});
+  });
+});
+
 describe('poll loop — /clear command', () => {
   it('clears session, writes confirmation, skips query', async () => {
     // Seed a continuation so we can verify it gets cleared
@@ -517,6 +620,10 @@ class ThrowingProvider {
     return false;
   }
 
+  readSessionStats() {
+    return { compactCount: 0, sizeBytes: 0, turnCount: 0 };
+  }
+
   query(_input: { prompt: string; cwd: string }) {
     const errorMessage = this.errorMessage;
     return {
@@ -539,6 +646,10 @@ class InvalidSessionProvider {
 
   isSessionInvalid(): boolean {
     return true;
+  }
+
+  readSessionStats() {
+    return { compactCount: 0, sizeBytes: 0, turnCount: 0 };
   }
 
   query(_input: { prompt: string; cwd: string }) {

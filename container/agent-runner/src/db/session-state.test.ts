@@ -2,11 +2,14 @@ import { beforeEach, describe, expect, test } from 'bun:test';
 
 import { getOutboundDb, initTestSessionDb } from './connection.js';
 import {
-  clearAllContinuations,
+  clearAllSessionTrackingState,
   clearContinuation,
+  clearContinuationStartedAt,
   getContinuation,
+  getContinuationStartedAt,
   migrateLegacyContinuation,
   setContinuation,
+  setContinuationStartedAt,
 } from './session-state.js';
 
 beforeEach(() => {
@@ -49,26 +52,59 @@ describe('session-state — per-provider continuations', () => {
     expect(getContinuation('never-used')).toBeUndefined();
   });
 
-  test('clearAllContinuations wipes every provider, leaves other state', () => {
+  test('clearAllSessionTrackingState wipes continuations + startedAt, leaves other state', () => {
     setContinuation('claude', 'c-1');
     setContinuation('codex', 'x-1');
+    setContinuationStartedAt('claude', '2026-05-13');
+    setContinuationStartedAt('codex', '2026-05-12');
     getOutboundDb()
       .prepare('INSERT INTO session_state (key, value, updated_at) VALUES (?, ?, ?)')
       .run('last_user_seen', '2026-05-07', new Date().toISOString());
 
-    const cleared = clearAllContinuations();
+    const cleared = clearAllSessionTrackingState();
 
-    expect(cleared).toBe(2);
+    expect(cleared).toBe(4);
     expect(getContinuation('claude')).toBeUndefined();
     expect(getContinuation('codex')).toBeUndefined();
+    expect(getContinuationStartedAt('claude')).toBeUndefined();
+    expect(getContinuationStartedAt('codex')).toBeUndefined();
     const remaining = getOutboundDb()
       .prepare('SELECT key FROM session_state ORDER BY key')
       .all() as { key: string }[];
     expect(remaining.map((r) => r.key)).toEqual(['last_user_seen']);
   });
 
-  test('clearAllContinuations is a no-op on an empty session', () => {
-    expect(clearAllContinuations()).toBe(0);
+  test('clearAllSessionTrackingState is a no-op on an empty session', () => {
+    expect(clearAllSessionTrackingState()).toBe(0);
+  });
+});
+
+describe('session-state — continuation startedAt', () => {
+  test('set/get round-trip, case-insensitive provider key', () => {
+    setContinuationStartedAt('claude', '2026-05-13');
+    expect(getContinuationStartedAt('claude')).toBe('2026-05-13');
+    expect(getContinuationStartedAt('Claude')).toBe('2026-05-13');
+  });
+
+  test('providers are isolated', () => {
+    setContinuationStartedAt('claude', '2026-05-13');
+    setContinuationStartedAt('codex', '2026-05-12');
+    expect(getContinuationStartedAt('claude')).toBe('2026-05-13');
+    expect(getContinuationStartedAt('codex')).toBe('2026-05-12');
+  });
+
+  test('clearContinuationStartedAt only affects the specified provider', () => {
+    setContinuationStartedAt('claude', 'keep');
+    setContinuationStartedAt('codex', 'drop');
+
+    clearContinuationStartedAt('codex');
+
+    expect(getContinuationStartedAt('claude')).toBe('keep');
+    expect(getContinuationStartedAt('codex')).toBeUndefined();
+  });
+
+  test('unknown provider returns undefined', () => {
+    expect(getContinuationStartedAt('never-used')).toBeUndefined();
   });
 });
 
