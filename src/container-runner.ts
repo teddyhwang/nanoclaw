@@ -497,6 +497,31 @@ export function syncSkillSymlinks(
         }
       }
     }
+    // Per-group local skills + generated skills authored from inside the
+    // container live under `<claudeDir>/{local-skills,generated-skills}/`.
+    // The Claude SDK only discovers skills via `~/.claude/skills/` symlinks,
+    // so without an entry here `local-skill-author` produces files that the
+    // agent can never load on its next session — exactly the v1→v2 regression
+    // that masked AI Friends' `daily-recap` (Teddy's RSS-incident exclusion
+    // rule lived there). Built-in /app/skills/<name> and plugin extra-roots
+    // still win on duplicate names; per-group customizations only register
+    // when they don't collide.
+    for (const subdir of ['local-skills', 'generated-skills']) {
+      const groupSkillsRoot = path.join(claudeDir, subdir);
+      if (!fs.existsSync(groupSkillsRoot)) continue;
+      for (const entry of fs.readdirSync(groupSkillsRoot)) {
+        if (skillTargets.has(entry)) continue;
+        try {
+          if (fs.statSync(path.join(groupSkillsRoot, entry)).isDirectory()) {
+            // claudeDir maps to /home/node/.claude in the container, so the
+            // symlink target is the in-container path.
+            skillTargets.set(entry, `/home/node/.claude/${subdir}/${entry}`);
+          }
+        } catch {
+          /* skip unreadable */
+        }
+      }
+    }
   } else {
     for (const skill of containerConfig.skills) {
       skillTargets.set(skill, `/app/skills/${skill}`);

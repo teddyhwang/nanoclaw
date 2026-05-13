@@ -173,6 +173,40 @@ describe('syncSkillSymlinks', () => {
     expect(readLink('google')).toBe('/app/optimus-skills/google');
   });
 
+  // Regression: per-group local-skills authored inside the container
+  // (`local-skill-author` or `daily-recap`-style v1→v2 migrations) were
+  // never symlinked into ~/.claude/skills/, so the Claude SDK couldn't
+  // discover them and rules they encoded (e.g. AI Friends' RSS-incident
+  // exclusion in the daily recap) silently disappeared after v2 cutover.
+  it('links per-group local-skills + generated-skills from .claude-shared/', () => {
+    const localSkillsDir = path.join(claudeDir, 'local-skills', 'daily-recap');
+    fs.mkdirSync(localSkillsDir, { recursive: true });
+    fs.writeFileSync(path.join(localSkillsDir, 'SKILL.md'), '---\nname: daily-recap\n---\n');
+    const generatedSkillsDir = path.join(claudeDir, 'generated-skills', 'self-mod');
+    fs.mkdirSync(generatedSkillsDir, { recursive: true });
+    fs.writeFileSync(path.join(generatedSkillsDir, 'SKILL.md'), '---\nname: self-mod\n---\n');
+
+    syncSkillSymlinks(claudeDir, { skills: 'all' } as never);
+
+    expect(readLink('daily-recap')).toBe('/home/node/.claude/local-skills/daily-recap');
+    expect(readLink('self-mod')).toBe('/home/node/.claude/generated-skills/self-mod');
+    // Built-in skills still link normally.
+    expect(readLink('welcome')).toBe('/app/skills/welcome');
+  });
+
+  it('per-group local-skill cannot shadow a built-in skill name', () => {
+    // `welcome` is built-in. A group-local skill with the same name must
+    // not redirect ~/.claude/skills/welcome away from the canonical
+    // /app/skills/welcome target.
+    const localSkillsDir = path.join(claudeDir, 'local-skills', 'welcome');
+    fs.mkdirSync(localSkillsDir, { recursive: true });
+    fs.writeFileSync(path.join(localSkillsDir, 'SKILL.md'), '---\nname: welcome\n---\n');
+
+    syncSkillSymlinks(claudeDir, { skills: 'all' } as never);
+
+    expect(readLink('welcome')).toBe('/app/skills/welcome');
+  });
+
   it('respects per-root skillFilter for selective exposure', () => {
     cleanups.push(
       addSkillRoot({
