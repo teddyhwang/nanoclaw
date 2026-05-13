@@ -131,7 +131,7 @@ function buildDestinationsSection(): string {
     }
   }
   lines.push('');
-  lines.push('**Every response must be wrapped** in a `<message to="name">...</message>` block.');
+  lines.push('**All output must be wrapped.** Use `<message to="name">...</message>` for content to send, or `<internal>...</internal>` for scratchpad.');
   lines.push('You can include multiple `<message>` blocks in one response to send to multiple destinations.');
   lines.push('Any text you want to keep private MUST be wrapped in `<internal>...</internal>` — that content is stripped before delivery, never reaches any user, and only appears in host operator logs.');
   lines.push('Plain text outside BOTH `<message>` and `<internal>` (including meta-narration like "no reply needed", "saved to profile", or any explanation of what you decided to do) WILL be broadcast to the originating channel with a `[degraded]` label. The runner cannot tell the difference between a real reply that forgot the `<message>` wrap and self-narration; it errs on the side of delivering rather than silently dropping. So: every character is either inside `<message>` (sent to a named destination) or inside `<internal>` (kept private). Nothing else. If you have nothing to say, emit a single `<internal>silent turn</internal>` and stop.');

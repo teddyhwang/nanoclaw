@@ -10,6 +10,19 @@
 import { getConfig } from '../config.js';
 import { openInboundDb, getOutboundDb } from './connection.js';
 
+// Cache whether inbound.db has the on_wake column (added in v2.0.48).
+// The container opens inbound.db read-only, so it can't ALTER —
+// gracefully degrade when running against an older session DB.
+let _hasOnWake: boolean | null = null;
+function hasOnWakeColumn(db: ReturnType<typeof openInboundDb>): boolean {
+  if (_hasOnWake !== null) return _hasOnWake;
+  const cols = new Set(
+    (db.prepare("PRAGMA table_info('messages_in')").all() as Array<{ name: string }>).map((c) => c.name),
+  );
+  _hasOnWake = cols.has('on_wake');
+  return _hasOnWake;
+}
+
 export interface MessageInRow {
   id: string;
   seq: number | null;
@@ -100,14 +113,20 @@ export function getPendingMessages(isFirstPoll = false): MessageInRow[] {
     //    container's poll loop hits the `!messages.some(trigger===1)`
     //    accumulate gate and sleeps forever. With trigger-priority
     //    ordering, the dream task surfaces first and the gate advances.
+    //
+    // Pre-migration session DBs predate the on_wake column (added in
+    // v2.0.48). `hasOnWakeColumn` makes the on_wake filter conditional
+    // so the container gracefully degrades against older inbound.db
+    // schemas instead of erroring out.
     const staleAccumulateCutoff = new Date(Date.now() - STALE_ACCUMULATE_AGE_MS).toISOString();
+    const onWakeFilter = hasOnWakeColumn(inbound) ? 'AND (on_wake = 0 OR ?1 = 1)' : '';
     const pending = inbound
       .prepare(
         `SELECT * FROM messages_in
          WHERE status = 'pending'
            AND kind != 'system'
            AND (process_after IS NULL OR datetime(process_after) <= datetime('now'))
-           AND (on_wake = 0 OR ?1 = 1)
+           ${onWakeFilter}
            AND (trigger = 1 OR datetime(timestamp) >= datetime(?3))
          ORDER BY trigger DESC, seq DESC
          LIMIT ?2`,
