@@ -57,14 +57,23 @@ export function initGroupFilesystem(group: AgentGroup, opts?: { instructions?: s
     initialized.push('groupDir');
   }
 
-  // groups/<folder>/CLAUDE.local.md — per-group agent memory, auto-loaded by
-  // Claude Code. Seeded with caller-provided instructions on first creation.
+  // groups/<folder>/CLAUDE.local.md — per-group agent scratch memory,
+  // auto-loaded by Claude Code. Seeded with caller-provided instructions on
+  // first creation. The structured kernel (IDENTITY/CURRENT/KNOWLEDGE/AGENTS)
+  // is the primary memory layer; CLAUDE.local.md is the fallback for facts
+  // that don't fit a kernel shape.
   const claudeLocalFile = path.join(groupDir, 'CLAUDE.local.md');
   if (!fs.existsSync(claudeLocalFile)) {
     const body = opts?.instructions ? opts.instructions + '\n' : '';
     fs.writeFileSync(claudeLocalFile, body);
     initialized.push('CLAUDE.local.md');
   }
+
+  // Agent kernel stubs — eagerly imported by the composer when present.
+  // Each is created empty (operator/agent fills in over time) so first-spawn
+  // composed CLAUDE.md picks them up. Existing groups already have these
+  // and this is idempotent; new groups get the kernel shape for free.
+  scaffoldKernel(groupDir, initialized);
 
   // Ensure container_configs row exists in the DB. Idempotent — no-op if
   // the row already exists (e.g. created by backfill or group creation).
@@ -101,6 +110,49 @@ export function initGroupFilesystem(group: AgentGroup, opts?: { instructions?: s
       id: group.id,
       steps: initialized,
     });
+  }
+}
+
+const KERNEL_STUBS: Record<string, string> = {
+  'IDENTITY.md':
+    '# Identity\n\n' +
+    'Who you are in this group: voice, scope, permissions, who you talk to and how.\n' +
+    'Update only when a stable property of the group changes.\n',
+  'CURRENT.md':
+    '# Current\n\n' +
+    'Open items and recent context for fast session cold-starts. Updated each session.\n\n' +
+    '## Open Items\n\n## Recent Context\n',
+  'KNOWLEDGE.md':
+    '# Knowledge Index\n\n' +
+    'Files in `knowledge/` for lazy-loading. Add an entry whenever you create a structured-knowledge file.\n',
+  'AGENTS.md':
+    '<!-- kernel: v1.1 -->\n\n' +
+    '# Agent Kernel\n\n' +
+    'You are a stateful agent. Durable memory comes from files in this directory. ' +
+    'See `IDENTITY.md` for who you are; `CURRENT.md` for recent state; `KNOWLEDGE.md` for the lazy-load index.\n\n' +
+    '## Session Protocol\n\n' +
+    '### Start\n- The composed `CLAUDE.md` has already loaded IDENTITY, AGENTS, CURRENT, and KNOWLEDGE.\n' +
+    '- Load `knowledge/<topic>.md` only when a task touches that domain.\n\n' +
+    "### During\n- Verify state before acting — don't trust notes blindly.\n" +
+    "- Append work to today's `notes/YYYY-MM-DD.md`. Never rewrite prior days.\n\n" +
+    '### End\n- Update `CURRENT.md`: remove resolved items, add new ones.\n' +
+    '- Promote substantive new facts from `CLAUDE.local.md` into `knowledge/<topic>.md` + the `KNOWLEDGE.md` index.\n',
+};
+
+function scaffoldKernel(groupDir: string, initialized: string[]): void {
+  for (const [name, content] of Object.entries(KERNEL_STUBS)) {
+    const target = path.join(groupDir, name);
+    if (!fs.existsSync(target)) {
+      fs.writeFileSync(target, content);
+      initialized.push(name);
+    }
+  }
+  for (const sub of ['knowledge', 'notes']) {
+    const target = path.join(groupDir, sub);
+    if (!fs.existsSync(target)) {
+      fs.mkdirSync(target, { recursive: true });
+      initialized.push(`${sub}/`);
+    }
   }
 }
 

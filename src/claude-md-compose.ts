@@ -21,7 +21,7 @@ import { GROUPS_DIR } from './config.js';
 import type { McpServerConfig } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { resolveGroupDir } from './engine/paths.js';
-import { getExtraSkillRoots } from './engine/skill-roots.js';
+import { getContextFragments, getExtraSkillRoots } from './engine/skill-roots.js';
 import { log } from './log.js';
 import type { AgentGroup } from './types.js';
 
@@ -31,18 +31,40 @@ const SHARED_CLAUDE_MD_CONTAINER_PATH = '/app/CLAUDE.md';
 const SHARED_SKILLS_CONTAINER_BASE = '/app/skills';
 const SHARED_MCP_TOOLS_CONTAINER_BASE = '/app/src/mcp-tools';
 
-// Host-side source paths used to discover fragment sources at compose time.
-// Resolved at call time (process.cwd() = project root) so tests can swap cwd.
-const MCP_TOOLS_HOST_SUBPATH = path.join('container', 'agent-runner', 'src', 'mcp-tools');
+// Per-group kernel files auto-imported into the composed CLAUDE.md when they
+// exist on disk. Order matters: identity → protocol → state → index. Each is
+// optional — missing files degrade gracefully (composer simply skips them).
+// The agent loads them eagerly at session start; bulk content (knowledge/,
+// notes/, DREAM.md, conversations/) is described in the shared base and
+// loaded lazily on demand.
+const KERNEL_IMPORTS = ['IDENTITY.md', 'AGENTS.md', 'CURRENT.md', 'KNOWLEDGE.md'] as const;
 
 const COMPOSED_HEADER = '<!-- Composed at spawn — do not edit. Edit CLAUDE.local.md for per-group content. -->';
+
+/**
+ * Resolve the host `container/` source directory the same way container-runner
+ * does: env override first, project-root default second. Falls back to
+ * `process.cwd()/container` for standalone NanoClaw. Embedded hosts that chdir
+ * (e.g. Optimus → data dir) MUST set NANOCLAW_CONTAINER_SOURCE_DIR or
+ * NANOCLAW_PROJECT_ROOT; otherwise this returns a path that doesn't exist and
+ * skill/MCP-tool fragments silently drop.
+ */
+function resolveContainerSourceDir(): string {
+  if (process.env.NANOCLAW_CONTAINER_SOURCE_DIR) {
+    return path.resolve(process.env.NANOCLAW_CONTAINER_SOURCE_DIR);
+  }
+  const projectRoot = process.env.NANOCLAW_PROJECT_ROOT
+    ? path.resolve(process.env.NANOCLAW_PROJECT_ROOT)
+    : process.cwd();
+  return path.join(projectRoot, 'container');
+}
 
 /**
  * Regenerate `groups/<folder>/CLAUDE.md` from the shared base, enabled skill
  * fragments, and MCP server fragments declared in `container.json`. Creates
  * an empty `CLAUDE.local.md` if missing.
  */
-export function composeGroupClaudeMd(group: AgentGroup): void {
+export async function composeGroupClaudeMd(group: AgentGroup): Promise<void> {
   const groupDir = resolveGroupDir(group);
   if (!fs.existsSync(groupDir)) {
     fs.mkdirSync(groupDir, { recursive: true });
@@ -56,6 +78,8 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
     fs.mkdirSync(fragmentsDir, { recursive: true });
   }
 
+  const containerSourceDir = resolveContainerSourceDir();
+
   // Desired fragment set.
   const configRow = getContainerConfig(group.id);
   const mcpServers: Record<string, McpServerConfig> = configRow
@@ -65,7 +89,7 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
 
   // Skill fragments — every skill that ships an `instructions.md`.
   // TODO (shared-source refactor): respect `container.json` skill selection.
-  const skillsHostDir = path.join(process.cwd(), 'container', 'skills');
+  const skillsHostDir = path.join(containerSourceDir, 'skills');
   if (fs.existsSync(skillsHostDir)) {
     for (const skillName of fs.readdirSync(skillsHostDir)) {
       const hostFragment = path.join(skillsHostDir, skillName, 'instructions.md');
@@ -100,7 +124,7 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
   // use that module's MCP tools (schedule_task, install_packages, etc.).
   // Skip cli.instructions.md when cli_scope is disabled.
   const cliDisabled = configRow?.cli_scope === 'disabled';
-  const mcpToolsHostDir = path.join(process.cwd(), MCP_TOOLS_HOST_SUBPATH);
+  const mcpToolsHostDir = path.join(containerSourceDir, 'agent-runner', 'src', 'mcp-tools');
   if (fs.existsSync(mcpToolsHostDir)) {
     for (const entry of fs.readdirSync(mcpToolsHostDir)) {
       const match = entry.match(/^(.+)\.instructions\.md$/);
@@ -125,6 +149,14 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
     }
   }
 
+  // Plugin-provided fragments — async hook for hosts that source context from
+  // databases, remote configs, or other non-filesystem sources. Filesystem
+  // fragments (skills, MCP tools, kernel imports) are handled above; this is
+  // purely additive.
+  for (const frag of await getContextFragments(group)) {
+    desired.set(`plugin-${frag.name}.md`, { type: 'inline', content: frag.content });
+  }
+
   // Reconcile: drop stale, write desired.
   for (const existing of fs.readdirSync(fragmentsDir)) {
     if (!desired.has(existing)) {
@@ -141,7 +173,15 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
   }
 
   // Composed entry — imports only.
+  // Order: shared base (engine guidance) → kernel files (per-group identity +
+  // state) → fragments (skills + MCP tools + plugin context). CLAUDE.local.md
+  // is auto-loaded by Claude Code separately, so we don't import it here.
   const imports = ['@./.claude-shared.md'];
+  for (const kernelFile of KERNEL_IMPORTS) {
+    if (fs.existsSync(path.join(groupDir, kernelFile))) {
+      imports.push(`@./${kernelFile}`);
+    }
+  }
   for (const name of [...desired.keys()].sort()) {
     imports.push(`@./.claude-fragments/${name}`);
   }
