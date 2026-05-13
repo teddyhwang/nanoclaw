@@ -31,6 +31,9 @@ import type { AgentProvider, AgentQuery, ImageContentBlock, ProviderEvent } from
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
+// Host-side IDLE_TIMEOUT defaults to 120s; refresh well under that so
+// one slow tick still leaves multiple ticks of headroom.
+const QUERY_KEEPALIVE_MS = 30_000;
 
 function log(msg: string): void {
   console.error(`[poll-loop] ${msg}`);
@@ -298,10 +301,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         );
       }
       if (decision.rotate) {
-        log(
-          `Rotating session before query: ${decision.reason} ` +
-            `(previous continuation: ${continuation})`,
-        );
+        log(`Rotating session before query: ${decision.reason} ` + `(previous continuation: ${continuation})`);
         clearContinuation(config.providerName);
         clearContinuationStartedAt(config.providerName);
         continuation = undefined;
@@ -333,10 +333,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         // original stamp so the day-boundary check measures from when the
         // thread truly began, not when this container happened to attach.
         if (isNewThread) {
-          setContinuationStartedAt(
-            config.providerName,
-            computeRotationDate(new Date(), TIMEZONE),
-          );
+          setContinuationStartedAt(config.providerName, computeRotationDate(new Date(), TIMEZONE));
         }
       }
     } catch (err) {
@@ -443,6 +440,21 @@ async function processQuery(
   // will kill the container and messages get reset to pending.
   let pollInFlight = false;
   let endedForCommand = false;
+  // Keepalive: while the query stream is open, refresh heartbeat at a
+  // cadence well under IDLE_TIMEOUT (default 120s). The for-await loop
+  // below bumps heartbeat on every SDK event, and Pre/PostToolUse hooks
+  // bump on every tool boundary, but neither fires during LLM-only
+  // intervals — a long text generation after the last tool call, or
+  // SDK ramp-up between query.push() and the first new event, can
+  // exceed IDLE_TIMEOUT and trip the host's `stop-idle` kill mid-
+  // thought. The query being open is itself proof of liveness; the
+  // host already detects truly-dead containers via the absolute ceiling
+  // and claim-stuck paths, so a keepalive here only suppresses
+  // false-positive idle kills, not real wedges.
+  const keepaliveHandle = setInterval(() => {
+    if (done) return;
+    touchHeartbeat();
+  }, QUERY_KEEPALIVE_MS);
   const pollHandle = setInterval(() => {
     if (done || pollInFlight || endedForCommand) return;
     pollInFlight = true;
@@ -504,9 +516,7 @@ async function processQuery(
           // cross-sender stream-end below; accumulate-only is the
           // other "nothing to do here, let the outer loop sleep
           // cleanly" condition.
-          log(
-            `Ending active query — ${newMessages.length} accumulate-only follow-up(s) pending, no trigger=1 work`,
-          );
+          log(`Ending active query — ${newMessages.length} accumulate-only follow-up(s) pending, no trigger=1 work`);
           if (!endedForCommand) {
             endedForCommand = true;
             query.end();
@@ -655,6 +665,14 @@ async function processQuery(
         // formatter check fires fresh (upstream v2.0.58 fix(poll-loop):
         // nudge agent when output lacks message wrapping).
         unwrappedNudged = false;
+        // Bump heartbeat before pushing. The push hands work to the SDK,
+        // but the SDK ramp-up (LLM API call, first tool call) can exceed
+        // IDLE_TIMEOUT (120s) — host-sweep would then read a stale
+        // heartbeat (last bumped at the previous PostToolUse) with
+        // current_tool empty and dueCount=0 (we're about to markCompleted),
+        // and fire `stop-idle` mid-stream. Signal "we just gave the agent
+        // more work" so the idle clock restarts from now.
+        touchHeartbeat();
         query.push(prompt, followupImageBlocks.length > 0 ? followupImageBlocks : undefined);
         markCompleted(keptIds);
         // Refresh routing.inReplyTo so subsequent outbound rows reply to the
@@ -729,6 +747,7 @@ async function processQuery(
   } finally {
     done = true;
     clearInterval(pollHandle);
+    clearInterval(keepaliveHandle);
   }
 
   return { continuation: queryContinuation };
@@ -767,10 +786,7 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
 // upstream nudge re-prompt — safety-net delivery is belt-and-suspenders
 // against silent drops, the nudge teaches the agent to wrap correctly
 // next turn.
-export function dispatchResultText(
-  text: string,
-  routing: RoutingContext,
-): { sent: number; hasUnwrapped: boolean } {
+export function dispatchResultText(text: string, routing: RoutingContext): { sent: number; hasUnwrapped: boolean } {
   const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
 
   let match: RegExpExecArray | null;
