@@ -41,6 +41,7 @@ import { log } from '../log.js';
 import { registerChannelAdapter } from './channel-registry.js';
 import { normalizeOptions, type NormalizedOption } from './ask-question.js';
 import type { ChannelAdapter, ChannelSetup, ConversationInfo, InboundMessage, OutboundMessage } from './adapter.js';
+import { openInboundKeyStore, type InboundKeyStore } from './whatsapp-key-store.js';
 
 // proto is not available as a named ESM export — use createRequire (same as v1)
 import { createRequire } from 'module';
@@ -407,14 +408,60 @@ registerChannelAdapter('whatsapp', {
     // quote-reply pill in WhatsApp instead of an orphaned message. Keyed
     // by `msg.key.id` (the same id the router writes as the message's
     // platform id and the agent stamps on the OutboundMessage as
-    // `inReplyTo`). Bounded to keep memory steady on busy groups.
+    // `inReplyTo`).
+    //
+    // Two-tier: in-memory Map is the hot path; a sqlite-backed store
+    // at `<DATA_DIR>/whatsapp/inbound-keys.db` is the cold-start
+    // fallback. Without the disk tier, a restart in the middle of a
+    // conversation strands every prior inbound id — the bot's reply
+    // arrives as an orphaned message with no quote pill, even though
+    // the user obviously expected one (live regression in #new-york-
+    // crew 2026-05-12: ~1 minute between Jon's @-mention and the
+    // bot's reply spanned a restart and the pill disappeared).
+    //
+    // The disk tier also stores enough message context (sender, text,
+    // reply_to_message_id) to power `ChannelAdapter.fetchAncestor`
+    // for the reply-chain prompt-context backfill (H-D2 residual).
     const INBOUND_KEY_CACHE_MAX = 1000;
     const inboundKeyCache = new Map<string, { remoteJid: string; participant?: string; fromMe: boolean }>();
-    function rememberInboundKey(id: string, key: { remoteJid: string; participant?: string; fromMe: boolean }): void {
+    let inboundKeyStore: InboundKeyStore | undefined;
+    let keyStoreCleanupTimer: NodeJS.Timeout | undefined;
+    function rememberInboundKey(
+      id: string,
+      key: { remoteJid: string; participant?: string; fromMe: boolean },
+      extras?: {
+        ts?: string;
+        senderId?: string;
+        senderName?: string;
+        text?: string;
+        replyToMessageId?: string;
+      },
+    ): void {
       inboundKeyCache.set(id, key);
       if (inboundKeyCache.size > INBOUND_KEY_CACHE_MAX) {
         const oldest = inboundKeyCache.keys().next().value!;
         inboundKeyCache.delete(oldest);
+      }
+      // Disk-tier write is fire-and-forget — a hot-cache hit covers
+      // the live-traffic case; the disk tier is only consulted on
+      // memory miss. A DB error here shouldn't abort message
+      // ingestion, but log loudly because a silently-failing key
+      // store re-introduces the bug this module exists to fix.
+      if (inboundKeyStore) {
+        try {
+          inboundKeyStore.remember(id, {
+            remoteJid: key.remoteJid,
+            participant: key.participant,
+            fromMe: key.fromMe,
+            ts: extras?.ts ?? new Date().toISOString(),
+            senderId: extras?.senderId,
+            senderName: extras?.senderName,
+            text: extras?.text,
+            replyToMessageId: extras?.replyToMessageId,
+          });
+        } catch (err) {
+          log.error('inboundKeyStore.remember failed', { messageId: id, err });
+        }
       }
     }
 
@@ -584,16 +631,33 @@ registerChannelAdapter('whatsapp', {
     }
 
     // Construct a Baileys `quoted` field for a known inbound message id.
-    // Returns null when the id isn't in cache (older than cache window, or
-    // a bot-sent id) — caller should send a plain message in that case
-    // rather than fail. The empty `message.conversation` is fine: Baileys
-    // references the quoted message by `key.id`, not by replaying body.
+    // Hot path checks the in-memory map; cold-start / post-restart
+    // checks the on-disk store. Returns null when neither tier knows
+    // about the id (very old message that aged out, or a bot-sent id
+    // — `sentMessageCache` handles those separately) — caller should
+    // send a plain message in that case rather than fail. The empty
+    // `message.conversation` is fine: Baileys references the quoted
+    // message by `key.id`, not by replaying body.
     function buildQuoted(
       messageId: string | null | undefined,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ): { key: any; message: any } | null {
       if (!messageId) return null;
-      const cached = inboundKeyCache.get(messageId);
+      let cached: { remoteJid: string; participant?: string; fromMe: boolean } | undefined =
+        inboundKeyCache.get(messageId);
+      if (!cached && inboundKeyStore) {
+        try {
+          const rec = inboundKeyStore.lookup(messageId);
+          if (rec) {
+            cached = { remoteJid: rec.remoteJid, participant: rec.participant, fromMe: rec.fromMe };
+            // Promote disk-tier hits into the memory map so a busy
+            // thread doesn't re-query SQLite on every quoted reply.
+            inboundKeyCache.set(messageId, cached);
+          }
+        } catch (err) {
+          log.error('inboundKeyStore.lookup failed', { messageId, err });
+        }
+      }
       if (!cached) return null;
       return {
         key: {
@@ -987,22 +1051,6 @@ registerChannelAdapter('whatsapp', {
             // sensitive and per-host, not per-group). `replyTo` lets
             // `mention-sticky`'s `isReplyToBot` branch trigger when a user
             // quote-replies to a previous bot message.
-            // Cache the inbound key shape so a future outbound message can
-            // build a Baileys `quoted` field referencing this message id —
-            // gives the bot's reply a native quote-reply pill in the WA UI
-            // and keeps threading visible to participants on long groups.
-            // Group messages carry `participant`; DMs do not. The `fromMe`
-            // bit is always false at this point — we only cache user-sent
-            // messages here (bot's own outbound is captured separately in
-            // `sentMessageCache`).
-            if (msg.key.id) {
-              rememberInboundKey(msg.key.id, {
-                remoteJid: chatJid,
-                participant: msg.key.participant ?? undefined,
-                fromMe: false,
-              });
-            }
-
             const ctxInfo = extractWhatsAppContextInfo(normalized);
             // Platform-mention detection (real WA @-popup) covers the
             // ASSISTANT_HAS_OWN_NUMBER=true case where the bot is a distinct
@@ -1018,6 +1066,35 @@ registerChannelAdapter('whatsapp', {
               isWhatsAppBotMentioned(ctxInfo, botLidUser, botPhoneUser) ||
               hasWhatsAppTextMention(content, ASSISTANT_NAME);
             const replyTo = extractWhatsAppReplyContext(ctxInfo);
+
+            // Cache the inbound key shape so a future outbound message can
+            // build a Baileys `quoted` field referencing this message id —
+            // gives the bot's reply a native quote-reply pill in the WA UI
+            // and keeps threading visible to participants on long groups.
+            // Group messages carry `participant`; DMs do not. The `fromMe`
+            // bit is always false at this point — we only cache user-sent
+            // messages here (bot's own outbound is captured separately in
+            // `sentMessageCache`). The extras (sender, text, replyTo)
+            // populate the disk-tier store so a future ancestor walker
+            // can rebuild reply-chain context without re-fetching via
+            // Baileys.
+            if (msg.key.id) {
+              rememberInboundKey(
+                msg.key.id,
+                {
+                  remoteJid: chatJid,
+                  participant: msg.key.participant ?? undefined,
+                  fromMe: false,
+                },
+                {
+                  ts: timestamp,
+                  senderId: sender,
+                  senderName,
+                  text: content,
+                  replyToMessageId: replyTo?.messageId,
+                },
+              );
+            }
 
             const inbound: InboundMessage = {
               id: msg.key.id || `wa-${Date.now()}`,
@@ -1089,6 +1166,31 @@ registerChannelAdapter('whatsapp', {
 
       async setup(hostConfig: ChannelSetup) {
         setupConfig = hostConfig;
+
+        // Open the persistent inbound-key store. Failure to open is
+        // not fatal — the in-memory map still services live traffic;
+        // the disk tier is only consulted on cold-start lookup. Log
+        // loudly because a silently-missing disk tier silently
+        // re-introduces the no-pill-after-restart bug.
+        try {
+          inboundKeyStore = openInboundKeyStore(path.join(DATA_DIR, 'whatsapp', 'inbound-keys.db'));
+          inboundKeyStore.cleanup();
+          // Hourly cleanup. unref() so the timer doesn't keep the
+          // host alive past shutdown.
+          keyStoreCleanupTimer = setInterval(
+            () => {
+              try {
+                inboundKeyStore?.cleanup();
+              } catch (err) {
+                log.error('inboundKeyStore.cleanup failed', { err });
+              }
+            },
+            60 * 60 * 1000,
+          );
+          keyStoreCleanupTimer.unref?.();
+        } catch (err) {
+          log.error('Failed to open inbound-keys.db; reply pills will not survive restart', { err });
+        }
 
         // Connect and wait for first open
         await new Promise<void>((resolve, reject) => {
