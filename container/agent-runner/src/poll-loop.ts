@@ -545,6 +545,17 @@ async function processQuery(
         // container kill). Ending the stream lets the outer for-await unwind,
         // the outer loop re-queries fresh, and `activeSender` gets bound to
         // the deferred sender so the right respond_to lands.
+        // Track whether either deferral fired this tick — used below to
+        // decide whether to end the active stream when nothing pushable
+        // remains. Without this, a batch containing BOTH cross-sender
+        // rows AND a maintenance task row spins forever: cross-sender
+        // branch leaves the task in `sameSender` (so length!=0, no
+        // stream-end), task-wake branch strips the task and returns
+        // silently (no stream-end either), outer loop never gets to
+        // re-query for the deferred sender, host's 30-min absolute
+        // ceiling eventually SIGKILLs. Observed 2026-05-13 in
+        // discord_ai_friends from 16:35 onward.
+        let crossSenderDeferred = false;
         if (activeSender) {
           const sameSender: typeof newMessages = [];
           const deferred: string[] = [];
@@ -558,6 +569,7 @@ async function processQuery(
           }
           if (deferred.length > 0) {
             log(`Deferring ${deferred.length} cross-sender follow-up(s) — will re-process after active turn`);
+            crossSenderDeferred = true;
           }
           newMessages = sameSender;
           if (newMessages.length === 0) {
@@ -602,7 +614,22 @@ async function processQuery(
             log(`Deferring ${taskDeferred.length} maintenance task wake(s) — will re-process after active user turn`);
           }
           newMessages = userOnly;
-          if (newMessages.length === 0) return;
+          if (newMessages.length === 0) {
+            // If cross-sender rows were also deferred this tick, the active
+            // turn has no follow-up work and the outer loop needs to re-query
+            // for the deferred sender. End the stream. If only task rows were
+            // deferred (no cross-sender), the active turn is still mid-
+            // response — leave the stream open so its Result: event can land;
+            // outer loop picks up the task on the next iteration.
+            if (crossSenderDeferred && !endedForCommand) {
+              log(
+                `Remaining pending are only deferred tasks — ending active query so outer loop can re-query for deferred sender`,
+              );
+              endedForCommand = true;
+              query.end();
+            }
+            return;
+          }
         }
 
         const newIds = newMessages.map((m) => m.id);
