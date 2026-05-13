@@ -130,20 +130,36 @@ describe('poll loop integration', () => {
     await loopPromise.catch(() => {});
   });
 
-  it('bare text produces no outbound messages (scratchpad only)', async () => {
+  it('bare text triggers the local-fork safety-net delivery (degraded)', async () => {
+    // Local-fork divergence from upstream: bare text outside <message> /
+    // <internal> wrapping must NOT be silently dropped. The runner emits
+    // it to the origin channel with a [degraded] label so (a) the user
+    // gets *something* and (b) the agent's wrap miss is visible instead
+    // of invisible. See deliverSafetyNet in poll-loop.ts; rationale in
+    // memory feedback_silent_fallback_regression. Upstream's test
+    // asserts the opposite (length 0) — kept the fork patch here.
     insertMessage('m1', { sender: 'Alice', text: 'hello' }, { platformId: 'chan-1', channelType: 'discord' });
 
-    // Agent responds with bare text — no <message to="..."> wrapping
     const provider = new MockProvider({}, () => 'I am thinking about this...');
     const controller = new AbortController();
     const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
 
-    // Wait long enough for the poll loop to process
     await sleep(1000);
     controller.abort();
 
     const out = getUndeliveredMessages();
-    expect(out).toHaveLength(0);
+    // At least one degraded delivery — the upstream nudge re-prompt
+    // also pushes the agent to re-wrap, which with this mock provider
+    // produces the same bare-text result and triggers safety-net again.
+    // Either way, every safety-net send must carry the [degraded] label
+    // and originate from chan-1.
+    expect(out.length).toBeGreaterThanOrEqual(1);
+    for (const row of out) {
+      const body = JSON.parse(row.content).text;
+      expect(body).toContain('[degraded');
+      expect(body).toContain('I am thinking about this...');
+      expect(row.platform_id).toBe('chan-1');
+    }
 
     await loopPromise.catch(() => {});
   });
