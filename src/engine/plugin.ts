@@ -33,6 +33,12 @@ import {
   type ContextFragmentProvider,
   type ExtraSkillRoot,
 } from './skill-roots.js';
+import {
+  setSharedBaseProvider,
+  setDocsRootProvider,
+  type SharedBaseProvider,
+  type DocsRootProvider,
+} from './composer-hooks.js';
 import { setWorkspaceResolver, type WorkspaceResolverFn } from './workspace.js';
 import { setCredentialProvider, type CredentialProvider } from './credentials.js';
 import { registerPluginMigrations, getReadDal, type PluginMigration, type ReadDal } from './db-extensions.js';
@@ -70,6 +76,21 @@ export interface PluginContext {
   skills: {
     addSkillRoot(root: ExtraSkillRoot): () => void;
     addContextFragmentProvider(fn: ContextFragmentProvider): () => void;
+  };
+  composer: {
+    /**
+     * Override the shared base mounted at /app/CLAUDE.md. When set, the
+     * composer mounts the returned host path instead of the default
+     * `<container source>/CLAUDE.md`. Last-write-wins.
+     */
+    setSharedBaseProvider(fn: SharedBaseProvider): () => void;
+    /**
+     * Provide a host directory to mount RO at /app/docs/. The eager
+     * shared-base CLAUDE.md can link to files here for progressive
+     * disclosure: lightweight kernel + deep references loaded on demand.
+     * Last-write-wins.
+     */
+    setDocsRootProvider(fn: DocsRootProvider): () => void;
   };
   credentials: {
     register(p: CredentialProvider): void;
@@ -112,6 +133,10 @@ export function createPluginContext(): PluginContext {
     skills: {
       addSkillRoot,
       addContextFragmentProvider,
+    },
+    composer: {
+      setSharedBaseProvider: (fn) => setSharedBaseProvider(fn),
+      setDocsRootProvider: (fn) => setDocsRootProvider(fn),
     },
     credentials: {
       register: (p) => setCredentialProvider(p),

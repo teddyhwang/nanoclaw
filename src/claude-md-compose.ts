@@ -32,12 +32,18 @@ const SHARED_SKILLS_CONTAINER_BASE = '/app/skills';
 const SHARED_MCP_TOOLS_CONTAINER_BASE = '/app/src/mcp-tools';
 
 // Per-group kernel files auto-imported into the composed CLAUDE.md when they
-// exist on disk. Order matters: identity → protocol → state → index. Each is
+// exist on disk. Order matters: identity → live state → index. Each is
 // optional — missing files degrade gracefully (composer simply skips them).
 // The agent loads them eagerly at session start; bulk content (knowledge/,
 // notes/, DREAM.md, conversations/) is described in the shared base and
 // loaded lazily on demand.
-const KERNEL_IMPORTS = ['IDENTITY.md', 'AGENTS.md', 'CURRENT.md', 'KNOWLEDGE.md'] as const;
+//
+// AGENTS.md is intentionally NOT in this list as of the v2 unification
+// (S381+). The shared base IS the canonical kernel; per-group AGENTS.md is
+// redundant with it. Existing per-group AGENTS.md files left over from the
+// v1-shaped template are not imported — they'll be cleaned up by host
+// migration.
+const KERNEL_IMPORTS = ['IDENTITY.md', 'CURRENT.md', 'KNOWLEDGE.md'] as const;
 
 const COMPOSED_HEADER = '<!-- Composed at spawn — do not edit. Edit CLAUDE.local.md for per-group content. -->';
 

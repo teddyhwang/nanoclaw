@@ -25,6 +25,7 @@ import { updateContainerConfigScalars } from './db/container-configs.js';
 import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
 import { composeGroupClaudeMd } from './claude-md-compose.js';
 import { getExtraSkillRoots } from './engine/skill-roots.js';
+import { getSharedBaseSource, getDocsRoot } from './engine/composer-hooks.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
 import { initGroupFilesystem } from './group-init.js';
@@ -345,10 +346,29 @@ async function buildMounts(
   }
 
   // Shared CLAUDE.md — read-only, imported by the composed entry point via
-  // the `.claude-shared.md` symlink inside the group dir.
-  const sharedClaudeMd = path.join(containerSourceDir, 'CLAUDE.md');
+  // the `.claude-shared.md` symlink inside the group dir. Hosts can override
+  // the source via composer.setSharedBaseProvider (see composer-hooks.ts);
+  // when no provider is registered the default container/CLAUDE.md applies.
+  const sharedBaseOverride = getSharedBaseSource();
+  const sharedClaudeMd = sharedBaseOverride
+    ? sharedBaseOverride.hostPath
+    : path.join(containerSourceDir, 'CLAUDE.md');
   if (fs.existsSync(sharedClaudeMd)) {
     mounts.push({ hostPath: sharedClaudeMd, containerPath: '/app/CLAUDE.md', readonly: true });
+  }
+
+  // Lazy-load docs root — optional, host-supplied. When a docsRootProvider
+  // is registered the directory mounts RO at /app/docs/ so the shared base
+  // can reference docs via `@/app/docs/<topic>.md` for progressive
+  // disclosure. The eager kernel stays small; deep references load only
+  // when the agent navigates into them.
+  const docsRoot = getDocsRoot();
+  if (docsRoot && fs.existsSync(docsRoot.hostPath)) {
+    mounts.push({
+      hostPath: fs.realpathSync(docsRoot.hostPath),
+      containerPath: '/app/docs',
+      readonly: true,
+    });
   }
 
   // Per-group .claude-shared at /home/node/.claude (Claude state, settings,
