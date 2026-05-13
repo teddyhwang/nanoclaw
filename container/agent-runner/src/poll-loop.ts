@@ -969,8 +969,23 @@ function sendToDestination(dest: DestinationEntry, body: string, routing: Routin
 }
 
 /**
- * Find the thread_id and message id from the most recent inbound message
- * matching the given channel+platform. Returns null if no match found.
+ * Find the thread_id and reply-target message id from the most recent
+ * inbound messages for the given channel+platform.
+ *
+ * `threadId` comes from the very latest row in the channel — any row's
+ * thread is fine for routing, the destination's thread context doesn't
+ * care which row produced it.
+ *
+ * `inReplyTo` is filtered: never a `kind='task'` row (id is a synthetic
+ * UUID, not a platform message id — using it leaks a "reply to nothing"
+ * pill that Discord falls back to the channel's most-recent real message
+ * for, observed 2026-05-11 + 2026-05-13) and never a `trigger=0`
+ * drive-by (accumulate-only chat that the agent isn't actually answering
+ * — using it makes maintenance-task posts render as a reply to whoever
+ * happened to chat most recently). Same exclusion shape as
+ * `pickInReplyToMessage` in formatter.ts. If no matching `trigger=1`
+ * non-task row exists, returns `inReplyTo: null` so the post lands as a
+ * standalone message — the safer of the two failure modes.
  */
 function resolveDestinationThread(
   channelType: string,
@@ -978,14 +993,23 @@ function resolveDestinationThread(
 ): { threadId: string | null; inReplyTo: string | null } | null {
   try {
     const db = getInboundDb();
-    const row = db
+    const threadRow = db
       .prepare(
-        `SELECT thread_id, id FROM messages_in
+        `SELECT thread_id FROM messages_in
          WHERE channel_type = ? AND platform_id = ?
          ORDER BY seq DESC LIMIT 1`,
       )
-      .get(channelType, platformId) as { thread_id: string | null; id: string } | undefined;
-    if (row) return { threadId: row.thread_id, inReplyTo: row.id };
+      .get(channelType, platformId) as { thread_id: string | null } | undefined;
+    if (!threadRow) return null;
+    const replyRow = db
+      .prepare(
+        `SELECT id FROM messages_in
+         WHERE channel_type = ? AND platform_id = ?
+           AND kind != 'task' AND trigger = 1
+         ORDER BY seq DESC LIMIT 1`,
+      )
+      .get(channelType, platformId) as { id: string } | undefined;
+    return { threadId: threadRow.thread_id, inReplyTo: replyRow?.id ?? null };
   } catch (err) {
     log(`resolveDestinationThread error: ${err instanceof Error ? err.message : String(err)}`);
   }
