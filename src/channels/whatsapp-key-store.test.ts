@@ -189,7 +189,7 @@ describe('store path', () => {
   it("creates parent directories that don't exist yet", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-keys-'));
     tmpDirs.push(dir);
-    const deepPath = path.join(dir, 'data-v2', 'optimus', 'whatsapp', 'inbound-keys.db');
+    const deepPath = path.join(dir, 'data', 'whatsapp', 'inbound-keys.db');
     expect(fs.existsSync(path.dirname(deepPath))).toBe(false);
     const store = openInboundKeyStore(deepPath);
     expect(fs.existsSync(deepPath)).toBe(true);
