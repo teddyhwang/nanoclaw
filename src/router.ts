@@ -558,7 +558,7 @@ async function deliverToAgent(
   }
 
   const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);
-  writeSessionMessage(session.agent_group_id, session.id, {
+  await writeSessionMessage(session.agent_group_id, session.id, {
     id: messageId,
     kind: event.message.kind,
     timestamp: event.message.timestamp,

@@ -19,6 +19,15 @@ interface TranscribeOpts {
   mimeType?: string;
   model?: string;
   backend?: TranscriptionBackend;
+  /**
+   * Host-injected credential reader. Looked up first; .env / process.env
+   * are the fallback. Optimus stores `gemini_api_key` and `openai_api_key`
+   * in cybertron's `platform_credentials`, not in env — without this
+   * reader threaded through, every Optimus voice transcribe would return
+   * `VOICE_TRANSCRIPTION_UNAVAILABLE`. Standalone NanoClaw (no host) leaves
+   * this unset and falls through to env, which is the legacy posture.
+   */
+  getCredential?: (provider: string) => string | null | undefined;
 }
 
 export async function transcribeAudio(audioBuffer: Buffer, opts: TranscribeOpts = {}): Promise<string> {
@@ -28,8 +37,19 @@ export async function transcribeAudio(audioBuffer: Buffer, opts: TranscribeOpts 
   }
 
   const env = readEnvFile(['VOICE_TRANSCRIPTION_BACKEND', 'GEMINI_API_KEY', 'OPENAI_API_KEY']);
-  const geminiKey = process.env.GEMINI_API_KEY || env.GEMINI_API_KEY || undefined;
-  const openaiKey = process.env.OPENAI_API_KEY || env.OPENAI_API_KEY || undefined;
+  // Host-injected reader wins; env is the fallback. Wrapped in try/catch
+  // because the reader is host-owned and we don't want a misbehaving host
+  // to take down inbound message handling.
+  let injectedGemini: string | null | undefined;
+  let injectedOpenai: string | null | undefined;
+  try {
+    injectedGemini = opts.getCredential?.('gemini_api_key');
+    injectedOpenai = opts.getCredential?.('openai_api_key');
+  } catch (err) {
+    log.warn('platform-credential reader threw; falling back to env', { err });
+  }
+  const geminiKey = injectedGemini || process.env.GEMINI_API_KEY || env.GEMINI_API_KEY || undefined;
+  const openaiKey = injectedOpenai || process.env.OPENAI_API_KEY || env.OPENAI_API_KEY || undefined;
 
   const requested: TranscriptionBackend =
     opts.backend ?? (env.VOICE_TRANSCRIPTION_BACKEND === 'openai' ? 'openai' : 'gemini');

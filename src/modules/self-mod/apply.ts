@@ -55,7 +55,7 @@ export const applyInstallPackages: ApprovalHandler = async ({ session, payload, 
   log.info('Package install approved', { agentGroupId: session.agent_group_id, userId });
   try {
     await buildAgentGroupImage(session.agent_group_id);
-    writeSessionMessage(session.agent_group_id, session.id, {
+    await writeSessionMessage(session.agent_group_id, session.id, {
       id: `appr-note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       kind: 'chat',
       timestamp: new Date().toISOString(),
@@ -104,7 +104,7 @@ export const applyAddMcpServer: ApprovalHandler = async ({ session, payload, use
   };
   updateContainerConfigJson(agentGroup.id, 'mcp_servers', servers);
 
-  writeSessionMessage(session.agent_group_id, session.id, {
+  await writeSessionMessage(session.agent_group_id, session.id, {
     id: `appr-note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     kind: 'chat',
     timestamp: new Date().toISOString(),

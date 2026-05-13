@@ -18,6 +18,8 @@ import { deriveAttachmentName } from './attachment-naming.js';
 import { isSafeAttachmentName } from './attachment-safety.js';
 import type { OutboundFile } from './channels/adapter.js';
 import { DATA_DIR } from './config.js';
+import { getPlatformCredentialReader } from './engine/platform-credentials.js';
+import { transcribeAudio } from './media/transcription.js';
 import { getMessagingGroup } from './db/messaging-groups.js';
 import {
   createSession,
@@ -190,7 +192,7 @@ export function writeSessionRouting(agentGroupId: string, sessionId: string): vo
  * long-lived connection — see the "Cross-mount visibility invariants" note
  * at the top of this file.
  */
-export function writeSessionMessage(
+export async function writeSessionMessage(
   agentGroupId: string,
   sessionId: string,
   message: {
@@ -222,9 +224,12 @@ export function writeSessionMessage(
      */
     onWake?: 0 | 1;
   },
-): void {
-  // Extract base64 attachment data, save to inbox, replace with file paths
-  const content = extractAttachmentFiles(agentGroupId, sessionId, message.id, message.content);
+): Promise<void> {
+  // Extract base64 attachment data, save to inbox, replace with file paths.
+  // Also runs the per-attachment audio-transcription pass so voice
+  // messages land on disk with `att.transcript` populated for the
+  // container formatter to render.
+  const content = await extractAttachmentFiles(agentGroupId, sessionId, message.id, message.content);
 
   const db = openInboundDb(agentGroupId, sessionId);
   try {
@@ -267,12 +272,12 @@ export function writeSessionMessage(
  *   4. `wx` flag on writeFileSync to refuse following a pre-existing symlink
  *      at the target file path or overwriting any existing file.
  */
-function extractAttachmentFiles(
+async function extractAttachmentFiles(
   agentGroupId: string,
   sessionId: string,
   messageId: string,
   contentStr: string,
-): string {
+): Promise<string> {
   let parsed: Record<string, unknown>;
   try {
     parsed = JSON.parse(contentStr);
@@ -329,12 +334,46 @@ function extractAttachmentFiles(
       continue;
     }
 
+    // Decode the base64 buffer ONCE here. Used immediately for the
+    // optional transcription pass (audio attachments) AND for the
+    // write-to-inbox step. Avoids the cost of decoding twice for a
+    // single voice message.
+    const buffer = Buffer.from(att.data as string, 'base64');
+
+    // Transcription pass — audio attachments get a host-side
+    // transcript stamped onto `att.transcript` before the file lands
+    // on disk. Channel-agnostic: every adapter that emits an audio
+    // attachment with `data` (post-S367 WhatsApp + chat-sdk-bridge
+    // channels) gets transcribed once here. Adapters MUST NOT
+    // transcribe inline anymore — the engine owns the single site.
+    //
+    // Failures fall through to the file-write below: the agent still
+    // sees the attachment marker; only the transcript text is missing.
+    if (isVoiceAttachment(att)) {
+      const reader = getPlatformCredentialReader();
+      try {
+        const transcript = await transcribeAudio(buffer, {
+          filename,
+          mimeType: typeof att.mimeType === 'string' ? att.mimeType : undefined,
+          getCredential: reader ?? undefined,
+        });
+        att.transcript = transcript;
+        changed = true;
+      } catch (err) {
+        log.warn('Voice transcription threw — continuing without transcript', {
+          messageId,
+          filename,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
     const filePath = path.join(inboxDir, filename);
     try {
       // wx = exclusive create. Refuses to follow a pre existing symlink or
       // overwrite any existing file. The host expects to be the sole writer
       // of these attachments.
-      fs.writeFileSync(filePath, Buffer.from(att.data as string, 'base64'), { flag: 'wx' });
+      fs.writeFileSync(filePath, buffer, { flag: 'wx' });
     } catch (err: unknown) {
       const e = err as NodeJS.ErrnoException;
       if (e.code === 'EEXIST') {
@@ -355,6 +394,18 @@ function extractAttachmentFiles(
   }
 
   return changed ? JSON.stringify(parsed) : contentStr;
+}
+
+/**
+ * Identify audio/voice attachments. Matches chat-sdk-bridge's audio type
+ * tag AND any attachment with an `audio/` mimeType (catches doc-typed
+ * voice memos some adapters surface).
+ */
+function isVoiceAttachment(att: Record<string, unknown>): boolean {
+  const type = typeof att.type === 'string' ? att.type : '';
+  if (type === 'audio' || type === 'voice') return true;
+  const mime = typeof att.mimeType === 'string' ? att.mimeType : '';
+  return mime.startsWith('audio/');
 }
 
 /** Open the inbound DB for a session (host reads/writes). */
@@ -410,14 +461,14 @@ export function openSessionDb(agentGroupId: string, sessionId: string): Database
 }
 
 /** Write a system response to a session's inbound.db so the container's findQuestionResponse() picks it up. */
-export function writeSystemResponse(
+export async function writeSystemResponse(
   agentGroupId: string,
   sessionId: string,
   requestId: string,
   status: string,
   result: Record<string, unknown>,
-): void {
-  writeSessionMessage(agentGroupId, sessionId, {
+): Promise<void> {
+  await writeSessionMessage(agentGroupId, sessionId, {
     id: `sys-resp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     kind: 'system',
     timestamp: new Date().toISOString(),

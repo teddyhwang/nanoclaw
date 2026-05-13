@@ -85,7 +85,7 @@ describe('session manager', () => {
     });
   });
 
-  it('should create session folder and both DBs', () => {
+  it('should create session folder and both DBs', async () => {
     initSessionFolder('ag-1', 'sess-test');
     const dir = sessionDir('ag-1', 'sess-test');
     expect(fs.existsSync(dir)).toBe(true);
@@ -112,7 +112,7 @@ describe('session manager', () => {
     outDb.close();
   });
 
-  it('should reject outbound attachment filenames that escape the message outbox', () => {
+  it('should reject outbound attachment filenames that escape the message outbox', async () => {
     initSessionFolder('ag-1', 'sess-test');
     const dir = sessionDir('ag-1', 'sess-test');
     const msgOutbox = path.join(dir, 'outbox', 'msg-1');
@@ -124,7 +124,7 @@ describe('session manager', () => {
     expect(readOutboxFiles('ag-1', 'sess-test', 'msg-1', ['../../../../../outside.txt'])).toBeUndefined();
   });
 
-  it('should reject outbound attachment symlinks that escape the message outbox', () => {
+  it('should reject outbound attachment symlinks that escape the message outbox', async () => {
     initSessionFolder('ag-1', 'sess-test');
     const dir = sessionDir('ag-1', 'sess-test');
     const msgOutbox = path.join(dir, 'outbox', 'msg-1');
@@ -137,7 +137,7 @@ describe('session manager', () => {
     expect(readOutboxFiles('ag-1', 'sess-test', 'msg-1', ['safe-name.txt'])).toBeUndefined();
   });
 
-  it('should not recursively delete outside the outbox for unsafe message ids', () => {
+  it('should not recursively delete outside the outbox for unsafe message ids', async () => {
     initSessionFolder('ag-1', 'sess-test');
     const victimDir = path.join(TEST_DIR, 'victim-dir');
     fs.mkdirSync(victimDir, { recursive: true });
@@ -148,7 +148,7 @@ describe('session manager', () => {
     expect(fs.existsSync(path.join(victimDir, 'keep.txt'))).toBe(true);
   });
 
-  it('should still read and clear normal basename outbox files', () => {
+  it('should still read and clear normal basename outbox files', async () => {
     initSessionFolder('ag-1', 'sess-test');
     const dir = sessionDir('ag-1', 'sess-test');
     const msgOutbox = path.join(dir, 'outbox', 'msg-1');
@@ -164,7 +164,7 @@ describe('session manager', () => {
     expect(fs.existsSync(msgOutbox)).toBe(false);
   });
 
-  it('should reject inbound attachment writes through a pre-placed symlinked inbox dir', () => {
+  it('should reject inbound attachment writes through a pre-placed symlinked inbox dir', async () => {
     initSessionFolder('ag-1', 'sess-test');
     const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
 
@@ -176,7 +176,7 @@ describe('session manager', () => {
     fs.mkdirSync(evilTarget, { recursive: true });
     fs.symlinkSync(evilTarget, path.join(inboxRoot, 'msg-evil'));
 
-    writeSessionMessage('ag-1', session.id, {
+    await writeSessionMessage('ag-1', session.id, {
       id: 'msg-evil',
       kind: 'chat',
       timestamp: now(),
@@ -189,7 +189,7 @@ describe('session manager', () => {
     expect(fs.existsSync(path.join(evilTarget, 'photo.png'))).toBe(false);
   });
 
-  it('should refuse to follow a pre-existing symlink at the inbound attachment path', () => {
+  it('should refuse to follow a pre-existing symlink at the inbound attachment path', async () => {
     initSessionFolder('ag-1', 'sess-test');
     const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
 
@@ -201,7 +201,7 @@ describe('session manager', () => {
     fs.writeFileSync(outside, 'ORIGINAL');
     fs.symlinkSync(outside, path.join(inboxDir, 'photo.png'));
 
-    writeSessionMessage('ag-1', session.id, {
+    await writeSessionMessage('ag-1', session.id, {
       id: 'msg-sym',
       kind: 'chat',
       timestamp: now(),
@@ -214,11 +214,11 @@ describe('session manager', () => {
     expect(fs.readFileSync(outside, 'utf-8')).toBe('ORIGINAL');
   });
 
-  it('should reject inbound attachments when messageId is unsafe', () => {
+  it('should reject inbound attachments when messageId is unsafe', async () => {
     initSessionFolder('ag-1', 'sess-test');
     const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
 
-    writeSessionMessage('ag-1', session.id, {
+    await writeSessionMessage('ag-1', session.id, {
       id: '../../escape',
       kind: 'chat',
       timestamp: now(),
@@ -234,11 +234,11 @@ describe('session manager', () => {
     }
   });
 
-  it('should still save inbound attachments with safe basenames', () => {
+  it('should still save inbound attachments with safe basenames', async () => {
     initSessionFolder('ag-1', 'sess-test');
     const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
 
-    writeSessionMessage('ag-1', session.id, {
+    await writeSessionMessage('ag-1', session.id, {
       id: 'msg-ok',
       kind: 'chat',
       timestamp: now(),
@@ -253,7 +253,7 @@ describe('session manager', () => {
     expect(fs.readFileSync(expected, 'utf-8')).toBe('PNGBYTES');
   });
 
-  it('should resolve to existing session (shared mode)', () => {
+  it('should resolve to existing session (shared mode)', async () => {
     const { session: s1, created: c1 } = resolveSession('ag-1', 'mg-1', null, 'shared');
     expect(c1).toBe(true);
 
@@ -262,23 +262,23 @@ describe('session manager', () => {
     expect(s2.id).toBe(s1.id);
   });
 
-  it('should create separate sessions per thread (per-thread mode)', () => {
+  it('should create separate sessions per thread (per-thread mode)', async () => {
     const { session: s1 } = resolveSession('ag-1', 'mg-1', 'thread-1', 'per-thread');
     const { session: s2 } = resolveSession('ag-1', 'mg-1', 'thread-2', 'per-thread');
     expect(s1.id).not.toBe(s2.id);
   });
 
-  it('should reuse session for same thread', () => {
+  it('should reuse session for same thread', async () => {
     const { session: s1 } = resolveSession('ag-1', 'mg-1', 'thread-1', 'per-thread');
     const { session: s2, created } = resolveSession('ag-1', 'mg-1', 'thread-1', 'per-thread');
     expect(created).toBe(false);
     expect(s2.id).toBe(s1.id);
   });
 
-  it('should write message to inbound DB', () => {
+  it('should write message to inbound DB', async () => {
     const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
 
-    writeSessionMessage('ag-1', session.id, {
+    await writeSessionMessage('ag-1', session.id, {
       id: 'msg-1',
       kind: 'chat',
       timestamp: now(),
@@ -305,11 +305,11 @@ describe('session manager', () => {
     expect(JSON.parse(rows[0].content).text).toBe('Hello');
   });
 
-  it('should update last_active on message write', () => {
+  it('should update last_active on message write', async () => {
     const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
     expect(getSession(session.id)!.last_active).toBeNull();
 
-    writeSessionMessage('ag-1', session.id, {
+    await writeSessionMessage('ag-1', session.id, {
       id: 'msg-1',
       kind: 'chat',
       timestamp: now(),
@@ -319,7 +319,7 @@ describe('session manager', () => {
     expect(getSession(session.id)!.last_active).not.toBeNull();
   });
 
-  it('should refuse path-traversal in attachment filenames', () => {
+  it('should refuse path-traversal in attachment filenames', async () => {
     // Regression: attachment.name comes from untrusted senders (E2EE-protected
     // chat platforms can't sanitize it server-side). Without the guard, a
     // `../../../tmp/pwned` filename escapes the inbox dir and writes anywhere
@@ -329,7 +329,7 @@ describe('session manager', () => {
     const escapeTarget = path.join('/tmp', 'nanoclaw-traversal-canary');
     if (fs.existsSync(escapeTarget)) fs.rmSync(escapeTarget);
 
-    writeSessionMessage('ag-1', session.id, {
+    await writeSessionMessage('ag-1', session.id, {
       id: 'msg-attack',
       kind: 'chat',
       timestamp: now(),
@@ -878,7 +878,7 @@ describe('routing metadata preservation', () => {
 });
 
 describe('writeSessionRouting', () => {
-  it('populates session_routing from the messaging group', () => {
+  it('populates session_routing from the messaging group', async () => {
     createAgentGroup({
       id: 'ag-1',
       name: 'Agent',
@@ -915,7 +915,7 @@ describe('writeSessionRouting', () => {
     expect(row!.thread_id).toBeNull();
   });
 
-  it('writes null routing for agent-shared session (no messaging group)', () => {
+  it('writes null routing for agent-shared session (no messaging group)', async () => {
     createAgentGroup({
       id: 'ag-1',
       name: 'Agent',
@@ -943,7 +943,7 @@ describe('writeSessionRouting', () => {
     expect(row!.thread_id).toBeNull();
   });
 
-  it('includes thread_id from per-thread session', () => {
+  it('includes thread_id from per-thread session', async () => {
     createAgentGroup({
       id: 'ag-1',
       name: 'Agent',
@@ -982,7 +982,7 @@ describe('writeSessionRouting', () => {
 });
 
 describe('agent-shared session resolution', () => {
-  it('resolves to the same session on repeated calls', () => {
+  it('resolves to the same session on repeated calls', async () => {
     createAgentGroup({
       id: 'ag-1',
       name: 'Agent',
@@ -999,7 +999,7 @@ describe('agent-shared session resolution', () => {
     expect(s1.id).toBe(s2.id);
   });
 
-  it('agent-shared session has null messaging_group_id', () => {
+  it('agent-shared session has null messaging_group_id', async () => {
     createAgentGroup({
       id: 'ag-1',
       name: 'Agent',
@@ -1165,7 +1165,7 @@ describe('agent-to-agent routing', () => {
 });
 
 describe('delivery', () => {
-  it('should detect undelivered messages in outbound DB', () => {
+  it('should detect undelivered messages in outbound DB', async () => {
     createAgentGroup({
       id: 'ag-1',
       name: 'Agent',

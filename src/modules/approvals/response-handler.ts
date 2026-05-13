@@ -58,7 +58,9 @@ async function handleRegisteredApproval(
   }
 
   const notify = (text: string): void => {
-    writeSessionMessage(session.agent_group_id, session.id, {
+    // Fire-and-forget — system text notifications never carry audio
+    // attachments, so the engine's transcription pass is a no-op.
+    void writeSessionMessage(session.agent_group_id, session.id, {
       id: `appr-note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       kind: 'chat',
       timestamp: new Date().toISOString(),
@@ -66,7 +68,7 @@ async function handleRegisteredApproval(
       channelType: 'agent',
       threadId: null,
       content: JSON.stringify({ text, sender: 'system', senderId: 'system' }),
-    });
+    }).catch((err) => log.error('writeSessionMessage failed in notify', { err }));
   };
 
   if (selectedOption !== 'approve') {

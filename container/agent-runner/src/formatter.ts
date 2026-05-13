@@ -439,10 +439,20 @@ export function formatAttachments(attachments: any[] | undefined): string {
       : url
         ? `[${type}: ${escapeXml(name)} (${escapeXml(url)})]`
         : `[${type}: ${escapeXml(name)}]`;
-    // Text inlining only applies to non-media attachments. Images, video,
-    // and audio have their own pipelines (multimodal blocks, transcription)
-    // that own those bytes; surfacing them again as text would duplicate.
-    if (type === 'image' || type === 'video' || type === 'audio') {
+    // Audio attachments may carry a host-transcribed text via
+    // `att.transcript` (engine session-manager runs this pass for every
+    // channel). Surface it directly so the agent sees what was said,
+    // not an opaque `[audio: voice.ogg]` marker. Images and video have
+    // their own multimodal pipelines (see extractImageAttachments)
+    // that pull bytes out separately.
+    if (type === 'audio' || type === 'voice') {
+      const transcript = typeof a.transcript === 'string' ? a.transcript.trim() : '';
+      if (transcript.length > 0) {
+        return `${baseMarker}\n[Voice: ${escapeXml(transcript)}]`;
+      }
+      return baseMarker;
+    }
+    if (type === 'image' || type === 'video') {
       return baseMarker;
     }
     if (!isTextEligible(a)) return baseMarker;

@@ -394,23 +394,13 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
             }
           }
           if (buffer) entry.data = buffer.toString('base64');
-          // Transcribe voice/audio attachments host-side so the agent sees
-          // text instead of opaque base64. Mirrors v1 behavior
-          // (apps/nanoclaw/src/transcription.ts).
-          if (buffer && att.mimeType && att.mimeType.startsWith('audio/')) {
-            const { transcribeAudio } = await import('../media/transcription.js');
-            try {
-              entry.transcript = await transcribeAudio(buffer, {
-                mimeType: att.mimeType,
-                filename: att.name ?? 'voice.ogg',
-              });
-            } catch (err) {
-              log.warn('Failed to transcribe audio attachment', {
-                name: att.name,
-                err,
-              });
-            }
-          }
+          // Audio transcription is no longer done here. The engine's
+          // session-manager.extractAttachmentFiles runs a single
+          // transcription pass for every adapter (chat-sdk channels +
+          // native WhatsApp). Doing it inline here would re-transcribe
+          // the same buffer; doing it host-side meant standalone
+          // NanoClaw silently skipped it for lack of host wiring. Both
+          // issues resolved by the engine-side single site.
         } else if (att.type === 'image' || att.type === 'video' || att.type === 'audio') {
           // Loud failure for media types — text/file we can fall through
           // and the agent's formatter will render `[file: name]`. Media

@@ -127,7 +127,10 @@ function channelTypeOf(userId: string): string {
 
 /** Send a system chat to the agent's session. Used by callers and by the response handler. */
 export function notifyAgent(session: Session, text: string): void {
-  writeSessionMessage(session.agent_group_id, session.id, {
+  // Fire-and-forget — system text notifications never carry audio
+  // attachments, so the engine's transcription pass is a no-op and we
+  // don't need to block the caller on it.
+  void writeSessionMessage(session.agent_group_id, session.id, {
     id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     kind: 'chat',
     timestamp: new Date().toISOString(),
@@ -135,7 +138,7 @@ export function notifyAgent(session: Session, text: string): void {
     channelType: 'agent',
     threadId: null,
     content: JSON.stringify({ text, sender: 'system', senderId: 'system' }),
-  });
+  }).catch((err) => log.error('writeSessionMessage failed in notifyAgent', { err }));
   const fresh = getSession(session.id);
   if (fresh) {
     wakeContainer(fresh).catch((err) => log.error('Failed to wake container after notification', { err }));

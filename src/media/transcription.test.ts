@@ -47,4 +47,53 @@ describe('transcribeAudio', () => {
     const out = await transcribeAudio(Buffer.from('a'));
     expect(out).toBe('mocked transcript');
   });
+
+  it('uses opts.getCredential before falling back to env (Optimus posture)', async () => {
+    // No env keys — only the injected reader has one.
+    vi.doMock('openai', () => ({
+      default: class {
+        audio = {
+          transcriptions: {
+            create: async () => 'injected-cred transcript',
+          },
+        };
+        constructor(_: unknown) {}
+      },
+      toFile: async (b: Buffer) => b,
+    }));
+    const out = await transcribeAudio(Buffer.from('a'), {
+      backend: 'openai',
+      getCredential: (provider) => (provider === 'openai_api_key' ? 'sk-from-cybertron' : null),
+    });
+    expect(out).toBe('injected-cred transcript');
+  });
+
+  it('returns UNAVAILABLE when injected reader has nothing and env is also empty', async () => {
+    const out = await transcribeAudio(Buffer.from('a'), {
+      getCredential: () => null,
+    });
+    expect(out).toBe(VOICE_TRANSCRIPTION_UNAVAILABLE);
+  });
+
+  it('does not crash when the injected reader throws — falls back to env', async () => {
+    process.env.OPENAI_API_KEY = 'sk-env-fallback';
+    vi.doMock('openai', () => ({
+      default: class {
+        audio = {
+          transcriptions: {
+            create: async () => 'env-fallback transcript',
+          },
+        };
+        constructor(_: unknown) {}
+      },
+      toFile: async (b: Buffer) => b,
+    }));
+    const out = await transcribeAudio(Buffer.from('a'), {
+      backend: 'openai',
+      getCredential: () => {
+        throw new Error('cybertron-db-down');
+      },
+    });
+    expect(out).toBe('env-fallback transcript');
+  });
 });

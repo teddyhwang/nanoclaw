@@ -30,6 +30,12 @@ export {
 } from './credentials.js';
 
 export {
+  setPlatformCredentialReader,
+  getPlatformCredentialReader,
+  type PlatformCredentialReader,
+} from './platform-credentials.js';
+
+export {
   registerSpawnContribution,
   collectSpawnContributions,
   type SpawnContribution,
