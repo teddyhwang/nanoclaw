@@ -20,7 +20,8 @@
 import fs from 'fs';
 
 import { registerDeliveryAction } from '../../delivery.js';
-import { heartbeatPath } from '../../session-manager.js';
+import { getDeliveredIds, getDueOutboundMessages } from '../../db/session-db.js';
+import { heartbeatPath, openInboundDb, openOutboundDb } from '../../session-manager.js';
 
 const TYPING_REFRESH_MS = 4000;
 /**
@@ -91,6 +92,50 @@ function isHeartbeatFresh(agentGroupId: string, sessionId: string): boolean {
   }
 }
 
+/**
+ * True if the session has at least one user-facing outbound message that
+ * the host hasn't delivered yet. Used by the refresh tick to skip a
+ * `setTyping` call when delivery is imminent — otherwise an in-flight
+ * `setTyping` HTTP request started ~1–4s before delivery arrives at the
+ * platform *after* the message, and the indicator visibly lingers for
+ * several seconds. Pure read-only DB peek; both handles are closed
+ * before return.
+ *
+ * Local fork patch (Optimus): upstream NanoClaw doesn't see the lingering
+ * indicator often enough to file it. Kept narrow on purpose.
+ */
+function hasPendingUserFacingOutbound(agentGroupId: string, sessionId: string): boolean {
+  let outDb: ReturnType<typeof openOutboundDb> | null = null;
+  let inDb: ReturnType<typeof openInboundDb> | null = null;
+  try {
+    outDb = openOutboundDb(agentGroupId, sessionId);
+    const due = getDueOutboundMessages(outDb);
+    if (due.length === 0) return false;
+    inDb = openInboundDb(agentGroupId, sessionId);
+    const delivered = getDeliveredIds(inDb);
+    for (const msg of due) {
+      if (delivered.has(msg.id)) continue;
+      if (msg.kind === 'system') continue;
+      if (msg.channel_type === 'agent') continue;
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  } finally {
+    try {
+      outDb?.close();
+    } catch {
+      /* best-effort */
+    }
+    try {
+      inDb?.close();
+    } catch {
+      /* best-effort */
+    }
+  }
+}
+
 export function startTypingRefresh(
   sessionId: string,
   agentGroupId: string,
@@ -122,6 +167,16 @@ export function startTypingRefresh(
     // interval running so we resume automatically once the pause
     // expires.
     if (entry.pausedUntil > Date.now()) return;
+
+    // A user-facing outbound row is queued and the delivery loop will
+    // post it within ~1s. Skip the tick — firing setTyping now risks
+    // the HTTP call landing AFTER the message, leaving the indicator
+    // visible for several seconds post-delivery (Discord caches the
+    // typing event for ~10s). Keep the refresher running; if delivery
+    // happens, `pauseTypingRefreshAfterDelivery` extends the skip
+    // window. If it doesn't (e.g. delivery fails), the next tick
+    // resumes typing normally.
+    if (hasPendingUserFacingOutbound(entry.agentGroupId, sessionId)) return;
 
     const withinGrace = Date.now() - entry.startedAt < TYPING_GRACE_MS;
     if (withinGrace || isHeartbeatFresh(entry.agentGroupId, sessionId)) {

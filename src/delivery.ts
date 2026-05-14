@@ -212,6 +212,16 @@ async function drainSession(session: Session): Promise<void> {
 
     for (const msg of undelivered) {
       try {
+        // Pause the typing refresh *before* dispatching to the channel so
+        // any tick firing concurrently with deliverMessage's HTTP call
+        // skips its own setTyping. Without this, a tick that entered
+        // triggerTyping ~1s before delivery can land at Discord after
+        // the message, leaving the indicator visible for several
+        // seconds. Same guard as the post-success call, but earlier.
+        // Skip for internal traffic — same reasoning as below.
+        if (msg.kind !== 'system' && msg.channel_type !== 'agent') {
+          pauseTypingRefreshAfterDelivery(session.id);
+        }
         const platformMsgId = await deliverMessage(msg, session, inDb);
         markDelivered(inDb, msg.id, platformMsgId ?? null);
         deliveryAttempts.delete(msg.id);
