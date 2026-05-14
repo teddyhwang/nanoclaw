@@ -108,6 +108,23 @@ export function getOutboundDb(): Database {
         updated_at               TEXT NOT NULL
       );
     `);
+    // task_fires: per-fire history of scheduled-task turns (series_id,
+    // task_id, status, assistant_text, dispatched). Forward-compat for
+    // outbound.dbs created before this table existed. See
+    // src/db/schema.ts for the column docstring.
+    _outbound.exec(`
+      CREATE TABLE IF NOT EXISTS task_fires (
+        id             TEXT PRIMARY KEY,
+        series_id      TEXT NOT NULL,
+        task_id        TEXT NOT NULL,
+        fired_at       TEXT NOT NULL,
+        status         TEXT NOT NULL,
+        assistant_text TEXT,
+        dispatched     TEXT NOT NULL DEFAULT '[]',
+        error_message  TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_task_fires_series ON task_fires(series_id, fired_at);
+    `);
   }
   return _outbound;
 }
@@ -248,6 +265,17 @@ export function initTestSessionDb(): { inbound: Database; outbound: Database } {
       tool_started_at          TEXT,
       updated_at               TEXT NOT NULL
     );
+    CREATE TABLE task_fires (
+      id             TEXT PRIMARY KEY,
+      series_id      TEXT NOT NULL,
+      task_id        TEXT NOT NULL,
+      fired_at       TEXT NOT NULL,
+      status         TEXT NOT NULL,
+      assistant_text TEXT,
+      dispatched     TEXT NOT NULL DEFAULT '[]',
+      error_message  TEXT
+    );
+    CREATE INDEX idx_task_fires_series ON task_fires(series_id, fired_at);
   `);
 
   return { inbound: _inbound, outbound: _outbound };

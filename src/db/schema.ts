@@ -263,4 +263,29 @@ CREATE TABLE IF NOT EXISTS container_state (
   tool_started_at          TEXT,
   updated_at               TEXT NOT NULL
 );
+
+-- Per-fire history of scheduled-task turns. One row per task-triggered
+-- container turn. Persists across recurrence cloning (host-sweep clones
+-- the messages_in task row on completion; series_id stays stable), so
+-- the dashboard can show "what this recurring task has done over time"
+-- by grouping rows by series_id.
+--
+-- status: 'completed' (agent dispatched >=1 outbound message),
+--         'silent'    (turn finished with no user-facing output --
+--                      e.g. silent maintenance tasks, internal-only output),
+--         'error'     (provider/runtime error during the turn).
+-- assistant_text: full SDK result text BEFORE <message> parsing, so the
+--   dashboard sees the model's whole output (scratchpad + wrapped blocks).
+-- dispatched: JSON array of { destination, body } actually sent.
+CREATE TABLE IF NOT EXISTS task_fires (
+  id             TEXT PRIMARY KEY,
+  series_id      TEXT NOT NULL,
+  task_id        TEXT NOT NULL,
+  fired_at       TEXT NOT NULL,
+  status         TEXT NOT NULL,
+  assistant_text TEXT,
+  dispatched     TEXT NOT NULL DEFAULT '[]',
+  error_message  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_task_fires_series ON task_fires(series_id, fired_at);
 `;

@@ -31,6 +31,11 @@ export interface MessageInRow {
   status: string;
   process_after: string | null;
   recurrence: string | null;
+  /** Stable identity across recurrences. Recurring tasks get a fresh row id
+   *  per occurrence (host-sweep clones the row); `series_id` is identical
+   *  across the series so per-task history aggregates correctly. Null on
+   *  pre-migration rows that never got backfilled. */
+  series_id: string | null;
   tries: number;
   /** 1 = wake-eligible (default); 0 = accumulated context only */
   trigger: number;

@@ -1,6 +1,7 @@
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
 import { writeMessageOut } from './db/messages-out.js';
+import { writeTaskFire, type TaskFireDispatch } from './db/task-fires.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import {
   clearContinuation,
@@ -263,6 +264,17 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     const triggerRow = keep.find((m) => m.trigger === 1) ?? keep[0];
     const activeSender = extractMessageSender(triggerRow);
 
+    // Task-fire tracking: if a task row triggered this stream, capture its
+    // series_id + id so processQuery can write a task_fires row when the
+    // stream ends. `series_id` falls back to `id` for pre-migration rows
+    // (matches the host-side backfill in src/db/session-db.ts:349). Only
+    // the kind='task' branch participates — chat-triggered wakes don't
+    // produce fire rows.
+    const taskTrigger = keep.find((m) => m.trigger === 1 && m.kind === 'task');
+    const taskFireContext = taskTrigger
+      ? { seriesId: taskTrigger.series_id ?? taskTrigger.id, taskId: taskTrigger.id }
+      : null;
+
     // Load any inbound image attachments as Anthropic vision content blocks.
     // The host wrote bytes to <sessDir>/inbox/<msgId>/<file> (sized to fit
     // the 5MB API cap by chat-sdk-bridge before insert), and the session dir
@@ -323,7 +335,14 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // can stamp it on outbound rows — needed for a2a return-path routing.
     setCurrentInReplyTo(routing.inReplyTo);
     try {
-      const result = await processQuery(query, routing, processingIds, config.providerName, activeSender);
+      const result = await processQuery(
+        query,
+        routing,
+        processingIds,
+        config.providerName,
+        activeSender,
+        taskFireContext,
+      );
       if (result.continuation && result.continuation !== continuation) {
         const isNewThread = continuation === undefined;
         continuation = result.continuation;
@@ -364,6 +383,26 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         });
       } else {
         log(`Suppressing user-visible error for task-only batch: ${errMsg}`);
+      }
+
+      // Task-fire error record. Captures the error message so the
+      // dashboard can show "this fire failed and why" instead of leaving
+      // the fire row missing entirely (which would look like the task
+      // simply didn't run).
+      if (taskFireContext) {
+        try {
+          writeTaskFire({
+            id: generateId(),
+            seriesId: taskFireContext.seriesId,
+            taskId: taskFireContext.taskId,
+            status: 'error',
+            assistantText: null,
+            dispatched: [],
+            errorMessage: errMsg,
+          });
+        } catch (writeErr) {
+          log(`task_fires error-write failed: ${writeErr instanceof Error ? writeErr.message : String(writeErr)}`);
+        }
       }
     } finally {
       clearCurrentInReplyTo();
@@ -418,16 +457,43 @@ interface QueryResult {
   continuation?: string;
 }
 
+/**
+ * Per-stream task-fire tracking. Set when the initial batch that opened
+ * this query stream included a `kind='task'` trigger row — we record one
+ * task_fires row at stream end (or on error) capturing what the agent
+ * produced. Follow-up pushes within the same stream are user-driven and
+ * don't count as new fires (a new task fire would arrive on a fresh
+ * wake via host-sweep). seriesId is the stable per-task identity;
+ * taskId is the concrete messages_in.id that fired.
+ */
+interface TaskFireContext {
+  seriesId: string;
+  taskId: string;
+}
+
 async function processQuery(
   query: AgentQuery,
   routing: RoutingContext,
   initialBatchIds: string[],
   providerName: string,
   activeSender: string | null,
+  taskFireContext: TaskFireContext | null,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
   let unwrappedNudged = false;
+  // Task-fire accumulators. We record one row per stream, summarizing the
+  // entire task-triggered turn even if multiple result events arrive
+  // (e.g. unwrapped-nudge re-prompt produces a second result). assistantText
+  // tracks the latest non-empty result text; dispatchedAccum collects every
+  // <message to=...> block actually sent (or safety-net dispatch). On
+  // stream end we write the fire — status='completed' when something was
+  // dispatched, 'silent' otherwise. Errors set `streamErrored` so the
+  // finally skips the normal-completion write; the outer catch in
+  // startMessageLoop writes the error fire instead.
+  const taskFireDispatched: TaskFireDispatch[] = [];
+  let taskFireAssistantText: string | null = null;
+  let streamErrored = false;
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open avoids
@@ -734,6 +800,12 @@ async function processQuery(
   }, ACTIVE_POLL_INTERVAL_MS);
 
   try {
+    try {
+      // Inner try only exists to flip streamErrored before re-throwing —
+      // the outer try/finally still owns interval cleanup + task-fire
+      // write. Without this flag we'd write a 'silent'/'completed' row
+      // in the finally below AND an 'error' row in the outer caller's
+      // catch, double-counting the fire.
     for await (const event of query.events) {
       handleEvent(event, routing);
       touchHeartbeat();
@@ -756,7 +828,11 @@ async function processQuery(
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
         if (event.text) {
-          const { hasUnwrapped } = dispatchResultText(event.text, routing);
+          if (taskFireContext) taskFireAssistantText = event.text;
+          const { hasUnwrapped, dispatched } = dispatchResultText(event.text, routing);
+          if (taskFireContext && dispatched.length > 0) {
+            taskFireDispatched.push(...dispatched);
+          }
           if (hasUnwrapped && !unwrappedNudged) {
             unwrappedNudged = true;
             const destinations = getAllDestinations();
@@ -771,10 +847,33 @@ async function processQuery(
         }
       }
     }
+    } catch (err) {
+      streamErrored = true;
+      throw err;
+    }
   } finally {
     done = true;
     clearInterval(pollHandle);
     clearInterval(keepaliveHandle);
+    // Record task fire on natural stream end. Status reflects whether the
+    // agent dispatched anything ('completed') or finished silent
+    // ('silent' — e.g. maintenance task that intentionally didn't post).
+    // Error fires are written by the outer caller (startMessageLoop's
+    // catch) so we skip when the stream errored.
+    if (taskFireContext && !streamErrored) {
+      try {
+        writeTaskFire({
+          id: generateId(),
+          seriesId: taskFireContext.seriesId,
+          taskId: taskFireContext.taskId,
+          status: taskFireDispatched.length > 0 ? 'completed' : 'silent',
+          assistantText: taskFireAssistantText,
+          dispatched: taskFireDispatched,
+        });
+      } catch (err) {
+        log(`task_fires write failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
   }
 
   return { continuation: queryContinuation };
@@ -809,17 +908,27 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
  */
 // Exported for tests. Local-fork patch: the safety-net branch needs
 // focused coverage so the silent-drop class of bug stays caught.
-// Returns { sent, hasUnwrapped } so callers can also kick off the
+// Returns { sent, hasUnwrapped, dispatched } so callers can also kick off the
 // upstream nudge re-prompt — safety-net delivery is belt-and-suspenders
 // against silent drops, the nudge teaches the agent to wrap correctly
-// next turn.
-export function dispatchResultText(text: string, routing: RoutingContext): { sent: number; hasUnwrapped: boolean } {
+// next turn. `dispatched` is the list of { destination, body } pairs
+// actually sent (post-dedup, post-safety-net) so the poll-loop's
+// task_fires writer can record what the agent emitted on a task fire.
+export interface DispatchedMessage {
+  destination: string;
+  body: string;
+}
+export function dispatchResultText(
+  text: string,
+  routing: RoutingContext,
+): { sent: number; hasUnwrapped: boolean; dispatched: DispatchedMessage[] } {
   const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
 
   let match: RegExpExecArray | null;
   let sent = 0;
   let lastIndex = 0;
   const scratchpadParts: string[] = [];
+  const dispatched: DispatchedMessage[] = [];
   // Per-turn dedup: model occasionally emits two near-identical
   // <message to="X">…</message> blocks in a single result (observed
   // 2026-05-12 in the Tico+Janathan WA group — second block differed
@@ -851,6 +960,7 @@ export function dispatchResultText(text: string, routing: RoutingContext): { sen
     }
     seen.add(dedupKey);
     sendToDestination(dest, body, routing);
+    dispatched.push({ destination: toName, body });
     sent++;
   }
   if (lastIndex < text.length) {
@@ -878,7 +988,11 @@ export function dispatchResultText(text: string, routing: RoutingContext): { sen
     // gets something now" half, the nudge is the "agent learns to wrap
     // next turn" half. Don't emit silent_turn_complete here — the
     // safety-net just wrote a user-facing message.
-    return { sent, hasUnwrapped };
+    // Surface the safety-net delivery in `dispatched` so task_fires
+    // records that *something* was sent (status='completed'), with a
+    // synthetic destination name marking the degraded path.
+    dispatched.push({ destination: '__safety_net__', body: scratchpad });
+    return { sent, hasUnwrapped, dispatched };
   }
 
   // Truly silent turn: no <message> blocks AND no user-facing scratchpad
@@ -891,7 +1005,7 @@ export function dispatchResultText(text: string, routing: RoutingContext): { sen
   if (sent === 0) {
     emitSilentTurnComplete();
   }
-  return { sent, hasUnwrapped };
+  return { sent, hasUnwrapped, dispatched };
 }
 
 /**
