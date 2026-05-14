@@ -23,7 +23,8 @@ import { getDb, hasTable } from '../db/connection.js';
 import { getAgentGroup, getAllAgentGroups } from '../db/agent-groups.js';
 import { getMessagingGroupAgents, getMessagingGroupWithAgentCount } from '../db/messaging-groups.js';
 import { getActiveSessions, getRunningSessions, getSession } from '../db/sessions.js';
-import type { AgentGroup, MessagingGroup, MessagingGroupAgent, Session } from '../types.js';
+import { getContainerConfig } from '../db/container-configs.js';
+import type { AgentGroup, ContainerConfigRow, MessagingGroup, MessagingGroupAgent, Session } from '../types.js';
 
 export interface PluginMigration {
   /** Stable unique name. Rename = re-run, so don't. */
@@ -75,6 +76,7 @@ export interface ReadDal {
   activeSessions(): Session[];
   runningSessions(): Session[];
   session(id: string): Session | undefined;
+  containerConfig(agentGroupId: string): ContainerConfigRow | undefined;
   hasTable(name: string): boolean;
 }
 
@@ -87,6 +89,7 @@ export function getReadDal(): ReadDal {
     activeSessions: () => getActiveSessions(),
     runningSessions: () => getRunningSessions(),
     session: (id) => getSession(id),
+    containerConfig: (id) => getContainerConfig(id),
     hasTable: (name) => hasTable(getDb(), name),
   };
 }

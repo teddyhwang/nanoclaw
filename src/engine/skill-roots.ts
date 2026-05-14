@@ -15,8 +15,13 @@ export interface ExtraSkillRoot {
   hostPath: string;
   /** Container path the host mounts this directory at, RO. */
   containerPath: string;
-  /** When provided, only skills matching this name set are activated. */
-  skillFilter?: (skillName: string) => boolean;
+  /**
+   * When provided, only skills for which the filter returns true are
+   * activated. `group` is the target agent group at compose/sync time;
+   * pass `null` if the caller doesn't have a group (e.g. unit tests).
+   * Filters that only need the skill name can ignore `group`.
+   */
+  skillFilter?: (skillName: string, group: AgentGroup | null) => boolean;
 }
 
 export type ContextFragmentProvider = (group: AgentGroup) => Promise<{ name: string; content: string }[]>;

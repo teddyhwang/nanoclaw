@@ -300,7 +300,7 @@ async function buildMounts(
 
   // Sync skill symlinks based on container.json selection before mounting.
   const claudeDir = path.join(DATA_DIR, 'v2-sessions', agentGroup.id, '.claude-shared');
-  syncSkillSymlinks(claudeDir, containerConfig);
+  syncSkillSymlinks(claudeDir, containerConfig, agentGroup);
 
   // Compose CLAUDE.md fresh every spawn from the shared base, enabled skill
   // fragments, and MCP server instructions. See `claude-md-compose.ts`.
@@ -478,6 +478,7 @@ async function buildMounts(
 export function syncSkillSymlinks(
   claudeDir: string,
   containerConfig: import('./container-config.js').ContainerConfig,
+  group: AgentGroup | null = null,
 ): void {
   const skillsDir = path.join(claudeDir, 'skills');
   if (!fs.existsSync(skillsDir)) {
@@ -521,7 +522,7 @@ export function syncSkillSymlinks(
       if (!fs.existsSync(root.hostPath)) continue;
       for (const entry of fs.readdirSync(root.hostPath)) {
         if (skillTargets.has(entry)) continue;
-        if (root.skillFilter && !root.skillFilter(entry)) continue;
+        if (root.skillFilter && !root.skillFilter(entry, group)) continue;
         try {
           if (fs.statSync(path.join(root.hostPath, entry)).isDirectory()) {
             skillTargets.set(entry, `${root.containerPath}/${entry}`);

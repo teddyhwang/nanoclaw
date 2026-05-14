@@ -187,6 +187,7 @@ export {
 } from '../db/messaging-groups.js';
 export type { AgentGroup } from '../types.js';
 export type { MessagingGroupAgent } from '../types.js';
+export type { ContainerConfigRow } from '../types.js';
 
 // Session lifecycle for importers seeding cold sessions (writes routing +
 // initializes per-session DBs). Hosts that want to enqueue messages into an

@@ -114,7 +114,7 @@ export async function composeGroupClaudeMd(group: AgentGroup): Promise<void> {
   for (const root of getExtraSkillRoots()) {
     if (!fs.existsSync(root.hostPath)) continue;
     for (const skillName of fs.readdirSync(root.hostPath)) {
-      if (root.skillFilter && !root.skillFilter(skillName)) continue;
+      if (root.skillFilter && !root.skillFilter(skillName, group)) continue;
       const hostFragment = path.join(root.hostPath, skillName, 'instructions.md');
       if (fs.existsSync(hostFragment)) {
         desired.set(`skill-${skillName}.md`, {
