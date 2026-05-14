@@ -25,11 +25,7 @@ import { updateContainerConfigScalars } from './db/container-configs.js';
 import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
 import { composeGroupClaudeMd } from './claude-md-compose.js';
 import { getExtraSkillRoots } from './engine/skill-roots.js';
-import {
-  getSharedBaseSource,
-  getDocsRoot,
-  getSharedDreamSource,
-} from './engine/composer-hooks.js';
+import { getSharedBaseSource, getDocsRoot, getSharedDreamSource } from './engine/composer-hooks.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
 import { initGroupFilesystem } from './group-init.js';
