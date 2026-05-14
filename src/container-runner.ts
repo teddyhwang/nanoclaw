@@ -25,7 +25,11 @@ import { updateContainerConfigScalars } from './db/container-configs.js';
 import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
 import { composeGroupClaudeMd } from './claude-md-compose.js';
 import { getExtraSkillRoots } from './engine/skill-roots.js';
-import { getSharedBaseSource, getDocsRoot } from './engine/composer-hooks.js';
+import {
+  getSharedBaseSource,
+  getDocsRoot,
+  getSharedDreamSource,
+} from './engine/composer-hooks.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { getDb, hasTable } from './db/connection.js';
 import { initGroupFilesystem } from './group-init.js';
@@ -339,6 +343,22 @@ async function buildMounts(
     mounts.push({ hostPath: fragmentsDir, containerPath: '/workspace/agent/.claude-fragments', readonly: true });
   }
 
+  // Canonical DREAM.md — nested RO mount on top of the RW group dir, so
+  // every group sees the same consolidation protocol at
+  // /workspace/agent/DREAM.md without keeping a per-group copy that would
+  // drift from the canonical. Hosts supply the source via
+  // composer.setSharedDreamProvider; when no provider is registered the
+  // mount is skipped and (if a per-group DREAM.md happens to exist on
+  // disk under groupDir) the agent sees that file as a fallback.
+  const sharedDream = getSharedDreamSource();
+  if (sharedDream && fs.existsSync(sharedDream.hostPath)) {
+    mounts.push({
+      hostPath: sharedDream.hostPath,
+      containerPath: '/workspace/agent/DREAM.md',
+      readonly: true,
+    });
+  }
+
   // Global memory directory — always read-only.
   const globalDir = path.join(GROUPS_DIR, 'global');
   if (fs.existsSync(globalDir)) {
@@ -350,9 +370,7 @@ async function buildMounts(
   // the source via composer.setSharedBaseProvider (see composer-hooks.ts);
   // when no provider is registered the default container/CLAUDE.md applies.
   const sharedBaseOverride = getSharedBaseSource();
-  const sharedClaudeMd = sharedBaseOverride
-    ? sharedBaseOverride.hostPath
-    : path.join(containerSourceDir, 'CLAUDE.md');
+  const sharedClaudeMd = sharedBaseOverride ? sharedBaseOverride.hostPath : path.join(containerSourceDir, 'CLAUDE.md');
   if (fs.existsSync(sharedClaudeMd)) {
     mounts.push({ hostPath: sharedClaudeMd, containerPath: '/app/CLAUDE.md', readonly: true });
   }

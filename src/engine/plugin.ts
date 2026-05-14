@@ -36,8 +36,10 @@ import {
 import {
   setSharedBaseProvider,
   setDocsRootProvider,
+  setSharedDreamProvider,
   type SharedBaseProvider,
   type DocsRootProvider,
+  type SharedDreamProvider,
 } from './composer-hooks.js';
 import { setWorkspaceResolver, type WorkspaceResolverFn } from './workspace.js';
 import { setCredentialProvider, type CredentialProvider } from './credentials.js';
@@ -91,6 +93,13 @@ export interface PluginContext {
      * Last-write-wins.
      */
     setDocsRootProvider(fn: DocsRootProvider): () => void;
+    /**
+     * Provide a host path for the canonical DREAM.md, nested RO-mounted
+     * at /workspace/agent/DREAM.md in every container. Keeps the
+     * consolidation protocol single-source — per-group dirs don't carry
+     * their own copies. Last-write-wins.
+     */
+    setSharedDreamProvider(fn: SharedDreamProvider): () => void;
   };
   credentials: {
     register(p: CredentialProvider): void;
@@ -137,6 +146,7 @@ export function createPluginContext(): PluginContext {
     composer: {
       setSharedBaseProvider: (fn) => setSharedBaseProvider(fn),
       setDocsRootProvider: (fn) => setDocsRootProvider(fn),
+      setSharedDreamProvider: (fn) => setSharedDreamProvider(fn),
     },
     credentials: {
       register: (p) => setCredentialProvider(p),

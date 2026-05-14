@@ -32,11 +32,20 @@ export interface DocsRoot {
   hostPath: string;
 }
 
+export interface SharedDreamSource {
+  /** Absolute host path to a DREAM.md file. Nested RO-mounted at
+   *  /workspace/agent/DREAM.md for every group, so the consolidation
+   *  protocol stays single-source. */
+  hostPath: string;
+}
+
 export type SharedBaseProvider = () => SharedBaseSource | null;
 export type DocsRootProvider = () => DocsRoot | null;
+export type SharedDreamProvider = () => SharedDreamSource | null;
 
 let sharedBaseProvider: SharedBaseProvider | null = null;
 let docsRootProvider: DocsRootProvider | null = null;
+let sharedDreamProvider: SharedDreamProvider | null = null;
 
 export function setSharedBaseProvider(fn: SharedBaseProvider): () => void {
   if (sharedBaseProvider) {
@@ -72,8 +81,24 @@ export function getDocsRoot(): DocsRoot | null {
   return docsRootProvider ? docsRootProvider() : null;
 }
 
+export function setSharedDreamProvider(fn: SharedDreamProvider): () => void {
+  if (sharedDreamProvider) {
+    // eslint-disable-next-line no-console
+    console.warn('[composer-hooks] sharedDreamProvider already set; overwriting (last-write-wins)');
+  }
+  sharedDreamProvider = fn;
+  return () => {
+    if (sharedDreamProvider === fn) sharedDreamProvider = null;
+  };
+}
+
+export function getSharedDreamSource(): SharedDreamSource | null {
+  return sharedDreamProvider ? sharedDreamProvider() : null;
+}
+
 /** Test-only. */
 export function _resetComposerHooksForTests(): void {
   sharedBaseProvider = null;
   docsRootProvider = null;
+  sharedDreamProvider = null;
 }
