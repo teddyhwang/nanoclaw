@@ -14,6 +14,19 @@
  */
 import { getOutboundDb } from './connection.js';
 
+/**
+ * Per-series retention cap. After each write we trim older fires for the
+ * same series_id beyond this count. Per-series rather than time-based
+ * because task cadences vary by ~5 orders of magnitude in practice (5-min
+ * RSS pollers up through monthly maintenance), so a single TTL is either
+ * too generous for the fast tasks or too aggressive for the slow ones.
+ *
+ * At cap=100: a 5-min task keeps ~8h of history; a 4h task keeps ~17 days;
+ * a daily task keeps ~3 months. Enough in every regime to answer "did
+ * this work recently?" without unbounded growth.
+ */
+const FIRES_PER_SERIES_CAP = 100;
+
 export interface TaskFireDispatch {
   /** Destination name as written by the agent (`<message to="X">`). */
   destination: string;
@@ -52,4 +65,20 @@ export function writeTaskFire(fire: WriteTaskFire): void {
     $dispatched: JSON.stringify(fire.dispatched),
     $error_message: fire.errorMessage ?? null,
   });
+
+  // Trim older fires for this series beyond the cap. NOT IN over the
+  // newest-N keeps the most recent rows regardless of fired_at ties
+  // (rowid acts as the tiebreaker via the subquery's implicit ORDER).
+  // Scoped per series_id so a fast-firing task can't crowd a slow
+  // sibling task out of its own history.
+  db.prepare(
+    `DELETE FROM task_fires
+      WHERE series_id = $series_id
+        AND id NOT IN (
+          SELECT id FROM task_fires
+           WHERE series_id = $series_id
+           ORDER BY fired_at DESC
+           LIMIT $cap
+        )`,
+  ).run({ $series_id: fire.seriesId, $cap: FIRES_PER_SERIES_CAP });
 }
