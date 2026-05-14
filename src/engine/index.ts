@@ -202,3 +202,11 @@ export type { ContainerConfigRow } from '../types.js';
 // `adapter.onInbound → routeInbound` path where engagement evaluation
 // still runs.
 export { resolveSession, writeSessionMessage, writeSessionRouting } from '../session-manager.js';
+
+// Inbound entrypoint for hosts that synthesize events from non-channel
+// sources (e.g. dashboard-driven trigger fires). Constructs an
+// `InboundEvent` with channelType/platformId pointing at an existing
+// wired `messaging_group` and routes it through the normal router —
+// sender resolution, access gate, session resolution, write, wake all
+// run identically to a real chat message.
+export { routeInbound } from '../router.js';
