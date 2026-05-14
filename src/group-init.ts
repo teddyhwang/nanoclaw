@@ -125,18 +125,9 @@ const KERNEL_STUBS: Record<string, string> = {
   'KNOWLEDGE.md':
     '# Knowledge Index\n\n' +
     'Files in `knowledge/` for lazy-loading. Add an entry whenever you create a structured-knowledge file.\n',
-  'AGENTS.md':
-    '<!-- kernel: v1.1 -->\n\n' +
-    '# Agent Kernel\n\n' +
-    'You are a stateful agent. Durable memory comes from files in this directory. ' +
-    'See `IDENTITY.md` for who you are; `CURRENT.md` for recent state; `KNOWLEDGE.md` for the lazy-load index.\n\n' +
-    '## Session Protocol\n\n' +
-    '### Start\n- The composed `CLAUDE.md` has already loaded IDENTITY, AGENTS, CURRENT, and KNOWLEDGE.\n' +
-    '- Load `knowledge/<topic>.md` only when a task touches that domain.\n\n' +
-    "### During\n- Verify state before acting — don't trust notes blindly.\n" +
-    "- Append work to today's `notes/YYYY-MM-DD.md`. Never rewrite prior days.\n\n" +
-    '### End\n- Update `CURRENT.md`: remove resolved items, add new ones.\n' +
-    '- Promote substantive new facts from `CLAUDE.local.md` into `knowledge/<topic>.md` + the `KNOWLEDGE.md` index.\n',
+  // AGENTS.md is intentionally omitted: the shared base IS the canonical kernel
+  // (see claude-md-compose.ts comment block re: v2 unification S381+). Scaffolding
+  // a per-group AGENTS.md stub here only resurrects it after Teddy deletes it.
 };
 
 function scaffoldKernel(groupDir: string, initialized: string[]): void {

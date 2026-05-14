@@ -204,6 +204,7 @@ async function spawnContainer(session: Session): Promise<void> {
     activeContainers.delete(session.id);
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
+    cleanupSeededDream(agentGroup);
     log.info('Container exited', { sessionId: session.id, code, containerName });
     emitEngineEvent('container.stop', { sessionId: session.id, agentGroupId: agentGroup.id, reason: 'idle' });
   });
@@ -212,8 +213,34 @@ async function spawnContainer(session: Session): Promise<void> {
     activeContainers.delete(session.id);
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
+    cleanupSeededDream(agentGroup);
     log.error('Container spawn error', { sessionId: session.id, err });
   });
+}
+
+/**
+ * Remove the per-group DREAM.md if it still matches the canonical source —
+ * i.e., it's our seeded mount-target file, not genuine fallback content the
+ * operator left behind. Safe to call when no canonical source is configured;
+ * a non-empty divergent file is preserved as fallback.
+ */
+function cleanupSeededDream(agentGroup: AgentGroup): void {
+  try {
+    const sharedDream = getSharedDreamSource();
+    if (!sharedDream || !fs.existsSync(sharedDream.hostPath)) return;
+    const perGroupDream = path.join(resolveGroupDir(agentGroup), 'DREAM.md');
+    if (!fs.existsSync(perGroupDream)) return;
+    const canonical = fs.readFileSync(sharedDream.hostPath);
+    const current = fs.readFileSync(perGroupDream);
+    if (canonical.equals(current) || current.byteLength === 0) {
+      fs.rmSync(perGroupDream, { force: true });
+    }
+  } catch (err) {
+    log.warn('Failed to clean up seeded DREAM.md', {
+      agentGroupId: agentGroup.id,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 /** Kill a container for a session. */
@@ -346,8 +373,26 @@ async function buildMounts(
   // composer.setSharedDreamProvider; when no provider is registered the
   // mount is skipped and (if a per-group DREAM.md happens to exist on
   // disk under groupDir) the agent sees that file as a fallback.
+  //
+  // Docker requires the bind-mount target to exist on the host; if it
+  // doesn't, Docker creates an empty file there as a side effect. That
+  // empty file then sticks around in the group dir after the container
+  // exits, looks like agent-authored noise, and (worse) silently becomes
+  // the fallback the next time the canonical source goes missing. So we
+  // pre-seed the target with the canonical content before spawn and
+  // clean it up on exit if it still matches.
   const sharedDream = getSharedDreamSource();
+  const perGroupDream = path.join(groupDir, 'DREAM.md');
   if (sharedDream && fs.existsSync(sharedDream.hostPath)) {
+    try {
+      fs.copyFileSync(sharedDream.hostPath, perGroupDream);
+    } catch (err) {
+      log.warn('Failed to seed per-group DREAM.md before mount', {
+        groupDir,
+        hostPath: sharedDream.hostPath,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
     mounts.push({
       hostPath: sharedDream.hostPath,
       containerPath: '/workspace/agent/DREAM.md',
