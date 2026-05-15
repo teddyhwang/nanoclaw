@@ -64,14 +64,33 @@ export async function runScript(script: string, taskId: string): Promise<ScriptR
   });
 }
 
+/**
+ * A task whose pre-task script gated it out of this tick (wakeAgent=false
+ * or script error/no-output). Carries the identity the poll-loop needs to
+ * record a `task_fires` row with status='gated' — without this the task
+ * completes invisibly and the dashboard reads "never ran" for a healthy
+ * quiet task. `seriesId` falls back to `id` for pre-migration rows, same
+ * convention as the trigger path in poll-loop.ts.
+ */
+export interface GatedTask {
+  id: string;
+  seriesId: string;
+  taskId: string;
+  reason: 'wakeAgent=false' | 'script error/no output';
+}
+
 export interface TaskScriptOutcome {
   keep: MessageInRow[];
+  /** Task ids gated out — fed to markCompleted by the caller. */
   skipped: string[];
+  /** Same gated tasks, with the fields needed to write a 'gated' fire. */
+  gated: GatedTask[];
 }
 
 /**
  * Run pre-task scripts for any task messages that carry one, serially.
- * - Errors / missing output / wakeAgent=false → task id added to `skipped`.
+ * - Errors / missing output / wakeAgent=false → task id added to `skipped`
+ *   and a `GatedTask` pushed to `gated` so the caller can record the fire.
  * - wakeAgent=true → content JSON is mutated to carry `scriptOutput`, so the
  *   formatter renders it into the prompt.
  * Non-task messages and tasks without scripts pass through unchanged.
@@ -79,6 +98,7 @@ export interface TaskScriptOutcome {
 export async function applyPreTaskScripts(messages: MessageInRow[]): Promise<TaskScriptOutcome> {
   const keep: MessageInRow[] = [];
   const skipped: string[] = [];
+  const gated: GatedTask[] = [];
 
   for (const msg of messages) {
     if (msg.kind !== 'task') {
@@ -109,6 +129,12 @@ export async function applyPreTaskScripts(messages: MessageInRow[]): Promise<Tas
       const reason = result ? 'wakeAgent=false' : 'script error/no output';
       log(`task ${msg.id} skipped: ${reason}`);
       skipped.push(msg.id);
+      gated.push({
+        id: msg.id,
+        seriesId: msg.series_id ?? msg.id,
+        taskId: msg.id,
+        reason,
+      });
       continue;
     }
 
@@ -117,5 +143,5 @@ export async function applyPreTaskScripts(messages: MessageInRow[]): Promise<Tas
     keep.push({ ...msg, content: JSON.stringify(content) });
   }
 
-  return { keep, skipped };
+  return { keep, skipped, gated };
 }

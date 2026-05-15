@@ -273,7 +273,10 @@ CREATE TABLE IF NOT EXISTS container_state (
 -- status: 'completed' (agent dispatched >=1 outbound message),
 --         'silent'    (turn finished with no user-facing output --
 --                      e.g. silent maintenance tasks, internal-only output),
---         'error'     (provider/runtime error during the turn).
+--         'error'     (provider/runtime error during the turn),
+--         'gated'     (pre-task script ran and returned wakeAgent=false /
+--                      errored -- the task fired but the agent was never
+--                      invoked; error_message carries the gate reason).
 -- assistant_text: full SDK result text BEFORE <message> parsing, so the
 --   dashboard sees the model's whole output (scratchpad + wrapped blocks).
 -- dispatched: JSON array of { destination, body } actually sent.

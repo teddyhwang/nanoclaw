@@ -78,6 +78,41 @@ describe('task_fires writer', () => {
     expect(rows[0].error_message).toBe('provider exploded');
   });
 
+  test('gated fire records the gate reason in error_message', () => {
+    writeTaskFire({
+      id: 'fire-gate',
+      seriesId: 'series-gated',
+      taskId: 'task-row-g',
+      status: 'gated',
+      assistantText: null,
+      dispatched: [],
+      errorMessage: 'script error/no output',
+    });
+
+    const rows = listFires('series-gated');
+    expect(rows.length).toBe(1);
+    expect(rows[0].status).toBe('gated');
+    expect(rows[0].error_message).toBe('script error/no output');
+    expect(rows[0].dispatched).toBe('[]');
+  });
+
+  test('gated fire for wakeAgent=false leaves error_message null', () => {
+    writeTaskFire({
+      id: 'fire-gate-2',
+      seriesId: 'series-gated-quiet',
+      taskId: 'task-row-gq',
+      status: 'gated',
+      assistantText: null,
+      dispatched: [],
+      errorMessage: null,
+    });
+
+    const rows = listFires('series-gated-quiet');
+    expect(rows.length).toBe(1);
+    expect(rows[0].status).toBe('gated');
+    expect(rows[0].error_message).toBeNull();
+  });
+
   test('multiple fires for the same series_id co-exist and order by fired_at', () => {
     writeTaskFire({
       id: 'fire-a',

@@ -109,9 +109,10 @@ export function getOutboundDb(): Database {
       );
     `);
     // task_fires: per-fire history of scheduled-task turns (series_id,
-    // task_id, status, assistant_text, dispatched). Forward-compat for
-    // outbound.dbs created before this table existed. See
-    // src/db/schema.ts for the column docstring.
+    // task_id, status, assistant_text, dispatched). status is one of
+    // completed|silent|error|gated. Forward-compat for outbound.dbs
+    // created before this table existed. See src/db/schema.ts for the
+    // column docstring.
     _outbound.exec(`
       CREATE TABLE IF NOT EXISTS task_fires (
         id             TEXT PRIMARY KEY,

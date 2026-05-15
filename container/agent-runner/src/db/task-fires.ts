@@ -34,7 +34,12 @@ export interface TaskFireDispatch {
   body: string;
 }
 
-export type TaskFireStatus = 'completed' | 'silent' | 'error';
+// 'gated' = the task's pre-task script ran and returned wakeAgent=false
+// (or errored/produced no output), so the agent was never invoked. The
+// task DID fire on schedule — recording it keeps a quiet script-gated
+// task distinguishable from one that never ran at all. 'silent' is
+// reserved for the agent running but emitting nothing.
+export type TaskFireStatus = 'completed' | 'silent' | 'error' | 'gated';
 
 export interface WriteTaskFire {
   id: string;

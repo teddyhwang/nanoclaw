@@ -228,6 +228,28 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     if (skipped.length > 0) {
       markCompleted(skipped);
       log(`Pre-task script skipped ${skipped.length} task(s): ${skipped.join(', ')}`);
+      // Record a 'gated' fire per skipped task. The task fired on
+      // schedule and its script ran — it just decided not to wake the
+      // agent. Without this row the dashboard shows "never ran" for a
+      // healthy quiet task (RSS pollers, dream/maintenance checks that
+      // usually no-op). One row per occurrence; series_id groups them.
+      for (const g of preTask.gated) {
+        try {
+          writeTaskFire({
+            id: generateId(),
+            seriesId: g.seriesId,
+            taskId: g.taskId,
+            status: 'gated',
+            assistantText: null,
+            dispatched: [],
+            errorMessage: g.reason === 'script error/no output' ? g.reason : null,
+          });
+        } catch (err) {
+          log(
+            `task_fires gated-write failed for ${g.taskId}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
     }
     // MODULE-HOOK:scheduling-pre-task:end
 
