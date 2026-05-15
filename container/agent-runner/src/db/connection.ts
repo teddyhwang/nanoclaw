@@ -57,6 +57,79 @@ export function openInboundDb(): Database {
 }
 
 /**
+ * Run a read against a freshly-opened inbound.db, retrying on transient
+ * SQLITE_CORRUPT.
+ *
+ * Why this exists (S405): inbound.db is journal_mode=DELETE and read
+ * over VirtioFS. The host commits a write by modifying pages in place
+ * then deleting inbound.db-journal. busy_timeout makes a reader wait on
+ * a *lock*, but VirtioFS does not propagate the host's page writes to
+ * the guest atomically — a reader that opens between the host's
+ * page-modify and journal-delete can read a half-updated B-tree and
+ * get "database disk image is malformed". The lock was respected; the
+ * mount's non-atomic page propagation is the hole, so busy_timeout
+ * alone cannot prevent it. Empirically this fired ~90×/day on the
+ * merged Degenerates session (one agent-shared inbound.db written by a
+ * every-5-minute recurrence while the container polled it), each
+ * occurrence crashing the runner code=1 → host respawn → crash-loop.
+ *
+ * The torn state is transient: the host write completes in
+ * milliseconds, so a reopened connection a few ms later sees a
+ * consistent file. We close, back off, reopen, and retry. This cannot
+ * regress behavior — without it the same read throws fatally today
+ * (index.ts → process.exit(1)); the worst case here is the same fatal
+ * throw after the retries are exhausted.
+ *
+ * `PRAGMA integrity_check` is deliberately NOT run — it passes on a
+ * transient torn read (the on-disk file is fine; only the reader's
+ * VirtioFS view was momentarily inconsistent) so it would give false
+ * confidence and waste a poll. The reopen IS the check.
+ */
+const INBOUND_CORRUPT_RETRIES = 5;
+const INBOUND_CORRUPT_BACKOFF_MS = 40;
+
+function isTransientCorrupt(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  // bun:sqlite surfaces the sqlite text; match on the message rather
+  // than a code so it works regardless of driver error shape.
+  return (
+    msg.includes('database disk image is malformed') ||
+    msg.includes('SQLITE_CORRUPT')
+  );
+}
+
+export function withInboundDb<T>(fn: (db: Database) => T): T {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= INBOUND_CORRUPT_RETRIES; attempt++) {
+    const db = openInboundDb();
+    try {
+      return fn(db);
+    } catch (err) {
+      lastErr = err;
+      if (!isTransientCorrupt(err) || attempt === INBOUND_CORRUPT_RETRIES) {
+        throw err;
+      }
+      // Transient torn read — close, let the host write settle, reopen.
+      // Synchronous busy-wait (not setTimeout): callers are synchronous
+      // and the backoff is tens of ms, far cheaper than the crash +
+      // ~5min respawn it replaces.
+      const until = Date.now() + INBOUND_CORRUPT_BACKOFF_MS * (attempt + 1);
+      while (Date.now() < until) {
+        /* brief settle before reopen */
+      }
+    } finally {
+      try {
+        db.close();
+      } catch {
+        /* best-effort: a corrupt handle may throw on close */
+      }
+    }
+  }
+  // Unreachable: the loop either returns or throws on the last attempt.
+  throw lastErr;
+}
+
+/**
  * Inbound DB — long-lived singleton, OK for tables the host writes once
  * at spawn and never again (destinations, session_routing). For
  * messages_in polling — where the host writes continuously and a stale

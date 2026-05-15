@@ -8,7 +8,7 @@
  * processing_ack. The host reads processing_ack to sync message lifecycle.
  */
 import { getConfig } from '../config.js';
-import { openInboundDb, getOutboundDb } from './connection.js';
+import { openInboundDb, withInboundDb, getOutboundDb } from './connection.js';
 
 // Cache whether inbound.db has the on_wake column (added in v2.0.48).
 // The container opens inbound.db read-only, so it can't ALTER —
@@ -83,10 +83,11 @@ function getMaxMessagesPerPrompt(): number {
 const STALE_ACCUMULATE_AGE_MS = 24 * 60 * 60 * 1000;
 
 export function getPendingMessages(isFirstPoll = false): MessageInRow[] {
-  const inbound = openInboundDb();
-  const outbound = getOutboundDb();
-
-  try {
+  // Both the schema probe and the pending SELECT read inbound.db (host
+  // writer + VirtioFS, corrupt-prone — see withInboundDb), so both run
+  // inside the retry. The outbound ack filter is container-owned with no
+  // cross-mount write race, so it stays outside the retry scope.
+  const pending = withInboundDb((inbound) => {
     // Three layers of filtering to avoid the LIMIT starving real work
     // and to bound prompt budget:
     //
@@ -125,7 +126,7 @@ export function getPendingMessages(isFirstPoll = false): MessageInRow[] {
     // schemas instead of erroring out.
     const staleAccumulateCutoff = new Date(Date.now() - STALE_ACCUMULATE_AGE_MS).toISOString();
     const onWakeFilter = hasOnWakeColumn(inbound) ? 'AND (on_wake = 0 OR ?1 = 1)' : '';
-    const pending = inbound
+    return inbound
       .prepare(
         `SELECT * FROM messages_in
          WHERE status = 'pending'
@@ -137,26 +138,25 @@ export function getPendingMessages(isFirstPoll = false): MessageInRow[] {
          LIMIT ?2`,
       )
       .all(isFirstPoll ? 1 : 0, getMaxMessagesPerPrompt(), staleAccumulateCutoff) as MessageInRow[];
+  });
 
-    if (pending.length === 0) return [];
+  if (pending.length === 0) return [];
 
-    // Filter out messages already acknowledged in outbound.db
-    const ackedIds = new Set(
-      (outbound.prepare('SELECT message_id FROM processing_ack').all() as Array<{ message_id: string }>).map(
-        (r) => r.message_id,
-      ),
-    );
+  // Filter out messages already acknowledged in outbound.db
+  const outbound = getOutboundDb();
+  const ackedIds = new Set(
+    (outbound.prepare('SELECT message_id FROM processing_ack').all() as Array<{ message_id: string }>).map(
+      (r) => r.message_id,
+    ),
+  );
 
-    // Sort by seq ASC for chronological agent view. Can't just
-    // `.reverse()` because the SQL `ORDER BY trigger DESC, seq DESC`
-    // groups trigger=1 rows ahead of trigger=0 — a plain reverse would
-    // put trigger=0 chat first, trigger=1 task last, which both
-    // confuses the agent's time-ordering and lets the trigger=1 row
-    // end up at the tail of formatMessages' chat block.
-    return pending.filter((m) => !ackedIds.has(m.id)).sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
-  } finally {
-    inbound.close();
-  }
+  // Sort by seq ASC for chronological agent view. Can't just
+  // `.reverse()` because the SQL `ORDER BY trigger DESC, seq DESC`
+  // groups trigger=1 rows ahead of trigger=0 — a plain reverse would
+  // put trigger=0 chat first, trigger=1 task last, which both
+  // confuses the agent's time-ordering and lets the trigger=1 row
+  // end up at the tail of formatMessages' chat block.
+  return pending.filter((m) => !ackedIds.has(m.id)).sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
 }
 
 /** Mark messages as processing — writes to processing_ack in outbound.db. */
@@ -194,12 +194,12 @@ export function markFailed(id: string): void {
 
 /** Get a message by ID (read from inbound.db). */
 export function getMessageIn(id: string): MessageInRow | undefined {
-  const inbound = openInboundDb();
-  try {
-    return inbound.prepare('SELECT * FROM messages_in WHERE id = ?').get(id) as MessageInRow | undefined;
-  } finally {
-    inbound.close();
-  }
+  return withInboundDb(
+    (inbound) =>
+      inbound.prepare('SELECT * FROM messages_in WHERE id = ?').get(id) as
+        | MessageInRow
+        | undefined,
+  );
 }
 
 /**
@@ -207,23 +207,23 @@ export function getMessageIn(id: string): MessageInRow | undefined {
  * Reads from inbound.db, checks processing_ack to skip already-handled responses.
  */
 export function findQuestionResponse(questionId: string): MessageInRow | undefined {
-  const inbound = openInboundDb();
+  // Only the inbound read is corrupt-prone (host writer + VirtioFS,
+  // see withInboundDb). outbound is container-owned, no cross-mount
+  // write race, so its ack check stays outside the retry scope.
+  const response = withInboundDb(
+    (inbound) =>
+      inbound
+        .prepare("SELECT * FROM messages_in WHERE status = 'pending' AND content LIKE ?")
+        .get(`%"questionId":"${questionId}"%`) as MessageInRow | undefined,
+  );
+
+  if (!response) return undefined;
+
+  // Check it hasn't been acked already
   const outbound = getOutboundDb();
+  const acked = outbound.prepare('SELECT 1 FROM processing_ack WHERE message_id = ?').get(response.id);
+  if (acked) return undefined;
 
-  try {
-    const response = inbound
-      .prepare("SELECT * FROM messages_in WHERE status = 'pending' AND content LIKE ?")
-      .get(`%"questionId":"${questionId}"%`) as MessageInRow | undefined;
-
-    if (!response) return undefined;
-
-    // Check it hasn't been acked already
-    const acked = outbound.prepare('SELECT 1 FROM processing_ack WHERE message_id = ?').get(response.id);
-    if (acked) return undefined;
-
-    return response;
-  } finally {
-    inbound.close();
-  }
+  return response;
 }
 

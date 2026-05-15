@@ -11,7 +11,10 @@ import {
   ABSOLUTE_CEILING_MS,
   CLAIM_STUCK_MS,
   MCP_TOOL_CEILING_MS,
+  _MAX_RECURRENCE_DEFERS_FOR_TESTING,
+  _recurrenceDeferHelpersForTesting,
   _resetStuckProcessingRowsForTesting,
+  _shouldRunRecurrenceForTesting,
   decideStuckAction,
   parseSqliteUtc,
 } from './host-sweep.js';
@@ -443,5 +446,65 @@ describe('parseSqliteUtc', () => {
     // bare string returns different values depending on the host TZ.)
     const bare = '2026-04-20T12:00:00';
     expect(parseSqliteUtc(bare)).toBe(Date.parse(bare + 'Z'));
+  });
+});
+
+describe('S405 lever 2 — recurrence write quiescing', () => {
+  it('runs the recurrence immediately when no container is alive', () => {
+    // The common, safe case: container idle-killed, inbound.db has a
+    // single accessor, no torn-read risk — write through at 0 defers.
+    expect(_shouldRunRecurrenceForTesting(false, 0)).toBe(true);
+  });
+
+  it('defers while a container is alive and under the cap', () => {
+    expect(_shouldRunRecurrenceForTesting(true, 0)).toBe(false);
+    expect(
+      _shouldRunRecurrenceForTesting(
+        true,
+        _MAX_RECURRENCE_DEFERS_FOR_TESTING - 1,
+      ),
+    ).toBe(false);
+  });
+
+  it('forces the write through once the defer cap is reached (no infinite defer)', () => {
+    // A continuously-alive session must not have its schedule silently
+    // frozen forever; at the cap we write and rely on lever 1's retry.
+    expect(
+      _shouldRunRecurrenceForTesting(true, _MAX_RECURRENCE_DEFERS_FOR_TESTING),
+    ).toBe(true);
+    expect(
+      _shouldRunRecurrenceForTesting(
+        true,
+        _MAX_RECURRENCE_DEFERS_FOR_TESTING + 3,
+      ),
+    ).toBe(true);
+  });
+
+  it('defer counter bumps per call and clears in one shot', () => {
+    const h = _recurrenceDeferHelpersForTesting();
+    h.reset();
+    expect(h.count('sess-A')).toBe(0);
+    expect(h.bump('sess-A')).toBe(1);
+    expect(h.bump('sess-A')).toBe(2);
+    expect(h.count('sess-A')).toBe(2);
+    // Independent per session.
+    expect(h.count('sess-B')).toBe(0);
+    h.clear('sess-A');
+    expect(h.count('sess-A')).toBe(0);
+  });
+
+  it('reaching the cap then writing resets the counter so the next alive run defers again', () => {
+    const h = _recurrenceDeferHelpersForTesting();
+    h.reset();
+    // Simulate MAX consecutive alive-sweeps of deferral.
+    for (let i = 0; i < _MAX_RECURRENCE_DEFERS_FOR_TESTING; i++) h.bump('s');
+    expect(h.count('s')).toBe(_MAX_RECURRENCE_DEFERS_FOR_TESTING);
+    expect(_shouldRunRecurrenceForTesting(true, h.count('s'))).toBe(true);
+    // sweepSession calls clearRecurrenceDefer when it writes through.
+    h.clear('s');
+    expect(h.count('s')).toBe(0);
+    // Next alive sweep defers from zero again — bounded slip, not a
+    // one-shot escape that then writes every sweep under load.
+    expect(_shouldRunRecurrenceForTesting(true, h.count('s'))).toBe(false);
   });
 });

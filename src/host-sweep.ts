@@ -158,6 +158,17 @@ async function sweep(): Promise<void> {
 
   try {
     const sessions = getActiveSessions();
+    // Prune S405 defer tracker for sessions that left the active set
+    // (closed/deleted between sweeps) so the Map can't grow unbounded
+    // over a long-lived host process. Active sessions self-clear via
+    // clearRecurrenceDefer on their next idle sweep; this only catches
+    // the active→gone transition that never gets that sweep.
+    if (recurrenceDefers.size > 0) {
+      const activeIds = new Set(sessions.map((s) => s.id));
+      for (const id of recurrenceDefers.keys()) {
+        if (!activeIds.has(id)) recurrenceDefers.delete(id);
+      }
+    }
     for (const session of sessions) {
       await sweepSession(session);
     }
@@ -240,14 +251,91 @@ async function sweepSession(session: Session): Promise<void> {
     }
 
     // 5. Recurrence fanout for completed recurring tasks.
-    // MODULE-HOOK:scheduling-recurrence:start
-    const { handleRecurrence } = await import('./modules/scheduling/recurrence.js');
-    await handleRecurrence(inDb, session);
-    // MODULE-HOOK:scheduling-recurrence:end
+    //
+    // S405 lever 2 — host write quiescing. handleRecurrence INSERTs the
+    // next occurrence into inbound.db. inbound.db is journal_mode=DELETE
+    // read by the container over VirtioFS; a host write that lands while
+    // the container is mid-poll can be observed as a torn page →
+    // SQLITE_CORRUPT in the runner (the proven S405 crash-loop on the
+    // merged Degenerates session: an every-5-min recurrence written into
+    // a continuously-polled agent-shared inbound.db). The recurrence row
+    // stays status='completed' with recurrence intact until processed
+    // (getCompletedRecurring + clearRecurrence), so deferring one sweep
+    // loses nothing — the next occurrence just inserts ~60s later, after
+    // the (typically task-only, ~2-min) container has idle-killed and
+    // the DB has exactly one accessor again. Container retry-on-corrupt
+    // (lever 1) is the inner safety net; this removes the collision at
+    // the source for the common case.
+    //
+    // Bounded so a continuously-alive session can't defer forever: after
+    // MAX_RECURRENCE_DEFERS consecutive alive-sweeps we let the write
+    // through and rely on lever 1's retry. A session that never idles is
+    // already pathological for a recurring task; unbounded deferral
+    // would silently stop its schedule, which is worse than a
+    // retried-corrupt read.
+    if (!alive || recurrenceDeferCount(session.id) >= MAX_RECURRENCE_DEFERS) {
+      clearRecurrenceDefer(session.id);
+      // MODULE-HOOK:scheduling-recurrence:start
+      const { handleRecurrence } = await import('./modules/scheduling/recurrence.js');
+      await handleRecurrence(inDb, session);
+      // MODULE-HOOK:scheduling-recurrence:end
+    } else {
+      const n = bumpRecurrenceDefer(session.id);
+      log.debug('Deferred recurrence: container mid-poll (S405 quiescing)', {
+        sessionId: session.id,
+        consecutiveDefers: n,
+        maxDefers: MAX_RECURRENCE_DEFERS,
+      });
+    }
   } finally {
     inDb.close();
     outDb?.close();
   }
+}
+
+// S405 lever 2 — bounded recurrence-deferral tracker. Keyed by session
+// id; counts consecutive sweeps where the recurrence INSERT was skipped
+// because a container was actively polling inbound.db. Reset to 0 the
+// moment the write goes through (container idle, or cap reached). A
+// 60s sweep × MAX_RECURRENCE_DEFERS=5 caps worst-case schedule slip at
+// ~5 min for a continuously-alive session — acceptable vs. the corrupt
+// crash-loop it prevents, and lever 1 still covers the post-cap write.
+const MAX_RECURRENCE_DEFERS = 5;
+const recurrenceDefers = new Map<string, number>();
+
+function recurrenceDeferCount(sessionId: string): number {
+  return recurrenceDefers.get(sessionId) ?? 0;
+}
+function bumpRecurrenceDefer(sessionId: string): number {
+  const n = (recurrenceDefers.get(sessionId) ?? 0) + 1;
+  recurrenceDefers.set(sessionId, n);
+  return n;
+}
+function clearRecurrenceDefer(sessionId: string): void {
+  recurrenceDefers.delete(sessionId);
+}
+
+/**
+ * Test seam for the S405 lever-2 defer gate. Pure decision: given
+ * whether a container is alive and the current consecutive-defer
+ * count, should the recurrence write run this sweep? Mirrors the
+ * inline condition in sweepSession so the bounded-defer invariant is
+ * unit-tested without mocking the container runner / filesystem.
+ */
+export function _shouldRunRecurrenceForTesting(
+  alive: boolean,
+  consecutiveDefers: number,
+): boolean {
+  return !alive || consecutiveDefers >= MAX_RECURRENCE_DEFERS;
+}
+export const _MAX_RECURRENCE_DEFERS_FOR_TESTING = MAX_RECURRENCE_DEFERS;
+export function _recurrenceDeferHelpersForTesting() {
+  return {
+    count: recurrenceDeferCount,
+    bump: bumpRecurrenceDefer,
+    clear: clearRecurrenceDefer,
+    reset: () => recurrenceDefers.clear(),
+  };
 }
 
 function heartbeatMtimeMs(agentGroupId: string, sessionId: string): number {
