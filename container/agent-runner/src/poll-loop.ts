@@ -681,16 +681,29 @@ async function processQuery(
           }
           newMessages = userOnly;
           if (newMessages.length === 0) {
-            // If cross-sender rows were also deferred this tick, the active
-            // turn has no follow-up work and the outer loop needs to re-query
-            // for the deferred sender. End the stream. If only task rows were
-            // deferred (no cross-sender), the active turn is still mid-
-            // response — leave the stream open so its Result: event can land;
-            // outer loop picks up the task on the next iteration.
-            if (crossSenderDeferred && !endedForCommand) {
-              log(
-                `Remaining pending are only deferred tasks — ending active query so outer loop can re-query for deferred sender`,
-              );
+            // Nothing pushable remains — end the active stream regardless of
+            // whether cross-sender deferred too. The earlier rationale here
+            // ("if only task rows deferred, leave open so Result: can land")
+            // assumed the active turn was still mid-response. That's a wrong
+            // proxy: when the model has finished its turn the SDK simply
+            // stops emitting events — there is no "still typing" signal we
+            // can read from in here. Leaving the stream open in that case
+            // produces an infinite spin: every poll tick re-defers the same
+            // task row, host-sweep sees `dueCount > 0` so the idle-timeout
+            // never fires, and the container stays up forever (observed
+            // 2026-05-14 in discord_degenerates: agent finished a 4-message
+            // burst at 23:09, then RSS + reflection task rows arrived and
+            // were deferred every 500ms for 20+ min).
+            //
+            // `query.end()` only signals "no more inputs from us" — pending
+            // SDK output events still drain through the for-await loop, so
+            // an in-flight Result: lands cleanly. Same shape as the
+            // accumulate-only end above, which has been proven not to
+            // truncate output. Outer loop picks up the deferred task on
+            // the next iteration.
+            if (!endedForCommand) {
+              const reason = crossSenderDeferred ? `re-query for deferred sender` : `re-query for deferred task`;
+              log(`Remaining pending are only deferred — ending active query so outer loop can ${reason}`);
               endedForCommand = true;
               query.end();
             }
@@ -806,47 +819,47 @@ async function processQuery(
       // write. Without this flag we'd write a 'silent'/'completed' row
       // in the finally below AND an 'error' row in the outer caller's
       // catch, double-counting the fire.
-    for await (const event of query.events) {
-      handleEvent(event, routing);
-      touchHeartbeat();
+      for await (const event of query.events) {
+        handleEvent(event, routing);
+        touchHeartbeat();
 
-      if (event.type === 'init') {
-        queryContinuation = event.continuation;
-        // Persist immediately so a mid-turn container crash still lets the
-        // next wake resume the conversation. Without this, the session id
-        // was only written after the full stream completed — if the
-        // container died between `init` and `result`, the SDK session was
-        // effectively orphaned and the next message started a blank
-        // Claude session with no prior context.
-        setContinuation(providerName, event.continuation);
-      } else if (event.type === 'result') {
-        // A result — with or without text — means the turn is done. Mark
-        // the initial batch completed now so the host sweep doesn't see
-        // stale 'processing' claims while the query stays open for
-        // follow-up pushes. The agent may have responded via MCP
-        // (send_message) mid-turn, or the message may not need a response
-        // at all — either way the turn is finished.
-        markCompleted(initialBatchIds);
-        if (event.text) {
-          if (taskFireContext) taskFireAssistantText = event.text;
-          const { hasUnwrapped, dispatched } = dispatchResultText(event.text, routing);
-          if (taskFireContext && dispatched.length > 0) {
-            taskFireDispatched.push(...dispatched);
-          }
-          if (hasUnwrapped && !unwrappedNudged) {
-            unwrappedNudged = true;
-            const destinations = getAllDestinations();
-            const names = destinations.map((d) => d.name).join(', ');
-            query.push(
-              `<system>Your response was not delivered — it was not wrapped in <message to="name">...</message> blocks. ` +
-                `All output must be wrapped: use <message to="name"> for content to send, or <internal> for scratchpad. ` +
-                `Your destinations: ${names}. ` +
-                `Please re-send your response with the correct wrapping.</system>`,
-            );
+        if (event.type === 'init') {
+          queryContinuation = event.continuation;
+          // Persist immediately so a mid-turn container crash still lets the
+          // next wake resume the conversation. Without this, the session id
+          // was only written after the full stream completed — if the
+          // container died between `init` and `result`, the SDK session was
+          // effectively orphaned and the next message started a blank
+          // Claude session with no prior context.
+          setContinuation(providerName, event.continuation);
+        } else if (event.type === 'result') {
+          // A result — with or without text — means the turn is done. Mark
+          // the initial batch completed now so the host sweep doesn't see
+          // stale 'processing' claims while the query stays open for
+          // follow-up pushes. The agent may have responded via MCP
+          // (send_message) mid-turn, or the message may not need a response
+          // at all — either way the turn is finished.
+          markCompleted(initialBatchIds);
+          if (event.text) {
+            if (taskFireContext) taskFireAssistantText = event.text;
+            const { hasUnwrapped, dispatched } = dispatchResultText(event.text, routing);
+            if (taskFireContext && dispatched.length > 0) {
+              taskFireDispatched.push(...dispatched);
+            }
+            if (hasUnwrapped && !unwrappedNudged) {
+              unwrappedNudged = true;
+              const destinations = getAllDestinations();
+              const names = destinations.map((d) => d.name).join(', ');
+              query.push(
+                `<system>Your response was not delivered — it was not wrapped in <message to="name">...</message> blocks. ` +
+                  `All output must be wrapped: use <message to="name"> for content to send, or <internal> for scratchpad. ` +
+                  `Your destinations: ${names}. ` +
+                  `Please re-send your response with the correct wrapping.</system>`,
+              );
+            }
           }
         }
       }
-    }
     } catch (err) {
       streamErrored = true;
       throw err;
