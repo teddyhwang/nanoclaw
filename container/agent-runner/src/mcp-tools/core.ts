@@ -10,7 +10,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { getCurrentInReplyTo } from '../current-batch.js';
-import { getInboundDb } from '../db/connection.js';
+import { getInboundDb, getOutboundDb } from '../db/connection.js';
 import { findByName, getAllDestinations } from '../destinations.js';
 import { getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
 import { getSessionRouting } from '../db/session-routing.js';
@@ -34,16 +34,67 @@ import type { McpToolDefinition } from './types.js';
  * channel+platform. Filters out task rows (synthetic UUIDs) and trigger=0
  * accumulate rows for the same reasons documented in poll-loop.ts.
  *
+ * Task-turn guard: poll-loop computes `taskOnlyWake` (the wake's only
+ * trigger rows are kind='task') and, for those turns, `extractRouting`'s
+ * `pickInReplyToMessage` correctly yields null — a scheduled task fire
+ * is not answering any human message, so it must post as a plain
+ * message, not a reply. But that null lives in poll-loop's process
+ * module state and never reaches this stdio subprocess, so the bare
+ * fallback below would still hunt up the newest human @mention and
+ * reply-pill the task post onto a stale, unrelated message (observed
+ * 2026-05-15: an RSS status post threaded under "@Teddy try again look
+ * at the cybertron docs"). The DB-visible equivalent of `taskOnlyWake`
+ * is processing_ack: poll-loop marks the in-flight batch 'processing'
+ * before the agent runs, so during a task-only turn every 'processing'
+ * row maps to a kind='task' messages_in row. If there is no
+ * 'processing' NON-task row, this turn isn't answering a chat message
+ * — suppress the reply target. A task that *wants* to reply still can
+ * by passing an explicit in_reply_to through the tool call (handled by
+ * the caller, not this fallback).
+ *
  * Module state still takes precedence when populated — keeps in-process
  * tests deterministic and lets future in-process MCP wirings short-circuit
  * the DB hop.
  */
+function isTaskOnlyTurn(): boolean {
+  // True when at least one row is processing AND none of the
+  // currently-processing rows is a non-task inbound row. Mirrors
+  // poll-loop's `triggerRows.every((m) => m.kind === 'task')`. Fails
+  // open (returns false → normal reply resolution) on any error so a
+  // DB hiccup can't silently strip reply pills from real chat replies.
+  try {
+    const out = getOutboundDb();
+    const processing = out
+      .prepare("SELECT message_id FROM processing_ack WHERE status = 'processing'")
+      .all() as Array<{ message_id: string }>;
+    if (processing.length === 0) return false;
+    const ids = processing.map((r) => r.message_id);
+    const placeholders = ids.map(() => '?').join(',');
+    const inb = getInboundDb();
+    const nonTask = inb
+      .prepare(
+        `SELECT 1 AS hit FROM messages_in
+         WHERE id IN (${placeholders}) AND kind != 'task' LIMIT 1`,
+      )
+      .get(...ids) as { hit: number } | null | undefined;
+    // bun:sqlite's .get() returns null (not undefined) on no-row, so
+    // test nullish, not strict undefined — getting this wrong made the
+    // guard silently no-op (the original 2026-05-15 mis-fix).
+    return nonTask == null;
+  } catch (err) {
+    log(`isTaskOnlyTurn check failed (failing open): ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+}
+
 function resolveInReplyTo(
   channelType: string,
   platformId: string,
 ): string | null {
   const fromBatch = getCurrentInReplyTo();
   if (fromBatch) return fromBatch;
+  // Scheduled-task fires must not inherit a stale chat reply target.
+  if (isTaskOnlyTurn()) return null;
   try {
     const db = getInboundDb();
     const row = db
