@@ -10,11 +10,56 @@ import fs from 'fs';
 import path from 'path';
 
 import { getCurrentInReplyTo } from '../current-batch.js';
+import { getInboundDb } from '../db/connection.js';
 import { findByName, getAllDestinations } from '../destinations.js';
 import { getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
 import { getSessionRouting } from '../db/session-routing.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
+
+/**
+ * Resolve in_reply_to for an outbound row.
+ *
+ * The upstream design uses module-level `currentInReplyTo` populated by
+ * poll-loop's `setCurrentInReplyTo(routing.inReplyTo)`. That works when the
+ * MCP tool runs in the same process as poll-loop (upstream tests do this),
+ * but the nanoclaw built-in MCP server is configured as `type: 'stdio'`
+ * (see container/agent-runner/src/index.ts), so it's spawned as a SEPARATE
+ * bun subprocess. Module state in that subprocess is uninitialized — every
+ * `send_message` call read `null` and outbounds went out with no reply
+ * pill, even though poll-loop had correctly picked a target on its side.
+ *
+ * Fall back to a DB query (same shape as poll-loop's `resolveDestination-
+ * Thread`): the newest trigger=1 non-task inbound row for the destination's
+ * channel+platform. Filters out task rows (synthetic UUIDs) and trigger=0
+ * accumulate rows for the same reasons documented in poll-loop.ts.
+ *
+ * Module state still takes precedence when populated — keeps in-process
+ * tests deterministic and lets future in-process MCP wirings short-circuit
+ * the DB hop.
+ */
+function resolveInReplyTo(
+  channelType: string,
+  platformId: string,
+): string | null {
+  const fromBatch = getCurrentInReplyTo();
+  if (fromBatch) return fromBatch;
+  try {
+    const db = getInboundDb();
+    const row = db
+      .prepare(
+        `SELECT id FROM messages_in
+         WHERE channel_type = ? AND platform_id = ?
+           AND kind != 'task' AND trigger = 1
+         ORDER BY seq DESC LIMIT 1`,
+      )
+      .get(channelType, platformId) as { id: string } | undefined;
+    return row?.id ?? null;
+  } catch (err) {
+    log(`resolveInReplyTo DB fallback failed: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
 
 function log(msg: string): void {
   console.error(`[mcp-tools] ${msg}`);
@@ -118,7 +163,7 @@ export const sendMessage: McpToolDefinition = {
     const id = generateId();
     const seq = writeMessageOut({
       id,
-      in_reply_to: getCurrentInReplyTo(),
+      in_reply_to: resolveInReplyTo(routing.channel_type, routing.platform_id),
       kind: 'chat',
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,
@@ -165,7 +210,7 @@ export const sendFile: McpToolDefinition = {
 
     writeMessageOut({
       id,
-      in_reply_to: getCurrentInReplyTo(),
+      in_reply_to: resolveInReplyTo(routing.channel_type, routing.platform_id),
       kind: 'chat',
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,
