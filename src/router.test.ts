@@ -9,7 +9,7 @@ import { describe, it, expect } from 'vitest';
 import { _internals } from './router.js';
 import type { MessagingGroupAgent } from './types.js';
 
-const { evaluateEngage } = _internals;
+const { evaluateEngage, stampReplyToBot } = _internals;
 
 function buildAgent(overrides: Partial<MessagingGroupAgent> = {}): MessagingGroupAgent {
   return {
@@ -65,5 +65,44 @@ describe('evaluateEngage — mention / mention-sticky modes', () => {
     expect(evaluateEngage(agent, 'plain', false, false)).toBe(false);
     expect(evaluateEngage(agent, 'plain', true, false)).toBe(true);
     expect(evaluateEngage(agent, 'plain', false, true)).toBe(true);
+  });
+});
+
+describe('stampReplyToBot — platform-uniform reply-to-self marker', () => {
+  it('adds replyTo.toBot=true when isReplyToBot and content has a replyTo', () => {
+    const content = JSON.stringify({
+      text: 'I meant the Tico calendar',
+      replyTo: { text: 'Hey Teddy — I searched...', sender: 'Optimus', messageId: '3EB0CE...' },
+    });
+    const stamped = JSON.parse(stampReplyToBot(content, true));
+    expect(stamped.replyTo.toBot).toBe(true);
+    expect(stamped.replyTo.messageId).toBe('3EB0CE...');
+    expect(stamped.text).toBe('I meant the Tico calendar');
+  });
+
+  it('returns input unchanged when isReplyToBot=false', () => {
+    const content = JSON.stringify({ text: 'hi', replyTo: { text: 'q', sender: 'X' } });
+    expect(stampReplyToBot(content, false)).toBe(content);
+  });
+
+  it('returns input unchanged when content has no replyTo', () => {
+    const content = JSON.stringify({ text: 'no quote here' });
+    expect(stampReplyToBot(content, true)).toBe(content);
+  });
+
+  it('returns input unchanged on unparseable JSON (defensive)', () => {
+    expect(stampReplyToBot('not json', true)).toBe('not json');
+  });
+
+  it('does not mutate the input content (per-agent fan-out safety)', () => {
+    const original = JSON.stringify({
+      text: 'x',
+      replyTo: { text: 'q', sender: 'X' },
+    });
+    const before = JSON.parse(original);
+    stampReplyToBot(original, true);
+    // Re-parsing the original string must still show no toBot marker — the
+    // function must not have mutated the underlying object graph.
+    expect(JSON.parse(original)).toEqual(before);
   });
 });

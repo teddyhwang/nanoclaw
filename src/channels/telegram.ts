@@ -42,9 +42,14 @@ async function withRetry<T>(fn: () => Promise<T>, label: string, maxAttempts = 5
 function extractReplyContext(raw: Record<string, any>): ReplyContext | null {
   if (!raw.reply_to_message) return null;
   const reply = raw.reply_to_message;
+  const messageId =
+    typeof reply.message_id === 'number' || typeof reply.message_id === 'string'
+      ? String(reply.message_id)
+      : undefined;
   return {
     text: reply.text || reply.caption || '',
     sender: reply.from?.first_name || reply.from?.username || 'Unknown',
+    ...(messageId ? { messageId } : {}),
   };
 }
 

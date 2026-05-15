@@ -339,7 +339,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     const scopeOk = engages && (!senderScopeGate || senderScopeGate(event, userId, mg, agent).allowed);
 
     if (engages && accessOk && scopeOk) {
-      await deliverToAgent(agent, agentGroup, mg, event, userId, adapter?.supportsThreads === true, true);
+      await deliverToAgent(agent, agentGroup, mg, event, userId, adapter?.supportsThreads === true, true, isReplyToBot);
       engagedCount++;
 
       // Mention-sticky: ask the adapter to subscribe the thread so the
@@ -370,7 +370,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       // message (which also stages their attachments to disk via
       // writeSessionMessage → extractAttachmentFiles) is exactly what the
       // gate is meant to prevent.
-      await deliverToAgent(agent, agentGroup, mg, event, userId, adapter?.supportsThreads === true, false);
+      await deliverToAgent(agent, agentGroup, mg, event, userId, adapter?.supportsThreads === true, false, isReplyToBot);
       accumulatedCount++;
     } else {
       log.debug('Message not engaged for agent (drop policy)', {
@@ -512,6 +512,7 @@ async function deliverToAgent(
   userId: string | null,
   adapterSupportsThreads: boolean,
   wake: boolean,
+  isReplyToBot: boolean,
 ): Promise<void> {
   // Apply the adapter thread policy: threaded adapter in a group chat →
   // per-thread session regardless of wiring. agent-shared preserved (it's
@@ -557,6 +558,14 @@ async function deliverToAgent(
     }
   }
 
+  // When this inbound is a pill-reply to a prior bot message of THIS agent,
+  // stamp `replyTo.toBot=true` on the per-agent content so the formatter can
+  // render `<quoted_message mine="true">` and the agent recognizes the message
+  // as a continuation of its own prior turn. Shallow-cloned because the same
+  // event.message.content is shared across the fan-out — mutating in place
+  // would cross-contaminate sibling agents whose isReplyToBot is false.
+  const content = stampReplyToBot(event.message.content as string, isReplyToBot);
+
   const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);
   await writeSessionMessage(session.agent_group_id, session.id, {
     id: messageId,
@@ -565,7 +574,7 @@ async function deliverToAgent(
     platformId: deliveryAddr.platformId,
     channelType: deliveryAddr.channelType,
     threadId: deliveryAddr.threadId,
-    content: event.message.content,
+    content,
     trigger: wake ? 1 : 0,
   });
   emitEngineEvent('inbound.written', {
@@ -603,6 +612,35 @@ async function deliverToAgent(
 }
 
 /**
+ * If this inbound is a pill-reply to a prior bot message of THIS agent,
+ * stamp `replyTo.toBot=true` on a parsed-and-reserialized copy of the
+ * content string. The container formatter renders that as
+ * `<quoted_message mine="true">`, telling the agent the user is continuing
+ * its own prior turn — same signal across Discord / Telegram / WhatsApp
+ * regardless of how each platform expresses a pill-reply at the wire level.
+ *
+ * Reserializing matters because event.message.content is shared across the
+ * fan-out loop; mutating in place would cross-contaminate sibling agents
+ * for whom isReplyToBot is false. Returns the input untouched when the
+ * payload isn't a JSON object, doesn't carry a replyTo, or already lacks
+ * a sender/text the formatter would render.
+ */
+function stampReplyToBot(content: string, isReplyToBot: boolean): string {
+  if (!isReplyToBot) return content;
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(content) as Record<string, unknown>;
+  } catch {
+    return content;
+  }
+  if (!parsed || typeof parsed !== 'object') return content;
+  const replyTo = parsed.replyTo;
+  if (!replyTo || typeof replyTo !== 'object') return content;
+  const stamped = { ...parsed, replyTo: { ...(replyTo as Record<string, unknown>), toBot: true } };
+  return JSON.stringify(stamped);
+}
+
+/**
  * When fanning out, the same inbound message lands in multiple per-agent
  * session DBs. messages_in.id is PRIMARY KEY, so reuse of the raw id would
  * collide across sessions (or, more subtly, within one session if re-routed
@@ -616,4 +654,5 @@ function messageIdForAgent(baseId: string | undefined, agentGroupId: string): st
 // Test-only exports.
 export const _internals = {
   evaluateEngage,
+  stampReplyToBot,
 };

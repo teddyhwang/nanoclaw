@@ -290,6 +290,10 @@ function formatSystemMessage(msg: MessageInRow): string {
  * Requires BOTH sender and text — if only id is present the reply_to attribute
  * on the parent <message> carries the link without an inline preview.
  *
+ * `mine="true"` is added when the host detected the pill-reply pointing at a
+ * prior bot outbound for this agent (router.stampReplyToBot). Platform-uniform
+ * signal: Discord / Telegram / WhatsApp all reach this branch the same way.
+ *
  * No truncation here (v1 didn't truncate).
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -298,7 +302,8 @@ function formatReplyContext(replyTo: any): string {
   const sender = replyTo.sender;
   const text = replyTo.text;
   if (!sender || !text) return '';
-  return `\n  <quoted_message from="${escapeXml(sender)}">${escapeXml(text)}</quoted_message>\n`;
+  const mineAttr = replyTo.toBot === true ? ' mine="true"' : '';
+  return `\n  <quoted_message from="${escapeXml(sender)}"${mineAttr}>${escapeXml(text)}</quoted_message>\n`;
 }
 
 /**

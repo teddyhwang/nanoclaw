@@ -124,6 +124,32 @@ describe('reply_to + quoted_message rendering', () => {
     expect(result).toContain('&lt;script&gt;');
     expect(result).toContain('&quot;xss&quot;');
   });
+
+  it('renders mine="true" on quoted_message when replyTo.toBot is set by the host', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Teddy',
+      text: 'I meant the Tico calendar',
+      replyTo: {
+        id: '42',
+        sender: 'Optimus',
+        text: 'Hey Teddy — I searched...',
+        toBot: true,
+      },
+    });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('<quoted_message from="Optimus" mine="true">Hey Teddy — I searched...</quoted_message>');
+  });
+
+  it('omits mine attribute when replyTo.toBot is not set (regular pill-reply to a peer)', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Alice',
+      text: 'agree',
+      replyTo: { id: '42', sender: 'Bob', text: 'Anyone in?' },
+    });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('<quoted_message from="Bob">Anyone in?</quoted_message>');
+    expect(result).not.toContain('mine="true"');
+  });
 });
 
 describe('sender attribute precedence', () => {
