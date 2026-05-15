@@ -54,6 +54,31 @@ describe('insertTask', () => {
     expect(row.series_id).toBe('task-1');
     db.close();
   });
+
+  it("defaults status to 'pending' when not given", () => {
+    const db = freshDb();
+    insertBasicTask(db, 'task-d', '0 9 * * *');
+    const row = db.prepare('SELECT status FROM messages_in WHERE id = ?').get('task-d') as { status: string };
+    expect(row.status).toBe('pending');
+    db.close();
+  });
+
+  it("honors an explicit status='paused' (carry-forward re-seed of a dormant-paused task)", () => {
+    const db = freshDb();
+    insertTask(db, {
+      id: 'task-p',
+      processAfter: new Date().toISOString(),
+      recurrence: '0 9 * * *',
+      platformId: null,
+      channelType: null,
+      threadId: null,
+      content: JSON.stringify({ prompt: 'noop' }),
+      status: 'paused',
+    });
+    const row = db.prepare('SELECT status FROM messages_in WHERE id = ?').get('task-p') as { status: string };
+    expect(row.status).toBe('paused');
+    db.close();
+  });
 });
 
 describe('cancelTask / pauseTask / resumeTask series matching', () => {

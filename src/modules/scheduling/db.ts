@@ -24,13 +24,19 @@ export function insertTask(
     channelType: string | null;
     threadId: string | null;
     content: string;
+    // Defaults to 'pending'. task-carry-forward passes 'paused' when the
+    // operator paused a recurring task while its session was dormant —
+    // without carrying status through the re-seed the pause silently
+    // evaporates the moment a new message reactivates the session.
+    status?: 'pending' | 'paused';
   },
 ): void {
   db.prepare(
     `INSERT INTO messages_in (id, seq, timestamp, status, tries, process_after, recurrence, kind, platform_id, channel_type, thread_id, content, series_id)
-     VALUES (@id, @seq, datetime('now'), 'pending', 0, @processAfter, @recurrence, 'task', @platformId, @channelType, @threadId, @content, @id)`,
+     VALUES (@id, @seq, datetime('now'), @status, 0, @processAfter, @recurrence, 'task', @platformId, @channelType, @threadId, @content, @id)`,
   ).run({
     ...task,
+    status: task.status ?? 'pending',
     seq: nextEvenSeq(db),
   });
 }
