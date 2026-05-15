@@ -20,7 +20,7 @@
 import fs from 'fs';
 
 import { registerDeliveryAction } from '../../delivery.js';
-import { getDeliveredIds, getDueOutboundMessages } from '../../db/session-db.js';
+import { getDeliveredIds, getDueOutboundMessages, getProcessingClaims } from '../../db/session-db.js';
 import { heartbeatPath, openInboundDb, openOutboundDb } from '../../session-manager.js';
 
 const TYPING_REFRESH_MS = 4000;
@@ -136,6 +136,90 @@ function hasPendingUserFacingOutbound(agentGroupId: string, sessionId: string): 
   }
 }
 
+/**
+ * True if the container's currently-processing inbound rows are ALL
+ * non-user (kind='task' / 'system') — i.e. this is a maintenance /
+ * recurring-task / reflection turn, not a user-conversation turn.
+ *
+ * Why (screenshot 2026-05-15, ai-friends): the agent answered a user
+ * message, then a *deferred maintenance task* was re-processed as a
+ * separate ~24s turn that emitted only `<internal>`. The typing
+ * refresher (started for the user turn) stays alive on heartbeat
+ * freshness, and `hasPendingUserFacingOutbound` is false for a silent
+ * task turn (it produces no outbound) — so `triggerTyping` fired for
+ * the whole task turn and the user saw "Optimus is typing…" with no
+ * message coming. S290's `silent_turn_complete` only stops typing
+ * *after* the silent turn ends — it can't suppress the indicator
+ * *during* a long deferred-task turn. This is the precise gate for
+ * "don't show typing for a turn that isn't answering the user."
+ *
+ * Mirrors the cross-process `processing_ack` signal used by the
+ * scheduled-task reply-pill fix (mcp-tools/core.ts isTaskOnlyTurn):
+ * poll-loop marks the in-flight batch processing before the agent
+ * runs, so during a task-only turn every processing row maps to a
+ * kind='task'/'system' messages_in row.
+ *
+ * Fails OPEN (returns false → typing shows) on any error or when no
+ * row is processing: a DB hiccup must never silently suppress the
+ * indicator for a genuine user turn. Pure read-only peek; handles
+ * closed in finally. Local fork patch (Optimus): upstream doesn't run
+ * deferred maintenance/reflection turns so doesn't hit this.
+ */
+/**
+ * Pure decision split out so the suppression rule is unit-testable
+ * without real session-DB files (same rationale as host-sweep's
+ * `decideStuckAction`). `processingCount` = rows currently in
+ * processing_ack; `hasUserKindProcessing` = at least one of those maps
+ * to a kind in ('chat','chat-sdk') messages_in row.
+ *
+ * Suppress (true) ONLY when there IS an active turn (>0 processing)
+ * and NONE of it is user-conversation work. No processing rows →
+ * false (let the grace/heartbeat logic decide; not our concern).
+ */
+export function decideSuppressTypingForNonUserTurn(
+  processingCount: number,
+  hasUserKindProcessing: boolean,
+): boolean {
+  if (processingCount === 0) return false;
+  return !hasUserKindProcessing;
+}
+
+function isNonUserProcessingTurn(agentGroupId: string, sessionId: string): boolean {
+  let outDb: ReturnType<typeof openOutboundDb> | null = null;
+  let inDb: ReturnType<typeof openInboundDb> | null = null;
+  try {
+    outDb = openOutboundDb(agentGroupId, sessionId);
+    const claims = getProcessingClaims(outDb);
+    if (claims.length === 0) {
+      return decideSuppressTypingForNonUserTurn(0, false);
+    }
+    const ids = claims.map((c) => c.message_id);
+    const placeholders = ids.map(() => '?').join(',');
+    inDb = openInboundDb(agentGroupId, sessionId);
+    const userRow = inDb
+      .prepare(
+        `SELECT 1 AS hit FROM messages_in
+         WHERE id IN (${placeholders})
+           AND kind IN ('chat', 'chat-sdk') LIMIT 1`,
+      )
+      .get(...ids) as { hit: number } | null | undefined;
+    return decideSuppressTypingForNonUserTurn(ids.length, userRow != null);
+  } catch {
+    return false;
+  } finally {
+    try {
+      outDb?.close();
+    } catch {
+      /* best-effort */
+    }
+    try {
+      inDb?.close();
+    } catch {
+      /* best-effort */
+    }
+  }
+}
+
 export function startTypingRefresh(
   sessionId: string,
   agentGroupId: string,
@@ -177,6 +261,16 @@ export function startTypingRefresh(
     // window. If it doesn't (e.g. delivery fails), the next tick
     // resumes typing normally.
     if (hasPendingUserFacingOutbound(entry.agentGroupId, sessionId)) return;
+
+    // The container is mid-turn but the in-flight work is a
+    // maintenance/recurring-task/reflection turn (task/system rows
+    // only), not a reply to the user. Suppress typing — otherwise the
+    // user sees "is typing…" through a silent turn that will never
+    // produce a message (screenshot 2026-05-15, ai-friends deferred
+    // task after a real reply). Keep the refresher alive: a genuine
+    // follow-up user message restarts a user turn and the next tick
+    // resumes typing normally.
+    if (isNonUserProcessingTurn(entry.agentGroupId, sessionId)) return;
 
     const withinGrace = Date.now() - entry.startedAt < TYPING_GRACE_MS;
     if (withinGrace || isHeartbeatFresh(entry.agentGroupId, sessionId)) {
