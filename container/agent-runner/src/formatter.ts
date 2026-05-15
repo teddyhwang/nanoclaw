@@ -192,6 +192,7 @@ export function formatMessages(messages: MessageInRow[]): string {
 
   // Group by kind
   const chatMessages = messages.filter((m) => m.kind === 'chat' || m.kind === 'chat-sdk');
+  const reactionMessages = messages.filter((m) => m.kind === 'reaction');
   const taskMessages = messages.filter((m) => m.kind === 'task');
   const webhookMessages = messages.filter((m) => m.kind === 'webhook');
   const systemMessages = messages.filter((m) => m.kind === 'system');
@@ -200,6 +201,9 @@ export function formatMessages(messages: MessageInRow[]): string {
 
   if (chatMessages.length > 0) {
     parts.push(formatChatMessages(chatMessages));
+  }
+  if (reactionMessages.length > 0) {
+    parts.push(...reactionMessages.map(formatReactionMessage));
   }
   if (taskMessages.length > 0) {
     parts.push(...taskMessages.map(formatTaskMessage));
@@ -281,6 +285,30 @@ function formatSystemMessage(msg: MessageInRow): string {
   const content = parseContent(msg.content);
   const from = originAttr(msg);
   return `<system_response${from} action="${escapeXml(content.action || 'unknown')}" status="${escapeXml(content.status || 'unknown')}">${JSON.stringify(content.result || null)}</system_response>`;
+}
+
+/**
+ * Render an inbound emoji reaction (`kind: 'reaction'`).
+ *
+ * `added="true"` — the user added the reaction; `added="false"` — they
+ * removed one they'd previously added. `by` is the reacting user. `on_mine`
+ * is true when the reaction targeted one of this agent's own messages — the
+ * router stamps `replyTo.toBot=true` (same `wasDeliveredByBot` machinery as
+ * reply-to-bot) for exactly that case, so it's the cross-platform-uniform
+ * "they reacted to something I said" signal. The element is self-closing:
+ * a reaction carries no body, only the act itself.
+ */
+function formatReactionMessage(msg: MessageInRow): string {
+  const content = parseContent(msg.content);
+  const from = originAttr(msg);
+  const time = formatLocalTime(msg.timestamp, TIMEZONE);
+  const sender =
+    content.senderName || content.author?.fullName || content.author?.userName || content.sender || 'Unknown';
+  const emoji = content.emoji ?? content.rawEmoji ?? '?';
+  const added = content.added === true || content.added === 'true';
+  const onMine = content.replyTo?.toBot === true;
+  const onMineAttr = onMine ? ' on_mine="true"' : '';
+  return `<reaction${from} by="${escapeXml(sender)}" added="${added}" emoji="${escapeXml(String(emoji))}"${onMineAttr} time="${escapeXml(time)}" />`;
 }
 
 /**

@@ -10,7 +10,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '../db/connection.js';
 import { getUndeliveredMessages } from '../db/messages-out.js';
 import { setCurrentInReplyTo, clearCurrentInReplyTo } from '../current-batch.js';
-import { sendMessage } from './core.js';
+import { sendMessage, addReaction, removeReaction } from './core.js';
 
 beforeEach(() => {
   initTestSessionDb();
@@ -191,5 +191,59 @@ describe('send_message MCP tool — in_reply_to plumbing', () => {
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
     expect(out[0].in_reply_to).toBe('plat-msg-42');
+  });
+});
+
+describe('add_reaction / remove_reaction MCP tools', () => {
+  // Seed an inbound message at a known seq. getMessageIdBySeq returns the
+  // inbound row's id directly (it IS the platform message id), and
+  // getRoutingBySeq returns its channel/platform/thread — so a reaction
+  // tool keyed on that seq resolves a complete outbound op.
+  function seedInbound(seq: number) {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (seq, id, channel_type, platform_id, thread_id, kind, trigger, status, timestamp, content)
+         VALUES (?, 'plat-msg-7', 'discord', 'discord:gid:cid', NULL, 'chat-sdk', 1, 'completed', '2026-05-15T03:30:47.398Z', '{}')`,
+      )
+      .run(seq);
+  }
+
+  it('add_reaction queues a reaction op targeting the platform message id', async () => {
+    seedInbound(2);
+
+    const res = await addReaction.handler({ messageId: 2, emoji: 'thumbs_up' });
+    expect(res.isError).toBeFalsy();
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    const content = JSON.parse(out[0].content);
+    expect(content).toEqual({ operation: 'reaction', messageId: 'plat-msg-7', emoji: 'thumbs_up' });
+    expect(out[0].channel_type).toBe('discord');
+    expect(out[0].platform_id).toBe('discord:gid:cid');
+  });
+
+  it('remove_reaction queues a remove_reaction op for the same message', async () => {
+    seedInbound(2);
+
+    const res = await removeReaction.handler({ messageId: 2, emoji: 'eyes' });
+    expect(res.isError).toBeFalsy();
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    const content = JSON.parse(out[0].content);
+    expect(content).toEqual({ operation: 'remove_reaction', messageId: 'plat-msg-7', emoji: 'eyes' });
+  });
+
+  it('remove_reaction errors when messageId or emoji is missing', async () => {
+    const noEmoji = await removeReaction.handler({ messageId: 2 });
+    expect(noEmoji.isError).toBe(true);
+    const noId = await removeReaction.handler({ emoji: 'eyes' });
+    expect(noId.isError).toBe(true);
+  });
+
+  it('remove_reaction errors when the target seq is unknown', async () => {
+    const res = await removeReaction.handler({ messageId: 999, emoji: 'eyes' });
+    expect(res.isError).toBe(true);
+    expect(getUndeliveredMessages()).toHaveLength(0);
   });
 });

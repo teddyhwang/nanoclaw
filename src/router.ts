@@ -333,7 +333,22 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       !isBotLoopback && replyToMessageId
         ? isReplyToOurBot(agent.agent_group_id, mg.id, event.threadId, replyToMessageId)
         : false;
-    const engages = isBotLoopback || isBackfill ? false : evaluateEngage(agent, messageText, isMention, isReplyToBot);
+    // Emoji reactions get a dedicated, deliberately quiet engagement rule
+    // that bypasses the wiring's engage_mode entirely. A reaction on one
+    // of THIS agent's own messages is a soft trigger (reuses the same
+    // `wasDeliveredByBot` check as reply-to-bot, via `replyToMessageId`
+    // carrying the reacted-to message id). A reaction between other users
+    // never wakes the agent regardless of engage_mode — without this, a
+    // `pattern: .` (always-on) wiring would fire the agent on every 👍 in
+    // a busy channel. It still falls through to the accumulate branch so
+    // the agent sees the reaction as silent context next time it engages.
+    const isReaction = event.message.kind === 'reaction';
+    const engages =
+      isBotLoopback || isBackfill
+        ? false
+        : isReaction
+          ? evaluateReactionEngage(isReplyToBot)
+          : evaluateEngage(agent, messageText, isMention, isReplyToBot);
 
     const accessOk = engages && (!accessGate || accessGate(event, userId, mg, agent.agent_group_id).allowed);
     const scopeOk = engages && (!senderScopeGate || senderScopeGate(event, userId, mg, agent).allowed);
@@ -504,6 +519,23 @@ function evaluateEngage(agent: MessagingGroupAgent, text: string, isMention: boo
   }
 }
 
+/**
+ * Engagement rule for `kind: 'reaction'` inbounds, deliberately quieter
+ * than `evaluateEngage` and independent of the wiring's `engage_mode`.
+ *
+ * A reaction on one of THIS agent's own messages (`isReplyToBot`, resolved
+ * by the same `wasDeliveredByBot` check reply-to-bot uses) is a soft
+ * trigger — the user is responding to something the agent said. A reaction
+ * between other users never wakes the agent, regardless of engage_mode:
+ * without this a `pattern: .` always-on wiring would fire on every 👍 in a
+ * busy channel. Non-engaging reactions still fall through to the
+ * accumulate branch so the agent sees them as silent context next time it
+ * engages for another reason.
+ */
+function evaluateReactionEngage(isReplyToBot: boolean): boolean {
+  return isReplyToBot;
+}
+
 async function deliverToAgent(
   agent: MessagingGroupAgent,
   agentGroup: AgentGroup,
@@ -654,5 +686,6 @@ function messageIdForAgent(baseId: string | undefined, agentGroupId: string): st
 // Test-only exports.
 export const _internals = {
   evaluateEngage,
+  evaluateReactionEngage,
   stampReplyToBot,
 };

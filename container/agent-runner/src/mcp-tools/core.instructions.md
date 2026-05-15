@@ -18,9 +18,13 @@ Use the `mcp__nanoclaw__send_message` tool to send a message while you're still 
 
 Use `mcp__nanoclaw__send_file({ path, text?, filename?, to? })` to deliver a file from your workspace. `path` is absolute or relative to `/workspace/agent/`; `filename` overrides the display name shown in chat (defaults to the file's basename); `text` is an optional accompanying message. Use this for artifacts you produce (charts, PDFs, generated images, reports) rather than dumping contents into chat.
 
-### Reacting to messages (`add_reaction`)
+### Reacting to messages (`add_reaction` / `remove_reaction`)
 
 Use `mcp__nanoclaw__add_reaction({ messageId, emoji })` to react to a specific inbound message by its `#N` id — pass `messageId` as an integer (e.g. `22`, not `"22"`). Good for lightweight acknowledgment (`eyes` = seen, `white_check_mark` = done) when a full reply would be noise. `emoji` is the shortcode name (e.g. `thumbs_up`, `heart`), not the raw character.
+
+Use `mcp__nanoclaw__remove_reaction({ messageId, emoji })` to take back a reaction you added earlier — pass the same `emoji` name you reacted with. Typical use: you marked a message `eyes` (working on it) and want to swap to `white_check_mark` (done) — remove `eyes`, add `white_check_mark`.
+
+When a user adds or removes a reaction, you see it as a `<reaction>` element in context: `added="true"` means they reacted, `added="false"` means they removed it; `on` is the `#N` id of the message they reacted to (yours, if `on_mine="true"`). Reactions on your own messages reach you as a soft trigger; reactions between other people are silent context. Treat a reaction as a lightweight signal — usually no reply is warranted unless it clearly asks for follow-up (e.g. a 👀 on your question, or a 👎 on a result you delivered).
 
 ### Internal thoughts
 

@@ -1,5 +1,6 @@
 /**
- * Core MCP tools: send_message, send_file, edit_message, add_reaction.
+ * Core MCP tools: send_message, send_file, edit_message, add_reaction,
+ * remove_reaction.
  *
  * All outbound tools resolve destinations via the local destination map
  * (see destinations.ts). Agents reference destinations by name; the map
@@ -356,4 +357,46 @@ export const addReaction: McpToolDefinition = {
   },
 };
 
-registerTools([sendMessage, sendFile, editMessage, addReaction]);
+export const removeReaction: McpToolDefinition = {
+  tool: {
+    name: 'remove_reaction',
+    description:
+      'Remove an emoji reaction you previously added to a message. Use the same emoji name you reacted with.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        messageId: { type: 'integer', description: 'Message ID (the numeric id shown in messages)' },
+        emoji: { type: 'string', description: 'Emoji name to remove (e.g., thumbs_up, heart, check)' },
+      },
+      required: ['messageId', 'emoji'],
+    },
+  },
+  async handler(args) {
+    const seq = Number(args.messageId);
+    const emoji = args.emoji as string;
+    if (!seq || !emoji) return err('messageId and emoji are required');
+
+    const platformId = getMessageIdBySeq(seq);
+    if (!platformId) return err(`Message #${seq} not found`);
+
+    const routing = getRoutingBySeq(seq);
+    if (!routing || !routing.channel_type || !routing.platform_id) {
+      return err(`Cannot determine destination for message #${seq}`);
+    }
+
+    const id = generateId();
+    writeMessageOut({
+      id,
+      kind: 'chat',
+      platform_id: routing.platform_id,
+      channel_type: routing.channel_type,
+      thread_id: routing.thread_id,
+      content: JSON.stringify({ operation: 'remove_reaction', messageId: platformId, emoji }),
+    });
+
+    log(`remove_reaction: #${seq} → ${emoji} on ${platformId}`);
+    return ok(`Reaction removal queued for #${seq}`);
+  },
+};
+
+registerTools([sendMessage, sendFile, editMessage, addReaction, removeReaction]);

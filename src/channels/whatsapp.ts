@@ -1065,6 +1065,55 @@ registerChannelAdapter('whatsapp', {
             // Notify metadata for group discovery
             setupConfig.onMetadata(chatJid, undefined, isGroup);
 
+            // Emoji reaction (Baileys delivers these as `reactionMessage`,
+            // not text). `reactionMessage.text` is the unicode emoji when a
+            // reaction is added and empty string when it's removed.
+            // `reactionMessage.key` is the key of the message that was
+            // reacted to — `.id` is its message id, `.fromMe` tells us it
+            // was one of the bot's own deliveries. We carry the reacted-to
+            // id through `replyTo.messageId` so the router's existing
+            // reply-to-bot path turns a reaction on our message into a soft
+            // trigger, exactly like the Chat SDK bridge does. Handled here,
+            // before the empty-content guard below (a removed reaction has
+            // no text and would otherwise be dropped as a protocol blip).
+            const reaction = normalized.reactionMessage;
+            if (reaction && reaction.key?.id) {
+              const added = !!reaction.text;
+              const emoji = reaction.text || '';
+              const rSender = msg.key.participant || msg.key.remoteJid || '';
+              const rSenderName = msg.pushName || rSender.split('@')[0];
+              const reactedToId = reaction.key.id;
+              const inbound: InboundMessage = {
+                id: `${reactedToId}:rx:${added ? 'add' : 'del'}:${emoji || 'none'}`,
+                kind: 'reaction',
+                content: {
+                  operation: 'reaction_received',
+                  added,
+                  emoji,
+                  rawEmoji: emoji,
+                  reactedToMessageId: reactedToId,
+                  // reaction.key.fromMe is WhatsApp's own "was this the
+                  // bot's message" bit. We still route through replyTo so
+                  // the router's wasDeliveredByBot check is the single
+                  // source of truth across every platform, but stash the
+                  // platform hint for observability.
+                  reactedToFromMe: reaction.key.fromMe ?? false,
+                  replyTo: { messageId: reactedToId },
+                  senderId: rSender,
+                  sender: rSenderName,
+                  senderName: rSenderName,
+                  isGroup,
+                  chatJid,
+                  text: `${rSenderName} ${added ? 'reacted with' : 'removed reaction'} ${emoji}`,
+                },
+                timestamp,
+                isGroup,
+                isMention: false,
+              };
+              setupConfig.onInbound(chatJid, null, inbound);
+              continue;
+            }
+
             let content =
               normalized.conversation ||
               normalized.extendedTextMessage?.text ||

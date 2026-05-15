@@ -17,6 +17,7 @@ import {
   type Adapter,
   type ConcurrencyStrategy,
   type Message as ChatMessage,
+  type ReactionEvent,
 } from 'chat';
 import { log } from '../log.js';
 import { SqliteStateAdapter } from '../state-sqlite.js';
@@ -451,6 +452,52 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     };
   }
 
+  /**
+   * Build an inbound `kind: 'reaction'` message from a Chat SDK
+   * `ReactionEvent`. Works uniformly across every Chat SDK platform
+   * (Discord, Slack, Telegram, Teams, …) — the SDK normalizes the
+   * platform's raw reaction wire format into this one shape.
+   *
+   * `content.replyTo.messageId` carries the *reacted-to* message's platform
+   * id. This deliberately reuses the same field the router's reply-to-bot
+   * detection (`isReplyToOurBot` → `wasDeliveredByBot`) already consults, so
+   * a reaction on one of the bot's own messages becomes a soft trigger with
+   * zero new router plumbing. `content.text` is a human-legible summary used
+   * as a fallback by readers that don't special-case the reaction shape;
+   * the formatter renders the structured fields instead.
+   *
+   * `id` is namespaced with `:rx:<added>:<emoji>` so adding then removing
+   * the same emoji on the same message produces two distinct
+   * `messages_in.id`s (the PK is per-session) rather than the remove
+   * silently colliding with and dropping the add.
+   */
+  function reactionToInbound(event: ReactionEvent): InboundMessage {
+    const author = event.user as { userId?: string; fullName?: string; userName?: string } | undefined;
+    const senderName = author?.fullName ?? author?.userName;
+    const emojiName = event.emoji?.name ?? event.rawEmoji;
+    const verb = event.added ? 'reacted with' : 'removed reaction';
+    return {
+      id: `${event.messageId}:rx:${event.added ? 'add' : 'del'}:${emojiName}`,
+      kind: 'reaction',
+      content: {
+        operation: 'reaction_received',
+        added: event.added,
+        emoji: emojiName,
+        rawEmoji: event.rawEmoji,
+        // Reacted-to message id, surfaced both as the explicit field and via
+        // replyTo so the router's existing reply-to-bot path resolves it.
+        reactedToMessageId: event.messageId,
+        replyTo: { messageId: event.messageId },
+        senderId: author?.userId,
+        sender: senderName,
+        senderName,
+        text: `${senderName ?? 'Someone'} ${verb} ${emojiName}`,
+      },
+      timestamp: new Date().toISOString(),
+      isMention: false,
+    };
+  }
+
   const bridge: ChannelAdapter = {
     name: adapter.name,
     channelType: adapter.name,
@@ -522,6 +569,17 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       chat.onNewMessage(/[\s\S]*/, async (thread, message) => {
         const channelId = adapter.channelIdFromThreadId(thread.id);
         await setupConfig.onInbound(channelId, thread.id, await messageToInbound(message, false, true));
+      });
+
+      // Emoji reactions (add + remove), all Chat SDK platforms. No emoji
+      // filter — we forward every reaction; the router decides whether it's
+      // a soft trigger (reaction on our own message) or silent accumulate
+      // context (reaction between other users). thread.id flows through as
+      // the channel/thread id exactly like onNewMessage so the reaction
+      // lands in the same session as the message it targets.
+      chat.onReaction(async (event: ReactionEvent) => {
+        const channelId = adapter.channelIdFromThreadId(event.threadId);
+        await setupConfig.onInbound(channelId, event.threadId, reactionToInbound(event));
       });
 
       // Handle button clicks (ask_user_question)

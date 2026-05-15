@@ -9,7 +9,7 @@ import { describe, it, expect } from 'vitest';
 import { _internals } from './router.js';
 import type { MessagingGroupAgent } from './types.js';
 
-const { evaluateEngage, stampReplyToBot } = _internals;
+const { evaluateEngage, evaluateReactionEngage, stampReplyToBot } = _internals;
 
 function buildAgent(overrides: Partial<MessagingGroupAgent> = {}): MessagingGroupAgent {
   return {
@@ -104,5 +104,19 @@ describe('stampReplyToBot — platform-uniform reply-to-self marker', () => {
     // Re-parsing the original string must still show no toBot marker — the
     // function must not have mutated the underlying object graph.
     expect(JSON.parse(original)).toEqual(before);
+  });
+});
+
+describe('evaluateReactionEngage — soft-trigger on bot messages only', () => {
+  it('engages when the reaction targets one of the bot’s own messages', () => {
+    expect(evaluateReactionEngage(true)).toBe(true);
+  });
+
+  it('does not engage on a reaction between other users', () => {
+    // Independent of engage_mode by design — even a `pattern: .` always-on
+    // wiring must not wake on every reaction in a busy channel. The
+    // non-engaging reaction still reaches the agent via the accumulate
+    // branch as silent context (covered by host-core integration tests).
+    expect(evaluateReactionEngage(false)).toBe(false);
   });
 });

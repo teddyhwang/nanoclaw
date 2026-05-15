@@ -563,6 +563,22 @@ Add an emoji reaction to a message.
 
 Implementation: write a `messages_out` row with `operation: 'reaction'`.
 
+#### remove_reaction
+
+Remove an emoji reaction the agent previously added.
+
+```typescript
+{
+  name: 'remove_reaction',
+  params: {
+    messageId: string,     // integer ID as shown to the agent
+    emoji: string,         // same emoji name used when reacting
+  }
+}
+```
+
+Implementation: write a `messages_out` row with `operation: 'remove_reaction'`. Inbound reactions from users arrive as `kind: 'reaction'` messages_in rows (see architecture.md "Reactions"); a reaction on the bot's own message is a soft trigger, others are silent context.
+
 #### send_to_agent
 
 Send a message to another agent group.

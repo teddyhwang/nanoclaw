@@ -190,7 +190,7 @@ Two tables. JSON blobs for content — schema-free, format varies by `kind`.
 -- Host writes, agent-runner reads
 CREATE TABLE messages_in (
   id             TEXT PRIMARY KEY,
-  kind           TEXT NOT NULL,      -- 'chat' | 'chat-sdk' | 'task' | 'webhook' | 'system'
+  kind           TEXT NOT NULL,      -- 'chat' | 'chat-sdk' | 'reaction' | 'task' | 'webhook' | 'system'
   timestamp      TEXT NOT NULL,
   status         TEXT DEFAULT 'pending',  -- 'pending' | 'processing' | 'completed' | 'failed'
   status_changed TEXT,               -- ISO timestamp of last status change
@@ -339,7 +339,9 @@ Agent calls an `edit_message` tool with the message ID and new content. Agent-ru
 
 **Reactions:**
 
-Agent calls `add_reaction` tool with message ID and emoji. Agent-runner writes messages_out with a reaction operation. Host calls `adapter.addReaction()`.
+Agent calls `add_reaction` (or `remove_reaction`) with a message ID and emoji. Agent-runner writes messages_out with a `reaction` / `remove_reaction` operation. Host calls `adapter.addReaction()` / `adapter.removeReaction()`.
+
+Inbound is symmetric: when a user adds or removes a reaction, the channel adapter emits a `kind: 'reaction'` inbound (Chat SDK platforms via `chat.onReaction`; WhatsApp via the native Baileys `reactionMessage` path). The router treats a reaction on one of the bot's own messages as a soft trigger (same `wasDeliveredByBot` check as reply-to-bot) and a reaction between other users as silent accumulate-only context — so a busy channel's reactions don't wake the agent. The container formatter renders it as a self-closing `<reaction by="…" added="true|false" emoji="…" on_mine="true?" />` element.
 
 **Operations in messages_out content:**
 
@@ -355,6 +357,9 @@ Agent calls `add_reaction` tool with message ID and emoji. Agent-runner writes m
 
 // Reaction
 { "operation": "reaction", "messageId": "5", "emoji": "thumbs_up" }
+
+// Remove a reaction the agent previously added
+{ "operation": "remove_reaction", "messageId": "5", "emoji": "thumbs_up" }
 ```
 
 The host reads the `operation` field (if present) and calls the right adapter method. No operation field = normal message delivery. Platform capabilities vary — the host/bridge handles graceful degradation (e.g., reaction on a platform that doesn't support it → skip or send as text).
@@ -845,6 +850,7 @@ MCP tools write directly to the session DB.
 | `ask_user_question` | Write `messages_out` with question card. Hold tool call open, poll `messages_in` for response matching `questionId`. Return selection as tool result. |
 | `edit_message` | Write `messages_out` with `operation: 'edit'` |
 | `add_reaction` | Write `messages_out` with `operation: 'reaction'` |
+| `remove_reaction` | Write `messages_out` with `operation: 'remove_reaction'` |
 | `send_to_agent` | Write `messages_out` with `channel_type: 'agent'`, `platform_id: '{target}'` |
 | `send_card` | Write `messages_out` with card structure |
 

@@ -48,7 +48,7 @@ export interface InboundEvent {
   threadId: string | null;
   message: {
     id: string;
-    kind: 'chat' | 'chat-sdk';
+    kind: 'chat' | 'chat-sdk' | 'reaction';
     content: string; // JSON blob
     timestamp: string;
     /**
@@ -87,7 +87,15 @@ export interface InboundEvent {
 /** Inbound message from adapter to host. */
 export interface InboundMessage {
   id: string;
-  kind: 'chat' | 'chat-sdk';
+  /**
+   * `'reaction'` carries an emoji reaction a user added to / removed from a
+   * message (any platform that supports reactions). Its `content` is a
+   * `ReactionInboundContent` JSON object — see `chat-sdk-bridge.ts`
+   * `reactionToInbound`. The router treats a reaction on one of the bot's
+   * own messages as a soft trigger (same machinery as reply-to-bot) and a
+   * reaction between other users as silent accumulate-only context.
+   */
+  kind: 'chat' | 'chat-sdk' | 'reaction';
   content: unknown; // JS object — host will JSON.stringify before writing to session DB
   timestamp: string;
   /**

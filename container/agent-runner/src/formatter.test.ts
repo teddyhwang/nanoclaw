@@ -706,3 +706,82 @@ describe('formatAttachments — text inlining', () => {
     expect(out.match(/<attached_file/g)?.length).toBe(1);
   });
 });
+
+describe('reaction rendering', () => {
+  it('renders an added reaction as a self-closing <reaction> element', () => {
+    insertMessage('rx1', 'reaction', {
+      operation: 'reaction_received',
+      added: true,
+      emoji: 'thumbs_up',
+      senderName: 'Alice',
+    });
+    const out = formatMessages(getPendingMessages());
+    expect(out).toContain('<reaction');
+    expect(out).toContain('by="Alice"');
+    expect(out).toContain('added="true"');
+    expect(out).toContain('emoji="thumbs_up"');
+    expect(out).toContain('/>');
+    // No body / closing tag — a reaction is the act, not content.
+    expect(out).not.toContain('</reaction>');
+  });
+
+  it('renders a removed reaction with added="false"', () => {
+    insertMessage('rx2', 'reaction', {
+      operation: 'reaction_received',
+      added: false,
+      emoji: 'eyes',
+      senderName: 'Bob',
+    });
+    const out = formatMessages(getPendingMessages());
+    expect(out).toContain('added="false"');
+    expect(out).toContain('emoji="eyes"');
+  });
+
+  it('marks on_mine="true" when the router stamped replyTo.toBot', () => {
+    insertMessage('rx3', 'reaction', {
+      operation: 'reaction_received',
+      added: true,
+      emoji: 'heart',
+      senderName: 'Carol',
+      replyTo: { messageId: 'plat-9', toBot: true },
+    });
+    const out = formatMessages(getPendingMessages());
+    expect(out).toContain('on_mine="true"');
+  });
+
+  it('omits on_mine when the reaction did not target a bot message', () => {
+    insertMessage('rx4', 'reaction', {
+      operation: 'reaction_received',
+      added: true,
+      emoji: 'fire',
+      senderName: 'Dave',
+      replyTo: { messageId: 'plat-3' },
+    });
+    const out = formatMessages(getPendingMessages());
+    expect(out).not.toContain('on_mine');
+  });
+
+  it('escapes emoji and sender values', () => {
+    insertMessage('rx5', 'reaction', {
+      operation: 'reaction_received',
+      added: true,
+      emoji: '<x>&"',
+      senderName: 'A<b>&"',
+    });
+    const out = formatMessages(getPendingMessages());
+    expect(out).not.toContain('<x>');
+    expect(out).toContain('&lt;x&gt;');
+    expect(out).toContain('A&lt;b&gt;');
+  });
+
+  it('falls back to rawEmoji and renders raw unicode (WhatsApp native path)', () => {
+    insertMessage('rx6', 'reaction', {
+      operation: 'reaction_received',
+      added: true,
+      rawEmoji: '👍',
+      senderName: 'Eve',
+    });
+    const out = formatMessages(getPendingMessages());
+    expect(out).toContain('emoji="👍"');
+  });
+});
