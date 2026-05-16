@@ -406,46 +406,82 @@ async function sweepSession(session: Session): Promise<void> {
     // already pathological for a recurring task; unbounded deferral
     // would silently stop its schedule, which is worse than a
     // retried-corrupt read.
-    if (!alive || recurrenceDeferCount(session.id) >= MAX_RECURRENCE_DEFERS) {
-      clearRecurrenceDefer(session.id);
-      // MODULE-HOOK:scheduling-recurrence:start
-      const { handleRecurrence } = await import('./modules/scheduling/recurrence.js');
-      await handleRecurrence(inDb, session);
-      // MODULE-HOOK:scheduling-recurrence:end
-    } else {
-      const n = bumpRecurrenceDefer(session.id);
-      log.debug('Deferred recurrence: container mid-poll (S405 quiescing)', {
-        sessionId: session.id,
-        consecutiveDefers: n,
-        maxDefers: MAX_RECURRENCE_DEFERS,
-      });
+    // MODULE-HOOK:scheduling-recurrence:start
+    const { handleRecurrence, getDueRecurringSeriesIds } = await import('./modules/scheduling/recurrence.js');
+    const dueSeries = getDueRecurringSeriesIds(inDb);
+    if (dueSeries.length > 0) {
+      // Force the (per-session, corruption-safe) write if the container
+      // is dead OR ANY due series has independently hit its cap. Keying
+      // the cap per series — not per session — is the 2026-05-16 fix:
+      // the old per-session counter was reset to 0 every time the write
+      // went through for ANY reason, so a high-frequency recurring task
+      // (5-min poller) sharing the inbound.db perpetually reset a
+      // co-resident low-frequency task's (dream, 04:00) progress toward
+      // the cap. The dream series sat completed-with-recurrence for
+      // 8 min (vs the ~5-min design bound) because the shared counter
+      // never reached 5: it climbed 1→4, an unrelated gate-open reset
+      // it, repeat (29 consecutive defer log lines, observed). Per
+      // series, each independently reaches the cap within
+      // MAX_RECURRENCE_DEFERS sweeps regardless of co-resident traffic,
+      // so the orphan window is bounded to ~5 min for EVERY series.
+      const capped = dueSeries.some((s) => recurrenceDeferCount(session.id, s) >= MAX_RECURRENCE_DEFERS);
+      if (!alive || capped) {
+        // The write services every due series at once (one inbound.db
+        // write window — preserves S405 per-session quiescing); clear
+        // each serviced series' counter.
+        for (const s of dueSeries) clearRecurrenceDefer(session.id, s);
+        await handleRecurrence(inDb, session);
+      } else {
+        // Defer: every due series accrues pressure independently. No
+        // cross-series reset — that was the starvation bug.
+        for (const s of dueSeries) {
+          const n = bumpRecurrenceDefer(session.id, s);
+          log.debug('Deferred recurrence: container mid-poll (S405 quiescing)', {
+            sessionId: session.id,
+            seriesId: s,
+            consecutiveDefers: n,
+            maxDefers: MAX_RECURRENCE_DEFERS,
+          });
+        }
+      }
     }
+    // MODULE-HOOK:scheduling-recurrence:end
   } finally {
     inDb.close();
     outDb?.close();
   }
 }
 
-// S405 lever 2 — bounded recurrence-deferral tracker. Keyed by session
-// id; counts consecutive sweeps where the recurrence INSERT was skipped
-// because a container was actively polling inbound.db. Reset to 0 the
-// moment the write goes through (container idle, or cap reached). A
+// S405 lever 2 — bounded recurrence-deferral tracker. Keyed by
+// (sessionId, seriesId): counts consecutive sweeps where a given
+// series' recurrence fanout was skipped because a container was
+// actively polling that session's inbound.db. Per-series (not
+// per-session) so a high-frequency recurring task can't reset a
+// co-resident low-frequency one's progress toward the cap (the
+// 2026-05-16 degenerate dream-task 8-min orphan). Cleared the moment
+// that series' write goes through (container idle, or its cap reached).
 // 60s sweep × MAX_RECURRENCE_DEFERS=5 caps worst-case schedule slip at
-// ~5 min for a continuously-alive session — acceptable vs. the corrupt
-// crash-loop it prevents, and lever 1 still covers the post-cap write.
+// ~5 min PER SERIES — acceptable vs. the corrupt crash-loop it
+// prevents; lever 1 still covers the post-cap write.
 const MAX_RECURRENCE_DEFERS = 5;
 const recurrenceDefers = new Map<string, number>();
 
-function recurrenceDeferCount(sessionId: string): number {
-  return recurrenceDefers.get(sessionId) ?? 0;
+function deferKey(sessionId: string, seriesId: string): string {
+  // \x1f (unit separator) can't appear in a session or series id, so
+  // it's a collision-free composite key.
+  return `${sessionId}\x1f${seriesId}`;
 }
-function bumpRecurrenceDefer(sessionId: string): number {
-  const n = (recurrenceDefers.get(sessionId) ?? 0) + 1;
-  recurrenceDefers.set(sessionId, n);
+function recurrenceDeferCount(sessionId: string, seriesId: string): number {
+  return recurrenceDefers.get(deferKey(sessionId, seriesId)) ?? 0;
+}
+function bumpRecurrenceDefer(sessionId: string, seriesId: string): number {
+  const k = deferKey(sessionId, seriesId);
+  const n = (recurrenceDefers.get(k) ?? 0) + 1;
+  recurrenceDefers.set(k, n);
   return n;
 }
-function clearRecurrenceDefer(sessionId: string): void {
-  recurrenceDefers.delete(sessionId);
+function clearRecurrenceDefer(sessionId: string, seriesId: string): void {
+  recurrenceDefers.delete(deferKey(sessionId, seriesId));
 }
 
 /**

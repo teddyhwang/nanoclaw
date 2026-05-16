@@ -131,6 +131,23 @@ export function getCompletedRecurring(db: Database.Database): RecurringMessage[]
     .all() as RecurringMessage[];
 }
 
+/**
+ * Distinct series_ids that currently have a completed-with-recurrence
+ * row (i.e. are awaiting recurrence fanout). Lightweight projection of
+ * getCompletedRecurring used by the host-sweep S405 lever-2 gate to
+ * track defer pressure PER SERIES, so a high-frequency recurring task
+ * sharing an inbound.db can't starve a co-resident low-frequency one
+ * (degenerate dream-task 8-min orphan, 2026-05-16). `series_id` is
+ * never null on these rows (insertRecurrence/insertTask always set it;
+ * pre-migration rows backfilled to id), so no COALESCE needed.
+ */
+export function getDueRecurringSeriesIds(db: Database.Database): string[] {
+  const rows = db
+    .prepare("SELECT DISTINCT series_id FROM messages_in WHERE status = 'completed' AND recurrence IS NOT NULL")
+    .all() as Array<{ series_id: string }>;
+  return rows.map((r) => r.series_id);
+}
+
 export function insertRecurrence(
   db: Database.Database,
   msg: RecurringMessage,

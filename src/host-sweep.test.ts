@@ -469,32 +469,74 @@ describe('S405 lever 2 — recurrence write quiescing', () => {
     expect(_shouldRunRecurrenceForTesting(true, _MAX_RECURRENCE_DEFERS_FOR_TESTING + 3)).toBe(true);
   });
 
-  it('defer counter bumps per call and clears in one shot', () => {
+  it('defer counter bumps per call and clears in one shot, keyed per (session, series)', () => {
     const h = _recurrenceDeferHelpersForTesting();
     h.reset();
-    expect(h.count('sess-A')).toBe(0);
-    expect(h.bump('sess-A')).toBe(1);
-    expect(h.bump('sess-A')).toBe(2);
-    expect(h.count('sess-A')).toBe(2);
-    // Independent per session.
-    expect(h.count('sess-B')).toBe(0);
-    h.clear('sess-A');
-    expect(h.count('sess-A')).toBe(0);
+    expect(h.count('sess-A', 'series-1')).toBe(0);
+    expect(h.bump('sess-A', 'series-1')).toBe(1);
+    expect(h.bump('sess-A', 'series-1')).toBe(2);
+    expect(h.count('sess-A', 'series-1')).toBe(2);
+    // Independent per session AND per series within a session.
+    expect(h.count('sess-B', 'series-1')).toBe(0);
+    expect(h.count('sess-A', 'series-2')).toBe(0);
+    h.clear('sess-A', 'series-1');
+    expect(h.count('sess-A', 'series-1')).toBe(0);
   });
 
-  it('reaching the cap then writing resets the counter so the next alive run defers again', () => {
+  it('reaching the cap then writing clears only that series so it defers again', () => {
     const h = _recurrenceDeferHelpersForTesting();
     h.reset();
-    // Simulate MAX consecutive alive-sweeps of deferral.
-    for (let i = 0; i < _MAX_RECURRENCE_DEFERS_FOR_TESTING; i++) h.bump('s');
-    expect(h.count('s')).toBe(_MAX_RECURRENCE_DEFERS_FOR_TESTING);
-    expect(_shouldRunRecurrenceForTesting(true, h.count('s'))).toBe(true);
-    // sweepSession calls clearRecurrenceDefer when it writes through.
-    h.clear('s');
-    expect(h.count('s')).toBe(0);
-    // Next alive sweep defers from zero again — bounded slip, not a
-    // one-shot escape that then writes every sweep under load.
-    expect(_shouldRunRecurrenceForTesting(true, h.count('s'))).toBe(false);
+    for (let i = 0; i < _MAX_RECURRENCE_DEFERS_FOR_TESTING; i++) h.bump('s', 'dream');
+    expect(h.count('s', 'dream')).toBe(_MAX_RECURRENCE_DEFERS_FOR_TESTING);
+    expect(_shouldRunRecurrenceForTesting(true, h.count('s', 'dream'))).toBe(true);
+    h.clear('s', 'dream'); // sweepSession clears the serviced series
+    expect(h.count('s', 'dream')).toBe(0);
+    expect(_shouldRunRecurrenceForTesting(true, h.count('s', 'dream'))).toBe(false);
+  });
+
+  it('a high-frequency series cannot starve a co-resident low-frequency one (2026-05-16 dream orphan)', () => {
+    // The bug: per-SESSION counter. A 5-min poller and the 04:00 dream
+    // task share an inbound.db. Every time the poller's recurrence wrote
+    // through, the shared counter reset to 0 — so the dream series'
+    // progress toward the cap was perpetually wiped and it sat orphaned
+    // for 8 min (vs the ~5-min design bound). Per-SERIES keying fixes it:
+    // the dream series accrues independently and force-writes within
+    // MAX_RECURRENCE_DEFERS sweeps no matter how often the poller resets
+    // its OWN counter.
+    const h = _recurrenceDeferHelpersForTesting();
+    h.reset();
+    const SESS = 'sess-degenerate';
+    const POLLER = 'task-ui5728'; // due every sweep
+    const DREAM = 'dream-g9zust'; // due once, low frequency
+
+    // Simulate many sweeps where the container is alive. Each sweep:
+    // both series are due → both bump; the poller hits its cap quickly,
+    // writes (clears ONLY the poller), and comes due again next sweep.
+    for (let sweep = 0; sweep < 20; sweep++) {
+      const pollerCapped = h.count(SESS, POLLER) >= _MAX_RECURRENCE_DEFERS_FOR_TESTING;
+      const dreamCapped = h.count(SESS, DREAM) >= _MAX_RECURRENCE_DEFERS_FOR_TESTING;
+      // sweepSession forces the (per-session) write if ANY due series capped.
+      const writes = pollerCapped || dreamCapped;
+      if (writes) {
+        // Old bug cleared the whole session; the fix clears each due
+        // series. The poller is always due; the dream series stays due
+        // only until it's actually serviced.
+        h.clear(SESS, POLLER);
+        if (dreamCapped) h.clear(SESS, DREAM);
+        // If the dream series was the reason we wrote, it's serviced —
+        // assert it never waited longer than the per-series cap.
+        if (dreamCapped) {
+          expect(sweep).toBeLessThanOrEqual(_MAX_RECURRENCE_DEFERS_FOR_TESTING);
+          return;
+        }
+      } else {
+        h.bump(SESS, POLLER);
+        h.bump(SESS, DREAM);
+      }
+    }
+    // The dream series MUST have force-written within the cap. Reaching
+    // here means it was starved past 20 sweeps — the original bug.
+    throw new Error('dream series starved past the per-series cap — Bug B2 regression');
   });
 });
 

@@ -16,7 +16,12 @@ import type Database from 'better-sqlite3';
 import { TIMEZONE } from '../../config.js';
 import { log } from '../../log.js';
 import type { Session } from '../../types.js';
-import { clearRecurrence, getCompletedRecurring, insertRecurrence } from './db.js';
+import { clearRecurrence, getCompletedRecurring, getDueRecurringSeriesIds, insertRecurrence } from './db.js';
+
+// Re-exported so host-sweep's single dynamic import of this module
+// (the MODULE-HOOK:scheduling-recurrence seam) can read which series
+// are awaiting fanout, for the S405 lever-2 per-series defer gate.
+export { getDueRecurringSeriesIds };
 
 export async function handleRecurrence(inDb: Database.Database, session: Session): Promise<void> {
   const recurring = getCompletedRecurring(inDb);
