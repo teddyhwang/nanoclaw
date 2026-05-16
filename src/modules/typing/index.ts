@@ -19,9 +19,13 @@
  */
 import fs from 'fs';
 
+import type Database from 'better-sqlite3';
+
 import { registerDeliveryAction } from '../../delivery.js';
 import { getDeliveredIds, getDueOutboundMessages, getProcessingClaims } from '../../db/session-db.js';
 import { heartbeatPath, openInboundDb, openOutboundDb } from '../../session-manager.js';
+import { getMessagingGroup } from '../../db/messaging-groups.js';
+import { log } from '../../log.js';
 
 const TYPING_REFRESH_MS = 4000;
 /**
@@ -324,6 +328,113 @@ export function stopTypingRefresh(sessionId: string): void {
 // Local fork patch (Optimus): upstream NanoClaw doesn't run reflection
 // turns and so doesn't expose this UX gap. Stays in the typing module
 // because that's where the fix is — not a behavior other hosts need.
-registerDeliveryAction('silent_turn_complete', async (_content, session) => {
+/**
+ * Telemetry: classify WHY a turn ended silent.
+ *
+ * Without this, every silent turn collapses to one indistinguishable
+ * `silent_turn_complete` log line — "agent correctly stayed quiet on
+ * ambient group chatter" reads identically to "agent ignored a user who
+ * @mentioned it or DM'd it." That ambiguity is exactly what made the
+ * 2026-05-16 Barret incident take a full reverse log-correlation to
+ * diagnose. (Container-crash turns do NOT reach here at all — the runner
+ * only emits silent_turn_complete on a *completed* result with zero
+ * deliverable output, so a silent turn is always agent-chosen; the crash
+ * case is the separate "wake with no terminal action" gap, visible via
+ * `Container exited`.)
+ *
+ * Resolves the turn's wake cause from the most-recent trigger=1 inbound
+ * row and emits a single structured line with `addressed` — true when the
+ * agent stayed silent on a turn a human directly aimed at it (DM, a
+ * mention token, or a reply-to-bot). `addressed=true` silent turns are
+ * the suspicious ones; grep `Silent turn classified` + `addressed=true`
+ * to surface them fleet-wide instead of guessing.
+ */
+export type SilentWakeCause = 'task' | 'dm' | 'group-mention' | 'reply-to-bot' | 'group-ambient' | 'unknown';
+
+/**
+ * Pure classification of why a silent turn ended, split out so the rule
+ * is unit-testable without real session-DB files (same approach as
+ * `decideSuppressTypingForNonUserTurn` / host-sweep's `decideStuckAction`).
+ *
+ *   triggerRow  — the most-recent trigger=1, non-system messages_in row
+ *                 for this turn (or null if none resolvable).
+ *   isDm        — true when the session's messaging group is a 1:1 DM
+ *                 (is_group === 0). A silent turn in a DM is almost
+ *                 always wrong: one human, who typed to this agent.
+ *
+ * `addressed` is the signal that matters — true when a human aimed this
+ * turn directly at the agent (DM, a platform mention token, or a
+ * reply-to-bot). `addressed && silent` is the suspicious combination the
+ * Barret incident needed reverse log-correlation to even see.
+ */
+export function classifyWakeCause(
+  triggerRow: { kind: string; content: string } | null,
+  isDm: boolean,
+): { wakeCause: SilentWakeCause; addressed: boolean } {
+  if (!triggerRow) return { wakeCause: 'unknown', addressed: false };
+
+  // Scheduled/recurring task wake — silence here is normal (a
+  // maintenance reflection with nothing to report). Never "addressed."
+  if (triggerRow.kind === 'task') return { wakeCause: 'task', addressed: false };
+
+  // Mention / reply-to-bot detection from the persisted content. The
+  // routing-time isMention boolean isn't stored, so we read the same
+  // signals the channel adapter wrote: a platform mention token in the
+  // text, or a replyTo block (reply-to-bot is resolved host-side at
+  // routing but the parent ref is what's persisted here).
+  let hasMentionToken = false;
+  let isReply = false;
+  try {
+    const parsed = JSON.parse(triggerRow.content) as { text?: string; replyTo?: { messageId?: string } };
+    const text = typeof parsed.text === 'string' ? parsed.text : '';
+    // Discord <@id> / <@!id>, Slack <@U…>, Telegram @name — any platform
+    // mention token. Coarse on purpose: this is a telemetry signal, not
+    // an auth gate, and false-positives here only over-flag.
+    hasMentionToken = /<@!?\w+>|(^|\s)@\w/.test(text);
+    isReply = typeof parsed.replyTo?.messageId === 'string';
+  } catch {
+    // Non-JSON / unexpected shape — fall through with both false.
+  }
+
+  const addressed = isDm || hasMentionToken || isReply;
+  const wakeCause: SilentWakeCause = isDm
+    ? 'dm'
+    : hasMentionToken
+      ? 'group-mention'
+      : isReply
+        ? 'reply-to-bot'
+        : 'group-ambient';
+  return { wakeCause, addressed };
+}
+
+function classifySilentTurn(session: { id: string; messaging_group_id: string | null }, inDb: Database.Database): void {
+  try {
+    const row =
+      (inDb
+        .prepare(
+          `SELECT kind, content FROM messages_in
+           WHERE trigger = 1 AND kind != 'system'
+           ORDER BY seq DESC LIMIT 1`,
+        )
+        .get() as { kind: string; content: string } | undefined) ?? null;
+
+    const mg = session.messaging_group_id ? getMessagingGroup(session.messaging_group_id) : undefined;
+    const isDm = mg ? mg.is_group === 0 : false;
+
+    const { wakeCause, addressed } = classifyWakeCause(row, isDm);
+    log.info('Silent turn classified', {
+      sessionId: session.id,
+      wakeCause,
+      addressed,
+      ...(addressed ? { warn: 'agent stayed silent on a directly-addressed turn' } : {}),
+    });
+  } catch (err) {
+    // Telemetry must never break delivery. Swallow and move on.
+    log.debug('Silent turn classification failed', { sessionId: session.id, err: String(err) });
+  }
+}
+
+registerDeliveryAction('silent_turn_complete', async (_content, session, inDb) => {
   stopTypingRefresh(session.id);
+  classifySilentTurn(session, inDb);
 });

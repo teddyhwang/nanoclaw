@@ -15,7 +15,10 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import { decideSuppressTypingForNonUserTurn } from './index.js';
+import { classifyWakeCause, decideSuppressTypingForNonUserTurn } from './index.js';
+
+const msg = (text: string, replyToId?: string) =>
+  JSON.stringify({ _type: 'chat:Message', text, ...(replyToId ? { replyTo: { messageId: replyToId } } : {}) });
 
 describe('decideSuppressTypingForNonUserTurn', () => {
   it('does NOT suppress when nothing is processing (idle / grace logic owns it)', () => {
@@ -47,5 +50,74 @@ describe('decideSuppressTypingForNonUserTurn', () => {
     // user-facing → keep typing. (hasUserKindProcessing is "≥1 user
     // row among the processing set".)
     expect(decideSuppressTypingForNonUserTurn(4, true)).toBe(false);
+  });
+});
+
+/**
+ * Telemetry classifier for silent turns. Without this, "agent correctly
+ * stayed quiet on ambient group chatter" and "agent ignored a user who
+ * @mentioned/DM'd it" both logged the same indistinguishable
+ * `silent_turn_complete` line — the ambiguity that made the 2026-05-16
+ * Barret incident take a full reverse log-correlation to diagnose.
+ * `addressed=true` is the suspicious combination to surface.
+ */
+describe('classifyWakeCause', () => {
+  it('no resolvable trigger row → unknown, not addressed', () => {
+    expect(classifyWakeCause(null, false)).toEqual({ wakeCause: 'unknown', addressed: false });
+  });
+
+  it('scheduled/recurring task wake → task, never addressed (silence is normal here)', () => {
+    expect(classifyWakeCause({ kind: 'task', content: '{"prompt":"maintenance"}' }, false)).toEqual({
+      wakeCause: 'task',
+      addressed: false,
+    });
+    // Even in a DM-shaped session a task wake is not "addressed".
+    expect(classifyWakeCause({ kind: 'task', content: '{}' }, true)).toEqual({ wakeCause: 'task', addressed: false });
+  });
+
+  it('1:1 DM chat wake → dm + addressed (one human, typed to this agent)', () => {
+    expect(classifyWakeCause({ kind: 'chat-sdk', content: msg('hello there?') }, true)).toEqual({
+      wakeCause: 'dm',
+      addressed: true,
+    });
+  });
+
+  it('the Barret regression: group @mention with a direct question → group-mention + addressed', () => {
+    // Exact shape of the message that silently dropped on 2026-05-16:
+    // a Discord user-id mention token + a direct question, in a group.
+    const barret = msg('<@1485390229526413444> for your dream cycle ability is there a repo with this available ?');
+    expect(classifyWakeCause({ kind: 'chat-sdk', content: barret }, false)).toEqual({
+      wakeCause: 'group-mention',
+      addressed: true,
+    });
+  });
+
+  it('reply-to-bot in a group (no mention token) → reply-to-bot + addressed', () => {
+    expect(
+      classifyWakeCause({ kind: 'chat-sdk', content: msg('and the other thing?', 'plat-msg-123') }, false),
+    ).toEqual({ wakeCause: 'reply-to-bot', addressed: true });
+  });
+
+  it('ambient group chatter (no mention, no reply, not a DM) → group-ambient + NOT addressed', () => {
+    // The legitimately-silent case the old log could not distinguish
+    // from the Barret case. Staying quiet here is correct behavior.
+    expect(classifyWakeCause({ kind: 'chat-sdk', content: msg('lol that game was wild') }, false)).toEqual({
+      wakeCause: 'group-ambient',
+      addressed: false,
+    });
+  });
+
+  it('malformed/non-JSON content → degrades to group-ambient, never throws', () => {
+    // Telemetry must never break delivery; bad content just means we
+    // can't see mention/reply signals, so treat as ambient.
+    expect(classifyWakeCause({ kind: 'chat-sdk', content: 'not json {' }, false)).toEqual({
+      wakeCause: 'group-ambient',
+      addressed: false,
+    });
+    // ...but a DM is still addressed regardless of content parseability.
+    expect(classifyWakeCause({ kind: 'chat-sdk', content: 'not json {' }, true)).toEqual({
+      wakeCause: 'dm',
+      addressed: true,
+    });
   });
 });
