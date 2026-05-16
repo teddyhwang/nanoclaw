@@ -104,8 +104,21 @@ export type {
   InboundMessage,
   InboundEvent,
   OutboundMessage,
+  ConversationInfo,
   DeliveryAddress,
 } from '../channels/adapter.js';
+
+// Support utilities for out-of-tree channel adapters (channel plugins that
+// live in the embedding host rather than src/channels/). A host that ships
+// its own ChannelAdapter — e.g. Optimus' WhatsApp/Baileys plugin — needs the
+// same primitives the in-tree adapters use: emit lifecycle events for host
+// indexers, read the channel's env block, sanitize attachment filenames, and
+// normalize interactive-question options. Re-exported so the plugin imports
+// them via 'nanoclaw/engine' instead of reaching into engine internals.
+export { emitEngineEvent } from './events.js';
+export { readEnvFile } from '../env.js';
+export { isSafeAttachmentName } from '../attachment-safety.js';
+export { normalizeOptions, type NormalizedOption } from '../channels/ask-question.js';
 
 export {
   registerPluginMigrations,
@@ -175,7 +188,7 @@ export { setSharedGroupsResolver, type SharedGroupsResolver, type SharedGroupRef
 
 export { initDb, closeDb } from '../db/connection.js';
 export { runMigrations } from '../db/migrations/index.js';
-export { createAgentGroup, getAgentGroupByFolder, getAllAgentGroups } from '../db/agent-groups.js';
+export { createAgentGroup, getAgentGroup, getAgentGroupByFolder, getAllAgentGroups } from '../db/agent-groups.js';
 export {
   createMessagingGroup,
   createMessagingGroupAgent,
@@ -188,6 +201,20 @@ export {
 export type { AgentGroup } from '../types.js';
 export type { MessagingGroupAgent } from '../types.js';
 export type { ContainerConfigRow } from '../types.js';
+
+// Container-config + media-pipeline primitives for out-of-tree channel
+// plugins. The WhatsApp plugin reads per-group assistant-name/prefix
+// (getContainerConfig + configFromDb) for shared-number prefixing, and
+// resizes/transcodes inbound media (image-processing) before handing
+// attachments to the engine. image-processing also has an in-tree consumer
+// (chat-sdk-bridge), so it stays in the submodule and is re-exported here.
+export { getContainerConfig } from '../db/container-configs.js';
+export { configFromDb, type ContainerConfig } from '../container-config.js';
+export {
+  maybeResizeImage,
+  shouldTranscodeAnimated,
+  maybeTranscodeAnimated,
+} from '../media/image-processing.js';
 
 // Session lifecycle for importers seeding cold sessions (writes routing +
 // initializes per-session DBs). Hosts that want to enqueue messages into an
