@@ -321,13 +321,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     const taskFireContexts: TaskFireContext[] = [];
     for (const m of keep) {
       if (m.trigger !== 1 || m.kind !== 'task') continue;
-      taskFireContexts.push({
-        seriesId: m.series_id ?? m.id,
-        taskId: m.id,
-        dispatched: [],
-        assistantText: null,
-        written: false,
-      });
+      registerTaskFireContextOnce(taskFireContexts, m);
     }
 
     // Load any inbound image attachments as Anthropic vision content blocks.
@@ -525,7 +519,7 @@ interface QueryResult {
  * wake via host-sweep). seriesId is the stable per-task identity;
  * taskId is the concrete messages_in.id that fired.
  */
-interface TaskFireContext {
+export interface TaskFireContext {
   seriesId: string;
   taskId: string;
   // Per-task accumulators. One stream can fold MULTIPLE task triggers
@@ -539,6 +533,47 @@ interface TaskFireContext {
   dispatched: TaskFireDispatch[];
   assistantText: string | null;
   written: boolean;
+}
+
+/**
+ * Register a task-fire context for `m` unless one already exists for the
+ * same concrete row (`taskId`). Idempotent so the multiple seeding
+ * points — initial batch, the post-markProcessing follow-up pass (which
+ * runs ahead of every early-return for Issue A), and the pre-push
+ * re-affirmation — can all call it without ever double-counting a fire.
+ * `series_id` falls back to `id` for pre-migration rows (matches the
+ * host-side backfill in src/db/session-db.ts:349).
+ */
+// Exported for unit tests — the Issue-A seed/drop invariant (idempotent
+// registration, drop-only-unwritten) is timing-independent and worth
+// covering directly rather than through the flaky in-query fold race.
+export function registerTaskFireContextOnce(contexts: TaskFireContext[], m: MessageInRow): void {
+  if (contexts.some((c) => c.taskId === m.id)) return;
+  contexts.push({
+    seriesId: m.series_id ?? m.id,
+    taskId: m.id,
+    dispatched: [],
+    assistantText: null,
+    written: false,
+  });
+}
+
+/**
+ * Remove fire contexts for `rows` that were seeded ahead of a bail
+ * (accumulate-only follow-up, or stream-already-done) and therefore did
+ * NOT run this turn. Only drops still-unwritten contexts — a context the
+ * writers already flushed stays (its fire is real). Without this, the
+ * Issue-A seeding (which deliberately registers before every early
+ * return) would make processQuery's finally emit a 'silent' fire for a
+ * task that never actually executed; the genuine fire is recorded when
+ * the released row is re-triggered and runs in its own isolated turn.
+ */
+export function dropUnrunTaskContexts(contexts: TaskFireContext[], rows: MessageInRow[]): void {
+  const ids = new Set(rows.filter((m) => m.kind === 'task' && m.trigger === 1).map((m) => m.id));
+  if (ids.size === 0) return;
+  for (let i = contexts.length - 1; i >= 0; i--) {
+    if (!contexts[i].written && ids.has(contexts[i].taskId)) contexts.splice(i, 1);
+  }
 }
 
 async function processQuery(
@@ -798,6 +833,29 @@ async function processQuery(
         const newIds = newMessages.map((m) => m.id);
         markProcessing(newIds);
 
+        // Register fire contexts for follow-up task triggers BEFORE the
+        // pre-task-script await and BEFORE any early-return below.
+        //
+        // Issue A (telegram_dm_teddy 23folg, 2026-05-16): a busy
+        // agent-shared session had 6 completed dream-task rows and ZERO
+        // task_fires rows. Cause: a follow-up task is markProcessing'd
+        // here, then the pre-task `await import()` yields; the active
+        // outer query can finish during that await, so `if (done)
+        // return;` (and the accumulate-only return) bail *before* the
+        // original seeding loop further down. The row is left
+        // 'processing' with no fire context, gets swept to 'completed'
+        // host-side, and no fire is ever written — the dashboard shows
+        // "never ran" for a task that ran every day. Seeding here, ahead
+        // of every bail, guarantees the finally/error writers in
+        // processQuery flush a (silent|completed|error) fire for it.
+        // The later seeding loop is now idempotent (registerTaskFire-
+        // ContextOnce) so a task that DOES survive to the push isn't
+        // double-counted.
+        for (const m of newMessages) {
+          if (m.kind !== 'task' || m.trigger !== 1) continue;
+          registerTaskFireContextOnce(taskFireContexts, m);
+        }
+
         // Run pre-task scripts on follow-ups too — without this, a task that
         // arrives during an active query (e.g. a */10 monitoring cron) bypasses
         // its script gate and always wakes the agent, defeating the gate.
@@ -851,29 +909,32 @@ async function processQuery(
           log(
             `Skipping ${keep.length} accumulate-only follow-up(s) after script filter — leaving pending until next trigger`,
           );
+          // These tasks did NOT run this turn — drop the contexts seeded
+          // right after markProcessing so processQuery's finally can't
+          // write a spurious 'silent' fire for a task that never ran.
+          // The real fire is recorded when the task is re-triggered and
+          // runs in its own (now Bug-D-isolated) turn.
+          dropUnrunTaskContexts(taskFireContexts, newMessages);
           return;
         }
         // Re-check done — the outer query may have finished while the script
         // was awaited. Pushing into a closed stream is wasted work; the
-        // claimed messages get released by the host's processing-claim sweep.
-        if (done) return;
+        // claimed messages get released by the host's processing-claim
+        // sweep and re-triggered, where they record their fire properly.
+        if (done) {
+          dropUnrunTaskContexts(taskFireContexts, newMessages);
+          return;
+        }
 
-        // Register a fire context for each follow-up task that survived
-        // its pre-task script and is about to be pushed into the active
-        // stream. Pre-fix only the initial-batch task had a context, so a
-        // woken follow-up task (the dream/maintenance task on an already-
-        // active agent) produced no row at all. Keyed by its own
-        // series_id/id so it gets exactly one fire; the finally/error
-        // writers iterate every registered context.
+        // Re-affirm fire contexts for the follow-up tasks that survived
+        // the pre-task script and are about to be pushed. Idempotent:
+        // the seeding right after markProcessing(newIds) above already
+        // registered these; this is a no-op for them and only matters
+        // if `keep` somehow gained a task row the earlier pass missed.
+        // The finally/error writers iterate every registered context.
         for (const m of keep) {
           if (m.kind !== 'task' || m.trigger !== 1) continue;
-          taskFireContexts.push({
-            seriesId: m.series_id ?? m.id,
-            taskId: m.id,
-            dispatched: [],
-            assistantText: null,
-            written: false,
-          });
+          registerTaskFireContextOnce(taskFireContexts, m);
         }
 
         const keptIds = keep.map((m) => m.id);
