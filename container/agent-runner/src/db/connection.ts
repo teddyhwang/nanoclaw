@@ -48,7 +48,11 @@ export function openInboundDb(): Database {
   // so the singleton survives for the rest of the test.
   if (_testMode && _inbound) {
     const db = _inbound;
-    return { prepare: (sql: string) => db.prepare(sql), exec: (sql: string) => db.exec(sql), close: () => {} } as unknown as Database;
+    return {
+      prepare: (sql: string) => db.prepare(sql),
+      exec: (sql: string) => db.exec(sql),
+      close: () => {},
+    } as unknown as Database;
   }
   const db = new Database(DEFAULT_INBOUND_PATH, { readonly: true });
   db.exec('PRAGMA busy_timeout = 5000');
@@ -73,6 +77,18 @@ export function openInboundDb(): Database {
  * every-5-minute recurrence while the container polled it), each
  * occurrence crashing the runner code=1 → host respawn → crash-loop.
  *
+ * The same torn window also surfaces as *open*-time failures, not just
+ * malformed-page reads: if the reader's `new Database()` lands while the
+ * host has the journal present (or between page-modify and
+ * journal-delete), bun:sqlite reports `unable to open database file`
+ * (SQLITE_CANTOPEN) or `file is not a database` (SQLITE_NOTADB) instead
+ * of `malformed`. These are the *same* transient VirtioFS race — the
+ * on-disk file is fine a few ms later — so they must be retried too. A
+ * narrower match (malformed/CORRUPT only) let these escape the guard
+ * and crash-loop the Degenerates container fatally (Barret @mentions in
+ * AI-chat went unanswered: host woke the container, the spawn-time
+ * `getInboundDb()` open hit this window, process.exit(1), repeat).
+ *
  * The torn state is transient: the host write completes in
  * milliseconds, so a reopened connection a few ms later sees a
  * consistent file. We close, back off, reopen, and retry. This cannot
@@ -91,10 +107,19 @@ const INBOUND_CORRUPT_BACKOFF_MS = 40;
 function isTransientCorrupt(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
   // bun:sqlite surfaces the sqlite text; match on the message rather
-  // than a code so it works regardless of driver error shape.
+  // than a code so it works regardless of driver error shape. All four
+  // shapes are the same transient VirtioFS torn-window race (see the
+  // docstring above) — malformed/CORRUPT are torn *reads*; CANTOPEN /
+  // NOTADB are the torn *open* (journal present, or a momentarily
+  // zero/short file the guest sees mid-propagation). The on-disk file
+  // is consistent again within ms, so all four are safe to reopen-retry.
   return (
     msg.includes('database disk image is malformed') ||
-    msg.includes('SQLITE_CORRUPT')
+    msg.includes('SQLITE_CORRUPT') ||
+    msg.includes('unable to open database file') ||
+    msg.includes('SQLITE_CANTOPEN') ||
+    msg.includes('file is not a database') ||
+    msg.includes('SQLITE_NOTADB')
   );
 }
 
@@ -130,6 +155,42 @@ export function withInboundDb<T>(fn: (db: Database) => T): T {
 }
 
 /**
+ * Open the inbound singleton, retrying the transient VirtioFS torn-open
+ * race (SQLITE_CANTOPEN/NOTADB/CORRUPT — see isTransientCorrupt). This
+ * is the spawn-time path: `buildSystemPromptAddendum()` calls
+ * `getInboundDb()` before the poll loop, so if the very first open
+ * lands in the host's journal/page-propagation window it would
+ * otherwise throw straight to `main().catch → process.exit(1)` and
+ * crash-loop the container (the Barret-in-AI-chat outage). withInboundDb
+ * guards *reads*; this guards the singleton's *open* with the same
+ * close-backoff-reopen contract. Cannot regress: without it the same
+ * open throws fatally today; worst case is the same fatal throw after
+ * retries are exhausted.
+ */
+function openInboundSingleton(): Database {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= INBOUND_CORRUPT_RETRIES; attempt++) {
+    try {
+      const db = new Database(DEFAULT_INBOUND_PATH, { readonly: true });
+      db.exec('PRAGMA busy_timeout = 5000');
+      db.exec('PRAGMA mmap_size = 0');
+      return db;
+    } catch (err) {
+      lastErr = err;
+      if (!isTransientCorrupt(err) || attempt === INBOUND_CORRUPT_RETRIES) {
+        throw err;
+      }
+      const until = Date.now() + INBOUND_CORRUPT_BACKOFF_MS * (attempt + 1);
+      while (Date.now() < until) {
+        /* brief settle before reopen */
+      }
+    }
+  }
+  // Unreachable: the loop either returns or throws on the last attempt.
+  throw lastErr;
+}
+
+/**
  * Inbound DB — long-lived singleton, OK for tables the host writes once
  * at spawn and never again (destinations, session_routing). For
  * messages_in polling — where the host writes continuously and a stale
@@ -137,9 +198,7 @@ export function withInboundDb<T>(fn: (db: Database) => T): T {
  */
 export function getInboundDb(): Database {
   if (!_inbound) {
-    _inbound = new Database(DEFAULT_INBOUND_PATH, { readonly: true });
-    _inbound.exec('PRAGMA busy_timeout = 5000');
-    _inbound.exec('PRAGMA mmap_size = 0');
+    _inbound = openInboundSingleton();
   }
   return _inbound;
 }

@@ -81,4 +81,27 @@ describe('withInboundDb — S405 corrupt-read retry', () => {
     expect(result).toBe('recovered');
     expect(calls).toBe(2);
   });
+
+  // The VirtioFS torn window also surfaces at *open* time, not only as a
+  // malformed-page read: bun:sqlite reports CANTOPEN ("unable to open
+  // database file") or NOTADB ("file is not a database") when the reader
+  // opens while the host's journal is present or a short/zero file is
+  // mid-propagation. These are the same transient race and must retry —
+  // before this fix they escaped isTransientCorrupt and crash-looped the
+  // Degenerates container (Barret @mentions in AI-chat went unanswered).
+  test.each([
+    ['unable to open database file', 'CANTOPEN text'],
+    ['SQLITE_CANTOPEN: unable to open database file', 'CANTOPEN code'],
+    ['file is not a database', 'NOTADB text'],
+    ['SQLITE_NOTADB: file is not a database', 'NOTADB code'],
+  ])('retries transient torn-open variant: %s', (message) => {
+    let calls = 0;
+    const result = withInboundDb(() => {
+      calls++;
+      if (calls === 1) throw new Error(message);
+      return 'recovered';
+    });
+    expect(result).toBe('recovered');
+    expect(calls).toBe(2);
+  });
 });
