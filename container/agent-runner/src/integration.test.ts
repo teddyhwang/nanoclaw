@@ -582,6 +582,41 @@ describe('poll loop — task_fires recording', () => {
     await loopPromise.catch(() => {});
   });
 
+  it('records the silent fire at the result event even when the stream stays open (warm-container, 2026-05-16 23folg)', async () => {
+    // Repro: telegram_dm_teddy 23folg. A warm agent-shared container
+    // holds the query open for the follow-up window and does not idle-
+    // kill for many minutes (browser pre-warm + 10 MCP servers keep it
+    // resident). Pre-fix the fire was written ONLY in processQuery's
+    // finally (stream close), so a silent dream task that finished its
+    // turn had its fire stuck unwritten indefinitely — dashboard showed
+    // "never ran" for a task that completed (0 fires after a 7-min live
+    // watch). MockProvider emits init→result then BLOCKS waiting for
+    // push()/end() — it never closes the stream on its own, exactly the
+    // held-open shape. The fire must land at the `result` event, before
+    // the stream is ever closed.
+    insertTask('t-dream-warm', 'dream-series-warm', {
+      prompt: 'Follow the agent protocol for end-of-day maintenance.',
+    });
+
+    const provider = new MockProvider({}, () => '<internal>maintenance complete</internal>');
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 3000);
+
+    // The fire must appear WITHOUT ever aborting/closing the stream.
+    await waitFor(() => readTaskFires('dream-series-warm').length > 0, 2500);
+
+    const fires = readTaskFires('dream-series-warm');
+    expect(fires).toHaveLength(1);
+    expect(fires[0].status).toBe('silent');
+    expect(fires[0].task_id).toBe('t-dream-warm');
+    expect(JSON.parse(fires[0].dispatched)).toEqual([]);
+
+    // Only now tear down — proves the write happened at the result
+    // event, not at stream close.
+    controller.abort();
+    await loopPromise.catch(() => {});
+  });
+
   it('records a distinct fire per task when several come due in one batch', async () => {
     // Multiple recurring tasks due in the same wake (RSS + dream). Pre-fix
     // keep.find() captured only the first → the second never recorded.

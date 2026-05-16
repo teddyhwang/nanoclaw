@@ -614,6 +614,42 @@ async function processQuery(
   };
   let streamErrored = false;
 
+  // Write a fire row for every still-unwritten task context. Called at
+  // the `result` event (eager — a result means the turn is done) AND in
+  // the finally (backstop for contexts that never produced a result,
+  // e.g. stream torn down before result). The `written` guard makes the
+  // second call a no-op for anything the first already flushed, so a
+  // task can never produce two rows.
+  //
+  // Why eager-at-result, not finally-only (2026-05-16, telegram_dm_teddy
+  // 23folg): the finally only runs when the `for await` stream closes.
+  // On a warm agent-shared container the query is held open for the
+  // follow-up window and the container does not idle-kill for many
+  // minutes (browser pre-warm + 10 MCP servers keep it resident), so a
+  // silent dream task that finished its turn at T had its fire stuck
+  // unwritten until the stream finally closed — the dashboard showed
+  // "never ran" for a task that completed. The `result` event is the
+  // authoritative "this turn finished" signal; flush there.
+  const flushUnwrittenTaskFires = (): void => {
+    if (streamErrored) return; // error path writes its own 'error' fires
+    for (const ctx of taskFireContexts) {
+      if (ctx.written) continue;
+      try {
+        writeTaskFire({
+          id: generateId(),
+          seriesId: ctx.seriesId,
+          taskId: ctx.taskId,
+          status: ctx.dispatched.length > 0 ? 'completed' : 'silent',
+          assistantText: ctx.assistantText,
+          dispatched: ctx.dispatched,
+        });
+        ctx.written = true;
+      } catch (err) {
+        log(`task_fires write failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  };
+
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open avoids
   // re-spawning the SDK subprocess (~few seconds) and re-loading the .jsonl
@@ -1046,6 +1082,19 @@ async function processQuery(
               );
             }
           }
+          // Eager flush: a `result` means the turn finished. Write the
+          // fire(s) now instead of waiting for the stream to close —
+          // a warm agent-shared container holds the query open for many
+          // minutes, so finally-only left silent task fires unwritten
+          // (telegram_dm_teddy 23folg, 2026-05-16: 0 fires after a
+          // 7-min watch; the container never idle-killed). Runs after
+          // attribution/dispatch above so status + assistantText +
+          // dispatched are populated. Unconditional (outside the
+          // `if (event.text)` block) so a silent / `<internal>`-only
+          // turn — the canonical dream/maintenance shape, empty
+          // event.text — also records its 'silent' fire. The finally
+          // remains as a backstop for contexts that never see a result.
+          flushUnwrittenTaskFires();
         }
       }
     } catch (err) {
@@ -1056,31 +1105,18 @@ async function processQuery(
     done = true;
     clearInterval(pollHandle);
     clearInterval(keepaliveHandle);
-    // Record one fire per due task on natural stream end. Status reflects
-    // whether that task's attributed output dispatched anything
-    // ('completed') or finished silent ('silent' — e.g. the maintenance/
-    // dream task that intentionally didn't post). Error fires are written
-    // by the outer caller (startMessageLoop's catch) so we skip the whole
-    // block when the stream errored; `written` is the per-context guard
-    // against the catch path and this path both writing the same task.
-    if (!streamErrored) {
-      for (const ctx of taskFireContexts) {
-        if (ctx.written) continue;
-        try {
-          writeTaskFire({
-            id: generateId(),
-            seriesId: ctx.seriesId,
-            taskId: ctx.taskId,
-            status: ctx.dispatched.length > 0 ? 'completed' : 'silent',
-            assistantText: ctx.assistantText,
-            dispatched: ctx.dispatched,
-          });
-          ctx.written = true;
-        } catch (err) {
-          log(`task_fires write failed: ${err instanceof Error ? err.message : String(err)}`);
-        }
-      }
-    }
+    // Backstop: flush any task context that never saw a `result` event
+    // (stream torn down before result, etc.). The eager flush at the
+    // `result` event already wrote the common case; `written` makes this
+    // a no-op for those. Status reflects whether that task's attributed
+    // output dispatched anything ('completed') or finished silent
+    // ('silent' — the maintenance/dream task that intentionally didn't
+    // post). Error fires are written by the outer caller
+    // (startMessageLoop's catch) so flushUnwrittenTaskFires self-skips
+    // when streamErrored; `written` is the per-context guard so the
+    // result-event flush, this backstop, and the error path can never
+    // double-write one task.
+    flushUnwrittenTaskFires();
   }
 
   return { continuation: queryContinuation };
