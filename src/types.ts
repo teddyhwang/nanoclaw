@@ -9,9 +9,27 @@ export interface AgentGroup {
   created_at: string;
 }
 
+/** Optimus fork extension to ContainerConfigRow (migration 016).
+ *
+ *  Kept as a separate interface intersected into ContainerConfigRow rather
+ *  than inlined into the upstream field block, so an upstream edit to
+ *  ContainerConfigRow never produces a merge conflict on these fork lines.
+ *  All consumers still read `row.suppress_embeds` etc. unchanged — the
+ *  intersection makes the fields transparent. This is a real fork feature
+ *  (no upstream equivalent), deliberately retained, just merge-isolated.
+ *
+ *  - suppress_embeds: 1 = pass SUPPRESS_EMBEDS flag on Discord outbound
+ *    (default for new groups).
+ *  - assistant_prefix_separator: separator placed between the assistant
+ *    name and message body in shared-number adapters (WhatsApp). */
+export interface OptimusContainerConfigExt {
+  suppress_embeds: number; // 0 | 1
+  assistant_prefix_separator: string | null;
+}
+
 /** Per-agent-group container runtime config. Source of truth in the DB;
  *  materialized to `groups/<folder>/container.json` at spawn time. */
-export interface ContainerConfigRow {
+export interface ContainerConfigRowBase {
   agent_group_id: string;
   provider: string | null;
   model: string | null;
@@ -25,14 +43,10 @@ export interface ContainerConfigRow {
   packages_npm: string; // JSON: string[]
   additional_mounts: string; // JSON: AdditionalMountConfig[]
   cli_scope: string; // 'disabled' | 'group' | 'global'
-  // Optimus-only fork fields (migration 016).
-  // suppress_embeds: 1 = pass SUPPRESS_EMBEDS flag on Discord outbound (default
-  // for new groups). assistant_prefix_separator: separator placed between the
-  // assistant name and message body in shared-number adapters (WhatsApp).
-  suppress_embeds: number; // 0 | 1
-  assistant_prefix_separator: string | null;
   updated_at: string;
 }
+
+export type ContainerConfigRow = ContainerConfigRowBase & OptimusContainerConfigExt;
 
 export type UnknownSenderPolicy = 'strict' | 'request_approval' | 'public';
 
