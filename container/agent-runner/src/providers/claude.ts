@@ -417,9 +417,8 @@ export class ClaudeProvider implements AgentProvider {
           : undefined,
         allowedTools: [...TOOL_ALLOWLIST, ...Object.keys(this.mcpServers).map(mcpAllowPattern)],
         disallowedTools: SDK_DISALLOWED_TOOLS,
-        ...(modelOverride ? { model: modelOverride } : {}),
         env: this.env,
-        model: this.model,
+        model: modelOverride || this.model,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         effort: this.effort as any,
         permissionMode: 'bypassPermissions',
