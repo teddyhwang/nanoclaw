@@ -176,10 +176,7 @@ function hasPendingUserFacingOutbound(agentGroupId: string, sessionId: string): 
  * and NONE of it is user-conversation work. No processing rows →
  * false (let the grace/heartbeat logic decide; not our concern).
  */
-export function decideSuppressTypingForNonUserTurn(
-  processingCount: number,
-  hasUserKindProcessing: boolean,
-): boolean {
+export function decideSuppressTypingForNonUserTurn(processingCount: number, hasUserKindProcessing: boolean): boolean {
   if (processingCount === 0) return false;
   return !hasUserKindProcessing;
 }
