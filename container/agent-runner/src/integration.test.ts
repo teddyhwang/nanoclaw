@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
-import { initTestSessionDb, closeSessionDb, getInboundDb } from './db/connection.js';
+import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './db/connection.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { getPendingMessages } from './db/messages-in.js';
 import {
@@ -446,6 +446,135 @@ describe('poll loop — provider error recovery', () => {
   });
 });
 
+describe('poll loop — task_fires recording', () => {
+  // Regression: scheduled-task fires were silently never written to
+  // task_fires on two paths, so the dashboard showed "No fires recorded
+  // yet" for the dream/maintenance task that fired daily.
+  //
+  // Path A (the dream/maintenance common case): a task that comes due
+  // while a chat turn is active is DEFERRED by the activeSender task-wake
+  // guard (it must not fold into the user's stream), then re-enters the
+  // outer loop as a TASK-ONLY initial batch. Pre-fix the initial-batch
+  // capture used keep.find() (single) so a batch with >1 due task only
+  // recorded the first; and a silent task-only turn recorded nothing
+  // unless it was the find()-matched row.
+  //
+  // Path B: a task that comes due while ANOTHER task turn is running (no
+  // activeSender) is pushed via the in-query follow-up path. Pre-fix that
+  // path had no gated-write and registered no fire context at all.
+
+  function readTaskFires(seriesId: string): Array<{
+    series_id: string;
+    task_id: string;
+    status: string;
+    dispatched: string;
+    error_message: string | null;
+  }> {
+    return getOutboundDb()
+      .prepare(
+        `SELECT series_id, task_id, status, dispatched, error_message
+           FROM task_fires WHERE series_id = ? ORDER BY fired_at`,
+      )
+      .all(seriesId) as Array<{
+      series_id: string;
+      task_id: string;
+      status: string;
+      dispatched: string;
+      error_message: string | null;
+    }>;
+  }
+
+  function insertTask(id: string, seriesId: string, content: { prompt: string; script?: string }): void {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, trigger, series_id, platform_id, channel_type, content)
+         VALUES (?, 'task', datetime('now'), 'pending', 1, ?, 'chan-1', 'discord', ?)`,
+      )
+      .run(id, seriesId, JSON.stringify(content));
+  }
+
+  it('writes a "silent" fire for a task-only turn that dispatches nothing', async () => {
+    // The real dream/maintenance shape: task-only batch (no chat trigger
+    // → no activeSender), agent emits only <internal> (strips to empty →
+    // no safety-net, sent===0 → silent). Pre-fix this produced no row.
+    insertTask('t-dream-1', 'dream-series-A', {
+      prompt: 'Follow the agent protocol for end-of-day maintenance.',
+    });
+
+    const provider = new EndingProvider(() => '<internal>nothing to report</internal>');
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 3000);
+
+    await waitFor(() => readTaskFires('dream-series-A').length > 0, 2500);
+    controller.abort();
+
+    const fires = readTaskFires('dream-series-A');
+    expect(fires).toHaveLength(1);
+    expect(fires[0].status).toBe('silent');
+    expect(fires[0].task_id).toBe('t-dream-1');
+    expect(JSON.parse(fires[0].dispatched)).toEqual([]);
+
+    await loopPromise.catch(() => {});
+  });
+
+  it('records a distinct fire per task when several come due in one batch', async () => {
+    // Multiple recurring tasks due in the same wake (RSS + dream). Pre-fix
+    // keep.find() captured only the first → the second never recorded.
+    insertTask('t-rss-1', 'rss-series', { prompt: 'rss check' });
+    insertTask('t-dream-2', 'dream-series-C', { prompt: 'end-of-day maintenance' });
+
+    const provider = new EndingProvider(() => '<internal>done</internal>');
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 3500);
+
+    await waitFor(() => readTaskFires('rss-series').length > 0 && readTaskFires('dream-series-C').length > 0, 3000);
+    controller.abort();
+
+    expect(readTaskFires('rss-series')).toHaveLength(1);
+    expect(readTaskFires('dream-series-C')).toHaveLength(1);
+    // Each keyed by its own task id — never collapsed into one row.
+    expect(readTaskFires('rss-series')[0].task_id).toBe('t-rss-1');
+    expect(readTaskFires('dream-series-C')[0].task_id).toBe('t-dream-2');
+
+    await loopPromise.catch(() => {});
+  });
+
+  it('writes a "gated" fire for a follow-up task whose pre-task script gates it', async () => {
+    // Path B: a task arrives while another (task) turn is running → goes
+    // through the in-query follow-up handler. A wakeAgent=false script
+    // must still record a 'gated' fire (pre-fix the follow-up path had no
+    // gated-write — only the initial-batch path did).
+    insertTask('t-trigger', 'trigger-series', { prompt: 'long running task' });
+
+    let pushedFollowup = false;
+    const provider = new EndingProvider(() => {
+      if (!pushedFollowup) {
+        pushedFollowup = true;
+        // Insert the gated follow-up while this turn's stream is open
+        // (the EndingProvider holds the stream ~400ms for the in-query
+        // poll to fold it in before ending).
+        insertTask('t-gated-1', 'dream-series-B', {
+          prompt: 'maintenance',
+          script: 'echo \'{"wakeAgent": false}\'',
+        });
+      }
+      return '<internal>working</internal>';
+    });
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 3500);
+
+    await waitFor(() => readTaskFires('dream-series-B').length > 0, 3000);
+    controller.abort();
+
+    const fires = readTaskFires('dream-series-B');
+    expect(fires).toHaveLength(1);
+    expect(fires[0].status).toBe('gated');
+    expect(fires[0].task_id).toBe('t-gated-1');
+
+    await loopPromise.catch(() => {});
+  });
+});
+
 describe('poll loop — stale session recovery', () => {
   it('clears continuation when provider reports session invalid', async () => {
     // Pre-seed a continuation so the local variable in runPollLoop is set.
@@ -608,6 +737,78 @@ describe('poll loop — /clear command', () => {
 /**
  * Provider that throws on every query, simulating API failures.
  */
+/**
+ * Provider whose stream ENDS after delivering one result per prompt —
+ * models a real provider/SDK whose agent turn completes and the event
+ * stream closes (which is what triggers processQuery's finally, where the
+ * task_fires row is written). The shared MockProvider deliberately blocks
+ * the stream open for follow-up pushes, so it can never exercise the
+ * natural-stream-end fire-write; this one can. Each `query.push` (a
+ * follow-up the poll-loop folds in) produces one more result then the
+ * stream ends again on the next outer-loop query.
+ */
+class EndingProvider {
+  readonly supportsNativeSlashCommands = false;
+  private responseFactory: (prompt: string) => string;
+
+  constructor(responseFactory: (prompt: string) => string) {
+    this.responseFactory = responseFactory;
+  }
+
+  isSessionInvalid(): boolean {
+    return false;
+  }
+
+  readSessionStats() {
+    return { compactCount: 0, sizeBytes: 0, turnCount: 0 };
+  }
+
+  query(input: { prompt: string }) {
+    const factory = this.responseFactory;
+    const pending: string[] = [];
+    let resolveWait: (() => void) | null = null;
+    let ended = false;
+    return {
+      push(message: string) {
+        pending.push(message);
+        resolveWait?.();
+      },
+      end() {
+        ended = true;
+        resolveWait?.();
+      },
+      abort() {
+        ended = true;
+        resolveWait?.();
+      },
+      events: (async function* () {
+        yield { type: 'init' as const, continuation: `mock-session-${Date.now()}` };
+        yield { type: 'result' as const, text: factory(input.prompt) };
+        // Give the poll-loop one short window to fold in a follow-up
+        // (its in-query poll runs on an interval). If one arrives, emit
+        // its result; otherwise end the stream so processQuery returns
+        // and the finally writes the fire — the real "turn finished"
+        // shape, not an infinite open stream.
+        for (;;) {
+          if (pending.length > 0) {
+            yield { type: 'result' as const, text: factory(pending.shift()!) };
+            continue;
+          }
+          if (ended) return;
+          await new Promise<void>((r) => {
+            resolveWait = r;
+            setTimeout(() => {
+              resolveWait = null;
+              r();
+            }, 400);
+          });
+          if (pending.length === 0) return; // settled with no follow-up → end
+        }
+      })(),
+    };
+  }
+}
+
 class ThrowingProvider {
   readonly supportsNativeSlashCommands = false;
   private errorMessage: string;

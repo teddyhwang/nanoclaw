@@ -245,9 +245,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
             errorMessage: g.reason === 'script error/no output' ? g.reason : null,
           });
         } catch (err) {
-          log(
-            `task_fires gated-write failed for ${g.taskId}: ${err instanceof Error ? err.message : String(err)}`,
-          );
+          log(`task_fires gated-write failed for ${g.taskId}: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
     }
@@ -292,10 +290,25 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // (matches the host-side backfill in src/db/session-db.ts:349). Only
     // the kind='task' branch participates — chat-triggered wakes don't
     // produce fire rows.
-    const taskTrigger = keep.find((m) => m.trigger === 1 && m.kind === 'task');
-    const taskFireContext = taskTrigger
-      ? { seriesId: taskTrigger.series_id ?? taskTrigger.id, taskId: taskTrigger.id }
-      : null;
+    // Shared, mutable list seeded with the initial-batch task rows; the
+    // follow-up poll closure appends a context per follow-up task that
+    // survives its pre-task script. One context per due task occurrence so
+    // each gets exactly one fire row even when several fold into one
+    // provider stream (multiple recurring tasks coming due in the same
+    // wake, or follow-ups arriving mid-turn). `series_id` falls back to
+    // `id` for pre-migration rows (matches host-side backfill in
+    // src/db/session-db.ts:349). Chat-triggered wakes produce no context.
+    const taskFireContexts: TaskFireContext[] = [];
+    for (const m of keep) {
+      if (m.trigger !== 1 || m.kind !== 'task') continue;
+      taskFireContexts.push({
+        seriesId: m.series_id ?? m.id,
+        taskId: m.id,
+        dispatched: [],
+        assistantText: null,
+        written: false,
+      });
+    }
 
     // Load any inbound image attachments as Anthropic vision content blocks.
     // The host wrote bytes to <sessDir>/inbox/<msgId>/<file> (sized to fit
@@ -363,7 +376,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         processingIds,
         config.providerName,
         activeSender,
-        taskFireContext,
+        taskFireContexts,
       );
       if (result.continuation && result.continuation !== continuation) {
         const isNewThread = continuation === undefined;
@@ -410,18 +423,22 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       // Task-fire error record. Captures the error message so the
       // dashboard can show "this fire failed and why" instead of leaving
       // the fire row missing entirely (which would look like the task
-      // simply didn't run).
-      if (taskFireContext) {
+      // simply didn't run). One row per still-unwritten due task; mark
+      // each written so processQuery's finally can't also write a
+      // completed/silent row for it (the single-fire invariant).
+      for (const ctx of taskFireContexts) {
+        if (ctx.written) continue;
         try {
           writeTaskFire({
             id: generateId(),
-            seriesId: taskFireContext.seriesId,
-            taskId: taskFireContext.taskId,
+            seriesId: ctx.seriesId,
+            taskId: ctx.taskId,
             status: 'error',
             assistantText: null,
             dispatched: [],
             errorMessage: errMsg,
           });
+          ctx.written = true;
         } catch (writeErr) {
           log(`task_fires error-write failed: ${writeErr instanceof Error ? writeErr.message : String(writeErr)}`);
         }
@@ -491,6 +508,17 @@ interface QueryResult {
 interface TaskFireContext {
   seriesId: string;
   taskId: string;
+  // Per-task accumulators. One stream can fold MULTIPLE task triggers
+  // (the initial batch task + any follow-up task rows that came due while
+  // the container was already running — RSS + dream + reflection in one
+  // container lifetime). Each due task occurrence gets exactly ONE fire
+  // row keyed by its own (seriesId, taskId); these accumulate the
+  // dispatch/text attributed to it. `written` is the write-once guard
+  // shared between the error path (outer catch) and the normal-completion
+  // path (finally) so a task can never produce two rows.
+  dispatched: TaskFireDispatch[];
+  assistantText: string | null;
+  written: boolean;
 }
 
 async function processQuery(
@@ -499,22 +527,36 @@ async function processQuery(
   initialBatchIds: string[],
   providerName: string,
   activeSender: string | null,
-  taskFireContext: TaskFireContext | null,
+  // Shared by reference with the follow-up poll closure so a follow-up
+  // task that survives its pre-task script can register its own fire
+  // context (see the scheduling-pre-task-followup hook). Pre-bug this was
+  // a single nullable context captured once from the initial batch, so
+  // every follow-up task fire (the dream/maintenance common case, since
+  // those agents are usually already-active) was silently never recorded.
+  taskFireContexts: TaskFireContext[],
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
   let unwrappedNudged = false;
-  // Task-fire accumulators. We record one row per stream, summarizing the
-  // entire task-triggered turn even if multiple result events arrive
-  // (e.g. unwrapped-nudge re-prompt produces a second result). assistantText
-  // tracks the latest non-empty result text; dispatchedAccum collects every
-  // <message to=...> block actually sent (or safety-net dispatch). On
-  // stream end we write the fire — status='completed' when something was
-  // dispatched, 'silent' otherwise. Errors set `streamErrored` so the
-  // finally skips the normal-completion write; the outer catch in
-  // startMessageLoop writes the error fire instead.
-  const taskFireDispatched: TaskFireDispatch[] = [];
-  let taskFireAssistantText: string | null = null;
+  // Attribution: result events fold into one provider stream and the SDK
+  // does not tag which pushed prompt produced a given <message> block, so
+  // per-task dispatch provenance across a task↔chat or task↔task boundary
+  // is best-effort. We attribute each result's text/dispatch to the most
+  // recently registered, still-unwritten task context (the initial task
+  // until a follow-up task is appended; thereafter the latest follow-up).
+  // The ROW COUNT and KEYS are always exact (one row per due task, keyed
+  // by its own series_id/id); only the dispatched/assistantText payload is
+  // approximate when chat and task turns interleave in a single long
+  // stream. For the canonical silent maintenance/dream task this is exact:
+  // it dispatches nothing → status='silent'. Errors set `streamErrored`
+  // so the finally skips the normal-completion write; the outer catch in
+  // startMessageLoop writes one error fire per unwritten context instead.
+  const mostRecentTaskContext = (): TaskFireContext | null => {
+    for (let i = taskFireContexts.length - 1; i >= 0; i--) {
+      if (!taskFireContexts[i].written) return taskFireContexts[i];
+    }
+    return null;
+  };
   let streamErrored = false;
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
@@ -750,6 +792,28 @@ async function processQuery(
         if (skipped.length > 0) {
           markCompleted(skipped);
           log(`Pre-task script skipped ${skipped.length} follow-up task(s): ${skipped.join(', ')}`);
+          // Record a 'gated' fire per skipped follow-up task — the exact
+          // mirror of the initial-batch gated-write at the
+          // scheduling-pre-task hook above. Without this, a script-gated
+          // task that arrives while the container is already running
+          // (the dream/maintenance common case, since those agents are
+          // usually mid-turn when the 04:00 occurrence comes due) shows
+          // "never ran" on the dashboard despite firing on schedule.
+          for (const g of preTask.gated) {
+            try {
+              writeTaskFire({
+                id: generateId(),
+                seriesId: g.seriesId,
+                taskId: g.taskId,
+                status: 'gated',
+                assistantText: null,
+                dispatched: [],
+                errorMessage: g.reason === 'script error/no output' ? g.reason : null,
+              });
+            } catch (err) {
+              log(`task_fires gated-write failed for ${g.taskId}: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
         }
         // MODULE-HOOK:scheduling-pre-task-followup:end
 
@@ -773,6 +837,24 @@ async function processQuery(
         // was awaited. Pushing into a closed stream is wasted work; the
         // claimed messages get released by the host's processing-claim sweep.
         if (done) return;
+
+        // Register a fire context for each follow-up task that survived
+        // its pre-task script and is about to be pushed into the active
+        // stream. Pre-fix only the initial-batch task had a context, so a
+        // woken follow-up task (the dream/maintenance task on an already-
+        // active agent) produced no row at all. Keyed by its own
+        // series_id/id so it gets exactly one fire; the finally/error
+        // writers iterate every registered context.
+        for (const m of keep) {
+          if (m.kind !== 'task' || m.trigger !== 1) continue;
+          taskFireContexts.push({
+            seriesId: m.series_id ?? m.id,
+            taskId: m.id,
+            dispatched: [],
+            assistantText: null,
+            written: false,
+          });
+        }
 
         const keptIds = keep.map((m) => m.id);
         const prompt = formatMessages(keep);
@@ -863,10 +945,13 @@ async function processQuery(
           // at all — either way the turn is finished.
           markCompleted(initialBatchIds);
           if (event.text) {
-            if (taskFireContext) taskFireAssistantText = event.text;
+            // Attribute this result to the most-recent unwritten task
+            // context (best-effort — see processQuery's attribution note).
+            const fireCtx = mostRecentTaskContext();
+            if (fireCtx) fireCtx.assistantText = event.text;
             const { hasUnwrapped, dispatched } = dispatchResultText(event.text, routing);
-            if (taskFireContext && dispatched.length > 0) {
-              taskFireDispatched.push(...dispatched);
+            if (fireCtx && dispatched.length > 0) {
+              fireCtx.dispatched.push(...dispatched);
             }
             if (hasUnwrapped && !unwrappedNudged) {
               unwrappedNudged = true;
@@ -890,23 +975,29 @@ async function processQuery(
     done = true;
     clearInterval(pollHandle);
     clearInterval(keepaliveHandle);
-    // Record task fire on natural stream end. Status reflects whether the
-    // agent dispatched anything ('completed') or finished silent
-    // ('silent' — e.g. maintenance task that intentionally didn't post).
-    // Error fires are written by the outer caller (startMessageLoop's
-    // catch) so we skip when the stream errored.
-    if (taskFireContext && !streamErrored) {
-      try {
-        writeTaskFire({
-          id: generateId(),
-          seriesId: taskFireContext.seriesId,
-          taskId: taskFireContext.taskId,
-          status: taskFireDispatched.length > 0 ? 'completed' : 'silent',
-          assistantText: taskFireAssistantText,
-          dispatched: taskFireDispatched,
-        });
-      } catch (err) {
-        log(`task_fires write failed: ${err instanceof Error ? err.message : String(err)}`);
+    // Record one fire per due task on natural stream end. Status reflects
+    // whether that task's attributed output dispatched anything
+    // ('completed') or finished silent ('silent' — e.g. the maintenance/
+    // dream task that intentionally didn't post). Error fires are written
+    // by the outer caller (startMessageLoop's catch) so we skip the whole
+    // block when the stream errored; `written` is the per-context guard
+    // against the catch path and this path both writing the same task.
+    if (!streamErrored) {
+      for (const ctx of taskFireContexts) {
+        if (ctx.written) continue;
+        try {
+          writeTaskFire({
+            id: generateId(),
+            seriesId: ctx.seriesId,
+            taskId: ctx.taskId,
+            status: ctx.dispatched.length > 0 ? 'completed' : 'silent',
+            assistantText: ctx.assistantText,
+            dispatched: ctx.dispatched,
+          });
+          ctx.written = true;
+        } catch (err) {
+          log(`task_fires write failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
       }
     }
   }
