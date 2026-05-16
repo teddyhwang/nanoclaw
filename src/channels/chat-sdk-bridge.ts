@@ -284,6 +284,29 @@ function scanFenceState(text: string): { open: boolean; lang: string } {
   return { open, lang };
 }
 
+/**
+ * Discord's Get Channel Messages API hard-caps the `limit` query param
+ * at 100 (docs.discord.com/developers/resources/message — "Max number
+ * of messages to return (1-100)"); 101+ is a fatal 400, code 50035
+ * NUMBER_TYPE_MAX. A caller asking recoverMissedMessages for a larger
+ * window must therefore page, not request one oversized fetch.
+ *
+ * Returns the clamped per-page `pageSize` (1..100) and a `maxPages`
+ * budget that covers the caller's intended `limit` worth of messages
+ * with slack, while still bounding a misbehaving adapter whose cursor
+ * never terminates. Pure — unit-tested directly.
+ */
+export const RECOVERY_PER_PAGE_MAX = 100;
+
+export function recoveryPageBudget(limit: number): {
+  pageSize: number;
+  maxPages: number;
+} {
+  const pageSize = Math.min(Math.max(1, limit), RECOVERY_PER_PAGE_MAX);
+  const maxPages = Math.max(1, Math.ceil(limit / pageSize)) + 5;
+  return { pageSize, maxPages };
+}
+
 export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter {
   const { adapter } = config;
   const transformText = (t: string): string => (config.transformOutboundText ? config.transformOutboundText(t) : t);
@@ -908,35 +931,66 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       let recoveredCount = 0;
       let earliestTimestamp: string | undefined;
 
+      // Per-page cap. Discord's Get Channel Messages API hard-caps the
+      // `limit` query param at 100 (400 code 50035 NUMBER_TYPE_MAX
+      // otherwise), so a caller asking for more than that recovered
+      // *nothing* for the whole thread. Clamp the page size and instead
+      // walk backward page-by-page via the FetchResult cursor until we
+      // cross the lookback cutoff — this honors a window larger than one
+      // page without ever sending an out-of-range limit. See
+      // recoveryPageBudget for the Discord cap rationale.
+      const { pageSize, maxPages: MAX_PAGES } = recoveryPageBudget(limit);
+
       try {
-        const result = await adapterAny.fetchMessages(threadId, {
-          limit,
-          direction: 'backward',
-        });
-        const messages = (result?.messages ?? []) as ChatMessage[];
+        let cursor: string | undefined;
+        let reachedCutoff = false;
+        const channelId = adapter.channelIdFromThreadId(threadId);
 
-        // chat-sdk returns messages in chronological order (oldest first
-        // within the page). Replay in the same order so seq-based dedup
-        // and inbound.db PK collisions resolve naturally.
-        for (const message of messages) {
-          const sentAt = message.metadata?.dateSent?.getTime?.();
-          if (!sentAt || sentAt < cutoffMs) continue;
+        for (let page = 0; page < MAX_PAGES && !reachedCutoff; page++) {
+          const result = await adapterAny.fetchMessages(threadId, {
+            limit: pageSize,
+            direction: 'backward',
+            ...(cursor ? { cursor } : {}),
+          });
+          const messages = (result?.messages ?? []) as ChatMessage[];
+          if (messages.length === 0) break;
 
-          const timestamp = message.metadata.dateSent.toISOString();
-          if (!earliestTimestamp || timestamp < earliestTimestamp) {
-            earliestTimestamp = timestamp;
+          // chat-sdk returns messages in chronological order (oldest
+          // first within the page). Replay in the same order so seq-based
+          // dedup and inbound.db PK collisions resolve naturally.
+          for (const message of messages) {
+            const sentAt = message.metadata?.dateSent?.getTime?.();
+            // Pre-cutoff message: we've walked past the window. Older
+            // pages are strictly older, so stop after this page.
+            if (!sentAt || sentAt < cutoffMs) {
+              reachedCutoff = true;
+              continue;
+            }
+
+            const timestamp = message.metadata.dateSent.toISOString();
+            if (!earliestTimestamp || timestamp < earliestTimestamp) {
+              earliestTimestamp = timestamp;
+            }
+            recoveredCount += 1;
+
+            // We don't know whether the historical message belongs to a
+            // subscribed thread or is a DM at recovery time. Forward
+            // through onInbound with conservative defaults (isMention
+            // from the platform-confirmed flag if present; isGroup
+            // undefined so the router's existing classification path
+            // runs). The router's dedup PK on (session_id, message_id)
+            // handles re-routing of any messages already processed
+            // before the gap.
+            await setupConfig.onInbound(
+              channelId,
+              threadId,
+              await messageToInbound(message, message.isMention === true),
+            );
           }
-          recoveredCount += 1;
 
-          // We don't know whether the historical message belongs to a
-          // subscribed thread or is a DM at recovery time. Forward through
-          // onInbound with conservative defaults (isMention from the
-          // platform-confirmed flag if present; isGroup undefined so the
-          // router's existing classification path runs). The router's
-          // dedup PK on (session_id, message_id) handles re-routing of
-          // any messages that were already processed before the gap.
-          const channelId = adapter.channelIdFromThreadId(threadId);
-          await setupConfig.onInbound(channelId, threadId, await messageToInbound(message, message.isMention === true));
+          // No further pages, or the adapter doesn't support cursoring.
+          cursor = result?.nextCursor;
+          if (!cursor) break;
         }
       } catch (err) {
         log.warn('recoverMissedMessages threw', {

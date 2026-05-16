@@ -2,7 +2,13 @@ import { describe, expect, it } from 'vitest';
 
 import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
 
-import { createChatSdkBridge, htmlToMarkdown, splitForLimit } from './chat-sdk-bridge.js';
+import {
+  createChatSdkBridge,
+  htmlToMarkdown,
+  RECOVERY_PER_PAGE_MAX,
+  recoveryPageBudget,
+  splitForLimit,
+} from './chat-sdk-bridge.js';
 
 function stubAdapter(partial: Partial<Adapter>): Adapter {
   return { name: 'stub', ...partial } as unknown as Adapter;
@@ -267,10 +273,47 @@ describe('createChatSdkBridge', () => {
       expect(result).toEqual({ recoveredCount: 0 });
     });
 
-    // Replay-through-onInbound is covered end-to-end by the apps/optimus
-    // channel-recovery test (Port #4), which drives a real CompositeAdapter
-    // with a stub sub-adapter — `setupConfig` lives in the bridge's closure
-    // so unit tests that bypass setup() can't exercise the replay path.
+    // The replay/cursor-walk loop body sits behind the
+    // `if (!setupConfig) return` guard, so it isn't reachable without
+    // driving the heavy setup() (real Chat + SqliteStateAdapter +
+    // chat.initialize()). The high-risk regression — the Discord
+    // limit>100 → 400 bug — lives entirely in the page-budget math,
+    // which is extracted into the pure recoveryPageBudget() helper and
+    // unit-tested directly below. The cursor-walk wiring itself is
+    // exercised in production startup recovery.
+  });
+
+  describe('recoveryPageBudget', () => {
+    it('clamps the page size to the Discord API max (100)', () => {
+      // The actual bug: STARTUP_LIMIT was 200, Discord rejects >100 with
+      // 400 code 50035 NUMBER_TYPE_MAX, so every startup recovery fetched
+      // an out-of-range limit and recovered zero messages.
+      expect(recoveryPageBudget(200).pageSize).toBe(100);
+      expect(recoveryPageBudget(101).pageSize).toBe(100);
+      expect(RECOVERY_PER_PAGE_MAX).toBe(100);
+    });
+
+    it('passes through in-range limits unchanged', () => {
+      expect(recoveryPageBudget(100).pageSize).toBe(100);
+      expect(recoveryPageBudget(50).pageSize).toBe(50);
+      expect(recoveryPageBudget(1).pageSize).toBe(1);
+    });
+
+    it('floors a non-positive limit at one message per page', () => {
+      expect(recoveryPageBudget(0).pageSize).toBe(1);
+      expect(recoveryPageBudget(-5).pageSize).toBe(1);
+    });
+
+    it('budgets enough pages to cover the requested volume with slack', () => {
+      // 200 wanted / 100 per page = 2 pages of content; +5 slack so a
+      // clock-skewed or chatty window still terminates the walk.
+      expect(recoveryPageBudget(200).maxPages).toBe(7);
+      expect(recoveryPageBudget(100).maxPages).toBe(6);
+      // Degenerate inputs still yield a finite, >=1 page budget so the
+      // for-loop bound can never be 0/NaN.
+      expect(recoveryPageBudget(0).maxPages).toBeGreaterThanOrEqual(1);
+      expect(Number.isFinite(recoveryPageBudget(-5).maxPages)).toBe(true);
+    });
   });
 });
 
