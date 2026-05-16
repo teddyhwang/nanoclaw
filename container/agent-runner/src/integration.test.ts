@@ -651,6 +651,57 @@ describe('poll loop — task_fires recording', () => {
     await loopPromise.catch(() => {});
   });
 
+  it('defers chat that arrives mid-task-turn instead of folding it (Bug D follow-up half)', async () => {
+    // Bug D follow-up half: a task-only turn is active; chat arrives via
+    // the follow-up poll during the task's generation window. Pre-fix it
+    // was pushed into the task's stream — the AI-Friends dream-summary
+    // leak via the follow-up path. EndingProvider holds the stream ~400ms
+    // (its one in-query fold window); we inject a chat row inside that
+    // window via the responseFactory. The chat must be DEFERRED (stay
+    // pending, never appear in any prompt the provider saw).
+    insertTask('t-dream-iso', 'dream-series-iso', {
+      prompt: 'silent maintenance — do NOT send any messages',
+    });
+
+    const prompts: string[] = [];
+    let injected = false;
+    const provider = new EndingProvider((p: string) => {
+      prompts.push(p);
+      if (!injected) {
+        injected = true;
+        // Chat lands while the task turn's stream is still open.
+        insertMessage(
+          'm-midturn',
+          { sender: 'Alice', text: 'hey are you there' },
+          { platformId: 'chan-1', channelType: 'discord' },
+        );
+      }
+      return '<internal>maintenance done</internal>';
+    });
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 3500);
+
+    await waitFor(() => readTaskFires('dream-series-iso').length > 0, 3000);
+    controller.abort();
+
+    // The task ran and recorded its silent fire.
+    expect(readTaskFires('dream-series-iso')).toHaveLength(1);
+    expect(readTaskFires('dream-series-iso')[0].status).toBe('silent');
+    // The invariant: the mid-turn chat was never FOLDED into the task
+    // turn. The task prompt contains the maintenance instruction but
+    // NOT the chat; the chat is correctly handled in its own separate
+    // chat turn afterward (deferring ≠ dropping), so it legitimately
+    // appears in a *different* prompt — assert no single prompt mixes
+    // the two, and the task prompt specifically is chat-free.
+    const taskPrompt = prompts.find((p) => p.includes('silent maintenance'));
+    expect(taskPrompt).toBeDefined();
+    expect(taskPrompt).not.toContain('hey are you there');
+    const folded = prompts.find((p) => p.includes('silent maintenance') && p.includes('hey are you there'));
+    expect(folded).toBeUndefined();
+
+    await loopPromise.catch(() => {});
+  });
+
   it('records a distinct fire per task when several come due in one batch', async () => {
     // Multiple recurring tasks due in the same wake (RSS + dream). Pre-fix
     // keep.find() captured only the first → the second never recorded.
