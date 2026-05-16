@@ -55,9 +55,7 @@ export function getAllDestinations(): DestinationEntry[] {
  */
 export function hasChannelDestination(channelType: string): boolean {
   const row = getInboundDb()
-    .prepare(
-      "SELECT 1 FROM destinations WHERE type = 'channel' AND channel_type = ? LIMIT 1",
-    )
+    .prepare("SELECT 1 FROM destinations WHERE type = 'channel' AND channel_type = ? LIMIT 1")
     .get(channelType);
   return row !== undefined;
 }
@@ -79,9 +77,9 @@ export function findByRouting(
   const db = getInboundDb();
   const row =
     channelType === 'agent'
-      ? (db
-          .prepare("SELECT * FROM destinations WHERE type = 'agent' AND agent_group_id = ?")
-          .get(platformId) as DestRow | undefined)
+      ? (db.prepare("SELECT * FROM destinations WHERE type = 'agent' AND agent_group_id = ?").get(platformId) as
+          | DestRow
+          | undefined)
       : (db
           .prepare("SELECT * FROM destinations WHERE type = 'channel' AND channel_type = ? AND platform_id = ?")
           .get(channelType, platformId) as DestRow | undefined);
@@ -99,7 +97,13 @@ export function buildSystemPromptAddendum(assistantName?: string): string {
   const sections: string[] = [];
 
   if (assistantName) {
-    sections.push(['# You are ' + assistantName, '', `Your name is **${assistantName}**. Use it when the channel asks who you are, when introducing yourself, and when signing any message that explicitly calls for a signature.`].join('\n'));
+    sections.push(
+      [
+        '# You are ' + assistantName,
+        '',
+        `Your name is **${assistantName}**. Use it when the channel asks who you are, when introducing yourself, and when signing any message that explicitly calls for a signature.`,
+      ].join('\n'),
+    );
   }
 
   sections.push(buildDestinationsSection());
@@ -131,10 +135,20 @@ function buildDestinationsSection(): string {
     }
   }
   lines.push('');
-  lines.push('**All output must be wrapped.** Use `<message to="name">...</message>` for content to send, or `<internal>...</internal>` for scratchpad.');
+  lines.push(
+    '**All output must be wrapped.** Use `<message to="name">...</message>` for content to send, or `<internal>...</internal>` for scratchpad.',
+  );
   lines.push('You can include multiple `<message>` blocks in one response to send to multiple destinations.');
-  lines.push('Any text you want to keep private MUST be wrapped in `<internal>...</internal>` — that content is stripped before delivery, never reaches any user, and only appears in host operator logs.');
-  lines.push('Plain text outside BOTH `<message>` and `<internal>` (including meta-narration like "no reply needed", "saved to profile", or any explanation of what you decided to do) WILL be broadcast to the originating channel with a `[degraded]` label. The runner cannot tell the difference between a real reply that forgot the `<message>` wrap and self-narration; it errs on the side of delivering rather than silently dropping. So: every character is either inside `<message>` (sent to a named destination) or inside `<internal>` (kept private). Nothing else. If you have nothing to say, emit a single `<internal>silent turn</internal>` and stop.');
+  lines.push(
+    'Any text you want to keep private MUST be wrapped in `<internal>...</internal>` — that content is stripped before delivery, never reaches any user, and only appears in host operator logs.',
+  );
+  lines.push(
+    'Plain text outside BOTH `<message>` and `<internal>` (including meta-narration like "no reply needed", "saved to profile", or any explanation of what you decided to do) WILL be broadcast to the originating channel with a `[degraded]` label. The runner cannot tell the difference between a real reply that forgot the `<message>` wrap and self-narration; it errs on the side of delivering rather than silently dropping. So: every character is either inside `<message>` (sent to a named destination) or inside `<internal>` (kept private). Nothing else. If you have nothing to say, emit a single `<internal>silent turn</internal>` and stop.',
+  );
+  lines.push('');
+  lines.push(
+    '**A silent turn is NOT allowed when you were directly addressed.** The host only wakes you for a chat turn when the engagement gate already decided this message is for you (a direct @mention of you, a reply to one of your messages, or a pattern match). If the triggering message mentions you by name/handle OR asks you a direct question, you MUST emit a `<message>` reply — answer it, or if you genuinely cannot, say so explicitly (e.g. "I don\'t know" / "I can\'t do that" / a one-line acknowledgment). Staying silent on a question or a mention reads as the bot being broken. `<internal>silent turn</internal>` is only for turns where you were woken by ambient context or your own scheduled task and there is genuinely nothing to say to anyone — never as a way to skip answering someone who addressed you.',
+  );
   lines.push('');
   lines.push(
     'Wrap each delivered message in a `<message to="name">…</message>` block; include several blocks in one response to address several destinations. `<internal>…</internal>` marks thinking you don\'t want sent.',
