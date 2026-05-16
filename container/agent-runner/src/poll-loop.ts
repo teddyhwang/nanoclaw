@@ -866,6 +866,39 @@ async function processQuery(
           }
         }
 
+        // Task-turn chat deferral — the symmetric counterpart of the
+        // task-wake deferral above, and the follow-up-path half of the
+        // Bug D fix (the initial-batch half is the hasTaskTrigger
+        // isolation up top). When the ACTIVE turn is a task-only turn
+        // (activeSender null — tasks carry no chat sender — and a task
+        // context was seeded), chat/chat-sdk rows that arrive mid-turn
+        // must NOT be pushed into the task's stream: folding live chat
+        // into a silent maintenance turn is exactly the 2026-05-16
+        // AI-Friends dream-summary leak. Bug 6's end-stream-at-result
+        // shrinks this window to a single LLM generation, but the
+        // follow-up poll runs concurrently during that generation, so
+        // chat can still arrive before the result event — this closes
+        // it. Leave the chat rows pending; the outer loop gives them
+        // their own chat-triggered turn. Non-chat follow-ups (another
+        // due task) still flow through.
+        if (!activeSender && taskFireContexts.length > 0) {
+          const chatDeferred = newMessages.filter((m) => m.kind === 'chat' || m.kind === 'chat-sdk');
+          if (chatDeferred.length > 0) {
+            log(
+              `Task-only turn active — deferring ${chatDeferred.length} chat follow-up(s); left pending for next chat wake`,
+            );
+            newMessages = newMessages.filter((m) => !(m.kind === 'chat' || m.kind === 'chat-sdk'));
+            if (newMessages.length === 0) {
+              if (!endedForCommand) {
+                log('Only chat follow-ups during a task turn — ending stream so outer loop re-queries them');
+                endedForCommand = true;
+                query.end();
+              }
+              return;
+            }
+          }
+        }
+
         const newIds = newMessages.map((m) => m.id);
         markProcessing(newIds);
 
