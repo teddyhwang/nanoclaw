@@ -88,14 +88,18 @@ async function main(): Promise<void> {
   };
 
   // Optional bearer token for HTTP MCP servers. The host injects
-  // `OPTIMUS_MCP_TOKEN` at spawn for hosts that gate dashboard /mcp/*
+  // `CYBERTRON_MCP_TOKEN` at spawn for hosts that gate dashboard /mcp/*
   // routes per-group. When present, attach `Authorization: Bearer
   // <token>` to every HTTP entry so the dashboard's verifyMcpToken
   // can match it against `<dataDir>/ipc/<slug>/<folder>/mcp-token`.
   // Stdio entries are unaffected (auth is local to the spawned
   // process). Standalone NanoClaw doesn't set the env var → no
   // header injected → unchanged behavior.
-  const mcpBearer = process.env.OPTIMUS_MCP_TOKEN;
+  //
+  // `OPTIMUS_MCP_TOKEN` is the pre-S409c name; kept as a fallback so a
+  // host that hasn't restarted past the rename (or a rollback) still
+  // authenticates instead of silently 401ing every HTTP MCP call.
+  const mcpBearer = process.env.CYBERTRON_MCP_TOKEN ?? process.env.OPTIMUS_MCP_TOKEN;
   for (const [name, serverConfig] of Object.entries(config.mcpServers)) {
     if (serverConfig.type === 'http' && mcpBearer) {
       mcpServers[name] = {
