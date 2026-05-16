@@ -10,7 +10,7 @@ import fs from 'fs';
 import path from 'path';
 import { describe, it, expect, afterEach } from 'vitest';
 
-import { countDueMessages, getInboundSourceSessionId, migrateMessagesInTable } from './session-db.js';
+import { countDueMessages, getInboundSourceSessionId, insertMessage, migrateMessagesInTable } from './session-db.js';
 import { INBOUND_SCHEMA } from './schema.js';
 
 const TEST_DIR = '/tmp/nanoclaw-session-db-test';
@@ -115,6 +115,54 @@ describe('countDueMessages', () => {
     ).run('chat-1', 6, 'chat', 1);
 
     expect(countDueMessages(db)).toBe(1);
+    db.close();
+  });
+});
+
+describe('insertMessage', () => {
+  const baseMsg = {
+    kind: 'chat',
+    timestamp: '2026-05-16T12:00:00.000Z',
+    platformId: 'telegram:123',
+    channelType: 'telegram',
+    threadId: null,
+    content: '{"text":"first"}',
+    processAfter: null,
+    recurrence: null,
+  };
+
+  it('is idempotent on a duplicate message id (no throw, no second row, original content kept)', () => {
+    const db = new Database(':memory:');
+    db.exec(INBOUND_SCHEMA);
+
+    insertMessage(db, { id: 'msg-1', ...baseMsg });
+
+    // Same id re-delivered — shared session via two bindings, or a gap-recovery
+    // replay of a message the live gateway already wrote. Must NOT throw the
+    // `UNIQUE constraint failed: messages_in.id` that failed the route and
+    // churned the DB into autoindex corruption pre-fix.
+    expect(() => insertMessage(db, { id: 'msg-1', ...baseMsg, content: '{"text":"redelivered"}' })).not.toThrow();
+
+    const rows = db.prepare('SELECT id, content FROM messages_in WHERE id = ?').all('msg-1') as Array<{
+      id: string;
+      content: string;
+    }>;
+    expect(rows).toHaveLength(1);
+    // The first write wins; the duplicate is a no-op, not an upsert.
+    expect(rows[0]!.content).toBe('{"text":"first"}');
+    db.close();
+  });
+
+  it('still inserts a distinct message id after a duplicate is skipped', () => {
+    const db = new Database(':memory:');
+    db.exec(INBOUND_SCHEMA);
+
+    insertMessage(db, { id: 'msg-1', ...baseMsg });
+    insertMessage(db, { id: 'msg-1', ...baseMsg }); // duplicate — skipped
+    insertMessage(db, { id: 'msg-2', ...baseMsg });
+
+    const count = (db.prepare('SELECT COUNT(*) AS c FROM messages_in').get() as { c: number }).c;
+    expect(count).toBe(2);
     db.close();
   });
 });

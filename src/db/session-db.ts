@@ -121,9 +121,18 @@ export function insertMessage(
     onWake?: 0 | 1;
   },
 ): void {
+  // Idempotent on the message id (PRIMARY KEY). The same channel message can
+  // legitimately reach one inbound.db more than once: a shared session bound
+  // to multiple chats (e.g. a post-merge agent-shared agent) receiving the
+  // same id via two bindings, or a startup gap-recovery replaying a message
+  // the live gateway already wrote. A bare INSERT throws
+  // `UNIQUE constraint failed: messages_in.id`, which fails the whole route
+  // and — when it retries every tick — churns the DB hard enough to corrupt
+  // an autoindex. A re-delivered id is already recorded; treat it as a no-op.
   db.prepare(
     `INSERT INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, content, process_after, recurrence, series_id, trigger, source_session_id, on_wake)
-     VALUES (@id, @seq, @kind, @timestamp, 'pending', @platformId, @channelType, @threadId, @content, @processAfter, @recurrence, @id, @trigger, @sourceSessionId, @onWake)`,
+     VALUES (@id, @seq, @kind, @timestamp, 'pending', @platformId, @channelType, @threadId, @content, @processAfter, @recurrence, @id, @trigger, @sourceSessionId, @onWake)
+     ON CONFLICT(id) DO NOTHING`,
   ).run({
     ...message,
     trigger: message.trigger ?? 1,
