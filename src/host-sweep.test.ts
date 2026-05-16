@@ -4,7 +4,7 @@
  * don't have to mock the filesystem or the container runner.
  */
 import Database from 'better-sqlite3';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { deleteOrphanProcessingClaims, getProcessingClaims } from './db/session-db.js';
 import {
@@ -14,6 +14,7 @@ import {
   _MAX_RECURRENCE_DEFERS_FOR_TESTING,
   _recurrenceDeferHelpersForTesting,
   _resetStuckProcessingRowsForTesting,
+  _reviveStrandedRecurringTasksForTesting,
   _shouldRunRecurrenceForTesting,
   decideStuckAction,
   parseSqliteUtc,
@@ -458,26 +459,14 @@ describe('S405 lever 2 — recurrence write quiescing', () => {
 
   it('defers while a container is alive and under the cap', () => {
     expect(_shouldRunRecurrenceForTesting(true, 0)).toBe(false);
-    expect(
-      _shouldRunRecurrenceForTesting(
-        true,
-        _MAX_RECURRENCE_DEFERS_FOR_TESTING - 1,
-      ),
-    ).toBe(false);
+    expect(_shouldRunRecurrenceForTesting(true, _MAX_RECURRENCE_DEFERS_FOR_TESTING - 1)).toBe(false);
   });
 
   it('forces the write through once the defer cap is reached (no infinite defer)', () => {
     // A continuously-alive session must not have its schedule silently
     // frozen forever; at the cap we write and rely on lever 1's retry.
-    expect(
-      _shouldRunRecurrenceForTesting(true, _MAX_RECURRENCE_DEFERS_FOR_TESTING),
-    ).toBe(true);
-    expect(
-      _shouldRunRecurrenceForTesting(
-        true,
-        _MAX_RECURRENCE_DEFERS_FOR_TESTING + 3,
-      ),
-    ).toBe(true);
+    expect(_shouldRunRecurrenceForTesting(true, _MAX_RECURRENCE_DEFERS_FOR_TESTING)).toBe(true);
+    expect(_shouldRunRecurrenceForTesting(true, _MAX_RECURRENCE_DEFERS_FOR_TESTING + 3)).toBe(true);
   });
 
   it('defer counter bumps per call and clears in one shot', () => {
@@ -506,5 +495,132 @@ describe('S405 lever 2 — recurrence write quiescing', () => {
     // Next alive sweep defers from zero again — bounded slip, not a
     // one-shot escape that then writes every sweep under load.
     expect(_shouldRunRecurrenceForTesting(true, h.count('s'))).toBe(false);
+  });
+});
+
+describe('reviveStrandedRecurringTasks — closed-session revival', () => {
+  const CLOSED: Session = {
+    id: 'sess-closed',
+    agent_group_id: 'ag-strand',
+    messaging_group_id: null,
+    thread_id: null,
+    agent_provider: null,
+    status: 'closed',
+    container_status: 'stopped',
+    last_active: null,
+    created_at: '2026-05-12T11:55:00.000Z',
+  };
+  const FRESH: Session = { ...CLOSED, id: 'sess-fresh', status: 'active' };
+
+  // A real (in-memory) read-only-style handle so the predicate runs for real
+  // rather than being stubbed — closer to production behaviour.
+  function dbWith(due: boolean): Database.Database {
+    const db = new Database(':memory:');
+    db.exec(`CREATE TABLE messages_in (
+      id TEXT PRIMARY KEY, seq INTEGER UNIQUE, kind TEXT NOT NULL, timestamp TEXT NOT NULL,
+      status TEXT DEFAULT 'pending', process_after TEXT, recurrence TEXT, series_id TEXT, content TEXT NOT NULL);`);
+    db.prepare(
+      `INSERT INTO messages_in (id, seq, kind, timestamp, status, process_after, recurrence, series_id, content)
+       VALUES ('t1', 0, 'task', '2026-05-16T12:00:00Z', 'pending', ?, '0 4 * * *', 'dream-ag-strand', '{}')`,
+    ).run(due ? '2026-05-13T08:00:00.000Z' : '2026-05-20T08:00:00.000Z');
+    return db;
+  }
+
+  function baseDeps(overrides: Record<string, unknown> = {}) {
+    return {
+      getAgentGroupIdsWithClosedNoActiveSessions: () => ['ag-strand'],
+      getAgentGroup: () => ({ id: 'ag-strand' }) as never,
+      findSessionByAgentGroup: () => undefined,
+      getSessionsByAgentGroup: () => [CLOSED],
+      inboundDbPath: () => '/fake/inbound.db',
+      existsSync: () => true,
+      now: () => '2026-05-16T12:00:00.000Z',
+      ...overrides,
+    };
+  }
+
+  it('creates a session and emits session.created when a due stranded task exists', async () => {
+    const due = dbWith(true);
+    const emit = vi.fn();
+    const resolveSession = vi.fn(() => ({ session: FRESH, created: true }));
+    await _reviveStrandedRecurringTasksForTesting(
+      baseDeps({ openInboundReadonly: () => due, resolveSession, emitEngineEvent: emit }),
+    );
+    expect(resolveSession).toHaveBeenCalledWith('ag-strand', null, null, 'agent-shared');
+    expect(emit).toHaveBeenCalledWith('session.created', { session: FRESH, created: true });
+    due.close();
+  });
+
+  it('does nothing when the stranded recurring task is not yet due', async () => {
+    const notDue = dbWith(false);
+    const emit = vi.fn();
+    const resolveSession = vi.fn(() => ({ session: FRESH, created: true }));
+    await _reviveStrandedRecurringTasksForTesting(
+      baseDeps({ openInboundReadonly: () => notDue, resolveSession, emitEngineEvent: emit }),
+    );
+    expect(resolveSession).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
+    notDue.close();
+  });
+
+  it('skips groups that already have an active session (race guard)', async () => {
+    const due = dbWith(true);
+    const emit = vi.fn();
+    await _reviveStrandedRecurringTasksForTesting(
+      baseDeps({
+        findSessionByAgentGroup: () => FRESH, // active session appeared
+        openInboundReadonly: () => due,
+        resolveSession: vi.fn(() => ({ session: FRESH, created: true })),
+        emitEngineEvent: emit,
+      }),
+    );
+    expect(emit).not.toHaveBeenCalled();
+    due.close();
+  });
+
+  it('does not emit when resolveSession reports an existing (not newly created) session', async () => {
+    const due = dbWith(true);
+    const emit = vi.fn();
+    await _reviveStrandedRecurringTasksForTesting(
+      baseDeps({
+        openInboundReadonly: () => due,
+        resolveSession: vi.fn(() => ({ session: FRESH, created: false })),
+        emitEngineEvent: emit,
+      }),
+    );
+    expect(emit).not.toHaveBeenCalled();
+    due.close();
+  });
+
+  it('skips a closed session whose inbound.db is missing on disk', async () => {
+    const emit = vi.fn();
+    const resolveSession = vi.fn();
+    await _reviveStrandedRecurringTasksForTesting(
+      baseDeps({
+        existsSync: () => false,
+        openInboundReadonly: () => {
+          throw new Error('should not open a missing db');
+        },
+        resolveSession,
+        emitEngineEvent: emit,
+      }),
+    );
+    expect(resolveSession).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  it('ignores non-closed sessions returned for the group', async () => {
+    const emit = vi.fn();
+    await _reviveStrandedRecurringTasksForTesting(
+      baseDeps({
+        getSessionsByAgentGroup: () => [{ ...CLOSED, status: 'active' }],
+        openInboundReadonly: () => {
+          throw new Error('should not probe a non-closed session');
+        },
+        resolveSession: vi.fn(),
+        emitEngineEvent: emit,
+      }),
+    );
+    expect(emit).not.toHaveBeenCalled();
   });
 });

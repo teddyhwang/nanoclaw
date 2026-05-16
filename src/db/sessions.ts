@@ -96,6 +96,36 @@ export function getActiveSessions(): Session[] {
   return getDb().prepare("SELECT * FROM sessions WHERE status = 'active'").all() as Session[];
 }
 
+/**
+ * Agent groups that have at least one closed session and NO active session.
+ *
+ * These are the only groups that can permanently strand a recurring task: a
+ * scheduled-only agent whose session was closed (operator clear-session,
+ * restart-induced close, v1-migration legacy) and which receives no further
+ * inbound traffic has no path to ever emit `session.created`, so the
+ * carry-forward / maintenance re-seed plugins never run and a due recurring
+ * task in the closed session's inbound.db never fires. The host sweep's
+ * stranded-task revival (host-sweep.ts) consults this set each tick.
+ *
+ * The `NOT EXISTS active` clause is the no-double-create guard: a group that
+ * still has an active session is owned by the normal active-sweep path and
+ * its session.created already drove the re-seed — it must not appear here.
+ */
+export function getAgentGroupIdsWithClosedNoActiveSessions(): string[] {
+  return (
+    getDb()
+      .prepare(
+        `SELECT DISTINCT s1.agent_group_id FROM sessions s1
+          WHERE s1.status = 'closed'
+            AND NOT EXISTS (
+              SELECT 1 FROM sessions s2
+               WHERE s2.agent_group_id = s1.agent_group_id
+                 AND s2.status = 'active')`,
+      )
+      .all() as Array<{ agent_group_id: string }>
+  ).map((r) => r.agent_group_id);
+}
+
 export function getRunningSessions(): Session[] {
   return getDb().prepare("SELECT * FROM sessions WHERE container_status IN ('running', 'idle')").all() as Session[];
 }

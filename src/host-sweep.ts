@@ -26,11 +26,18 @@
  *        → kill + reset this message + tries++. Semantics: "container
  *        claimed a message and went quiet past tolerance since the claim."
  */
-import type Database from 'better-sqlite3';
+import Database from 'better-sqlite3';
 import fs from 'fs';
 
-import { getActiveSessions } from './db/sessions.js';
+import {
+  getActiveSessions,
+  getAgentGroupIdsWithClosedNoActiveSessions,
+  getSessionsByAgentGroup,
+  findSessionByAgentGroup,
+} from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
+import { hasDueStrandedRecurringTask } from './modules/scheduling/strand-detect.js';
+import { resolveSession } from './session-manager.js';
 import {
   countDueMessages,
   deleteOrphanProcessingClaims,
@@ -176,7 +183,133 @@ async function sweep(): Promise<void> {
     log.error('Host sweep error', { err });
   }
 
+  // Independent of the active-session loop: revive recurring tasks
+  // stranded in closed sessions of agents that have no active session
+  // (and thus no inbound to trigger the carry-forward plugins). Own
+  // try/catch so a failure here never aborts the main sweep.
+  try {
+    await reviveStrandedRecurringTasks();
+  } catch (err) {
+    log.error('Stranded-task revival error', { err });
+  }
+
   setTimeout(sweep, SWEEP_INTERVAL_MS);
+}
+
+/**
+ * Revive recurring tasks stranded in closed sessions.
+ *
+ * The bug this closes: a scheduled-only agent whose session was closed
+ * (operator clear-session, restart-induced close, v1-migration legacy) and
+ * which receives no further inbound has no path to ever emit
+ * `session.created`. The host sweep only iterates ACTIVE sessions, so a due
+ * recurring task in the closed session's inbound.db never wakes a container;
+ * the carry-forward (apps/optimus task-carry-forward.ts) and maintenance
+ * (maintenance-task.ts) re-seed plugins only fire on `session.created`, so
+ * the series strands forever. Real instance: the daily `dream-<agId>` task
+ * silently stopped firing for days once its session was cleared.
+ *
+ * Fix: each sweep tick, for every agent group that has a closed session and
+ * NO active session, probe each closed session's inbound.db READ-ONLY for a
+ * due recurring task. If one exists, create a fresh session via the canonical
+ * `resolveSession` path and emit `session.created` — exactly the contract
+ * (`router.ts` inbound + `backfill-on-register.ts`) the re-seed plugins
+ * already key off. The plugins then carry the series into the fresh session
+ * with a freshly-computed `process_after`, the next sweep sees it due in an
+ * active session, and the normal wake path fires it.
+ *
+ * Invariants preserved:
+ *  - S405: detection is read-only; the only host write is the plugins'
+ *    insert into the BRAND-NEW session's inbound.db, which no container has
+ *    ever polled — the torn-page hazard requires a container mid-poll of the
+ *    same file and there is none.
+ *  - No double-create: `getAgentGroupIdsWithClosedNoActiveSessions` excludes
+ *    groups with an active session, the in-loop `findSessionByAgentGroup`
+ *    recheck closes the inbound-arrived-mid-tick race, and `resolveSession`
+ *    returning `created:false` short-circuits before emit.
+ *  - No double-fire: the re-seed plugins are idempotent (match by
+ *    id/series_id) and seed exactly one future occurrence from the cron, not
+ *    the overdue stranded row. The stranded row stays in the still-closed old
+ *    session's inbound.db, which is never swept again, so it cannot fire.
+ */
+interface ReviveStrandedDeps {
+  getAgentGroupIdsWithClosedNoActiveSessions: typeof getAgentGroupIdsWithClosedNoActiveSessions;
+  getAgentGroup: typeof getAgentGroup;
+  findSessionByAgentGroup: typeof findSessionByAgentGroup;
+  getSessionsByAgentGroup: typeof getSessionsByAgentGroup;
+  inboundDbPath: typeof inboundDbPath;
+  existsSync: (p: string) => boolean;
+  openInboundReadonly: (p: string) => Database.Database;
+  hasDueStrandedRecurringTask: typeof hasDueStrandedRecurringTask;
+  resolveSession: typeof resolveSession;
+  emitEngineEvent: typeof emitEngineEvent;
+  now: () => string;
+}
+
+const defaultReviveStrandedDeps: ReviveStrandedDeps = {
+  getAgentGroupIdsWithClosedNoActiveSessions,
+  getAgentGroup,
+  findSessionByAgentGroup,
+  getSessionsByAgentGroup,
+  inboundDbPath,
+  existsSync: fs.existsSync,
+  openInboundReadonly: (p) => new Database(p, { readonly: true, fileMustExist: true }),
+  hasDueStrandedRecurringTask,
+  resolveSession,
+  emitEngineEvent,
+  now: () => new Date().toISOString(),
+};
+
+async function reviveStrandedRecurringTasks(deps: ReviveStrandedDeps = defaultReviveStrandedDeps): Promise<void> {
+  const now = deps.now();
+
+  for (const agentGroupId of deps.getAgentGroupIdsWithClosedNoActiveSessions()) {
+    const agentGroup = deps.getAgentGroup(agentGroupId);
+    if (!agentGroup) continue;
+
+    // Race guard: an inbound message could have created an active session
+    // between the v2.db candidate query and now. If so, the normal
+    // active-sweep path owns this group — skip.
+    if (deps.findSessionByAgentGroup(agentGroupId)) continue;
+
+    let needRevive = false;
+    let strandedSessionId: string | undefined;
+    for (const session of deps.getSessionsByAgentGroup(agentGroupId)) {
+      if (session.status !== 'closed') continue;
+      const inPath = deps.inboundDbPath(agentGroupId, session.id);
+      if (!deps.existsSync(inPath)) continue;
+      // READ-ONLY — the host never writes a closed session's inbound.db.
+      const db = deps.openInboundReadonly(inPath);
+      try {
+        if (deps.hasDueStrandedRecurringTask(db, now)) {
+          needRevive = true;
+          strandedSessionId = session.id;
+          break;
+        }
+      } finally {
+        db.close();
+      }
+    }
+    if (!needRevive) continue;
+
+    // Channel-less, agent-scoped session — matches how maintenance-task.ts
+    // seeds the dream series (null messaging group / thread). The
+    // carry-forward plugin permits a null-messaging-group session for
+    // series re-seed.
+    const { session, created } = deps.resolveSession(agentGroupId, null, null, 'agent-shared');
+    if (!created) continue; // an active session appeared concurrently — let the normal path own it
+    deps.emitEngineEvent('session.created', { session, created });
+    log.info('Revived stranded recurring task: created session for closed-only agent group', {
+      agentGroupId,
+      newSessionId: session.id,
+      strandedSessionId,
+    });
+  }
+}
+
+/** Test seam: inject fakes for the engine deps; no DB / filesystem mocking. */
+export function _reviveStrandedRecurringTasksForTesting(deps: Partial<ReviveStrandedDeps>): Promise<void> {
+  return reviveStrandedRecurringTasks({ ...defaultReviveStrandedDeps, ...deps });
 }
 
 async function sweepSession(session: Session): Promise<void> {
@@ -322,10 +455,7 @@ function clearRecurrenceDefer(sessionId: string): void {
  * inline condition in sweepSession so the bounded-defer invariant is
  * unit-tested without mocking the container runner / filesystem.
  */
-export function _shouldRunRecurrenceForTesting(
-  alive: boolean,
-  consecutiveDefers: number,
-): boolean {
+export function _shouldRunRecurrenceForTesting(alive: boolean, consecutiveDefers: number): boolean {
   return !alive || consecutiveDefers >= MAX_RECURRENCE_DEFERS;
 }
 export const _MAX_RECURRENCE_DEFERS_FOR_TESTING = MAX_RECURRENCE_DEFERS;
