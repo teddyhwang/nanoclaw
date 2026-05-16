@@ -617,6 +617,40 @@ describe('poll loop — task_fires recording', () => {
     await loopPromise.catch(() => {});
   });
 
+  it('ends the stream after a task-only turn so the outer loop unwinds (Bug 6: container idle-kill)', async () => {
+    // Bug 6: a task-only turn held the query stream open after result
+    // (no human follow-up sender to wait for), so the keepalive kept
+    // the heartbeat fresh and the host stop-idle never fired — the
+    // container lingered ~30 min instead of idle-killing in ~2 min.
+    // MockProvider BLOCKS forever after emitting result unless end() is
+    // called. Pre-fix the loop would hang on the first task's open
+    // stream until the test aborts; post-fix query.end() unwinds it so
+    // the outer loop resumes and picks up a SECOND task inserted after
+    // the first completed. Observing the second task's fire proves the
+    // first turn's stream closed on its own (no abort).
+    insertTask('t-task-A', 'series-A', { prompt: 'first task turn' });
+
+    const provider = new MockProvider({}, () => '<internal>done</internal>');
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 4000);
+
+    // First task records its fire (eager flush at result).
+    await waitFor(() => readTaskFires('series-A').length > 0, 2500);
+    // Now insert a second task. It can only be processed if the first
+    // turn's stream ENDED and the outer loop re-queried — with the old
+    // behavior the stream stays open on MockProvider and the outer loop
+    // never gets here.
+    insertTask('t-task-B', 'series-B', { prompt: 'second task turn' });
+    await waitFor(() => readTaskFires('series-B').length > 0, 2500);
+
+    expect(readTaskFires('series-A')).toHaveLength(1);
+    expect(readTaskFires('series-B')).toHaveLength(1);
+    expect(readTaskFires('series-B')[0].task_id).toBe('t-task-B');
+
+    controller.abort();
+    await loopPromise.catch(() => {});
+  });
+
   it('records a distinct fire per task when several come due in one batch', async () => {
     // Multiple recurring tasks due in the same wake (RSS + dream). Pre-fix
     // keep.find() captured only the first → the second never recorded.
