@@ -1095,6 +1095,31 @@ async function processQuery(
           // event.text — also records its 'silent' fire. The finally
           // remains as a backstop for contexts that never see a result.
           flushUnwrittenTaskFires();
+
+          // Bug 6 (telegram_dm_teddy 23folg, 2026-05-16): end the stream
+          // after a task-only turn's result. `activeSender` is null when
+          // the trigger was a task row (tasks have no chat sender — the
+          // same signal the task-wake-deferral keys off below), and
+          // taskFireContexts is non-empty iff ≥1 task trigger drove this
+          // turn. A scheduled task has no human follow-up sender to wait
+          // for, so holding the query open serves nothing — it only
+          // keeps the keepalive (poll-loop.ts:675) bumping the heartbeat
+          // every 30s, which permanently suppresses the host's
+          // `stop-idle` kill (heartbeatAge never exceeds the 120s
+          // idleTimeout). The container then lingers until orphan-reap
+          // or a host restart (~30 min observed) instead of idle-killing
+          // in ~2 min. `query.end()` only signals "no more inputs from
+          // us" — pending SDK output still drains through this for-await
+          // so nothing is truncated; the outer loop re-queries cleanly
+          // if another task came due meanwhile. Identical shape to the
+          // accumulate-only / cross-sender stream-ends below. A chat
+          // turn (activeSender set) is left open as before so a human
+          // can follow up without re-spawning the SDK.
+          if (!activeSender && taskFireContexts.length > 0 && !endedForCommand) {
+            log('Task-only turn complete — ending stream so the container can idle-kill');
+            endedForCommand = true;
+            query.end();
+          }
         }
       }
     } catch (err) {
