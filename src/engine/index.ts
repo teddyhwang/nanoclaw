@@ -210,11 +210,7 @@ export type { ContainerConfigRow } from '../types.js';
 // (chat-sdk-bridge), so it stays in the submodule and is re-exported here.
 export { getContainerConfig } from '../db/container-configs.js';
 export { configFromDb, type ContainerConfig } from '../container-config.js';
-export {
-  maybeResizeImage,
-  shouldTranscodeAnimated,
-  maybeTranscodeAnimated,
-} from '../media/image-processing.js';
+export { maybeResizeImage, shouldTranscodeAnimated, maybeTranscodeAnimated } from '../media/image-processing.js';
 
 // Session lifecycle for importers seeding cold sessions (writes routing +
 // initializes per-session DBs). Hosts that want to enqueue messages into an
