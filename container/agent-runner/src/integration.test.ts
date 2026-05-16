@@ -323,10 +323,16 @@ describe('poll loop integration', () => {
     await loopPromise.catch(() => {});
   });
 
-  it('handles mixed task + chat batch with correct origin metadata', async () => {
-    // Seed destination for routing lookup
+  it('mixed task + chat batch: task isolated first, chat handled separately, both correctly routed', async () => {
+    // A scheduled task and a chat row land in the same channel session
+    // with the same routing. Pre-2026-05-16 these folded into ONE
+    // provider turn (asserted here as "exactly 1 outbound"). That fold
+    // is the AI-Friends leak bug — a silent maintenance task must never
+    // share a turn with chat. Correct behavior now: the task runs in
+    // its own isolated turn, the chat is deferred and processed as its
+    // own subsequent turn. Both still produce a correctly-routed
+    // outbound; they're just no longer conflated into one reply.
     insertMessage('m-chat', { sender: 'Alice', text: 'check this' }, { platformId: 'chan-1', channelType: 'discord' });
-    // Task with same routing — simulates a scheduled task in a channel session
     getInboundDb()
       .prepare(
         `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, content)
@@ -338,12 +344,19 @@ describe('poll loop integration', () => {
     const controller = new AbortController();
     const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
 
-    await waitFor(() => getUndeliveredMessages().length > 0, 2000);
+    // Wait for BOTH to be handled as separate turns (task isolated,
+    // then the deferred chat re-processed on a later poll).
+    await waitFor(() => getUndeliveredMessages().length >= 2, 2000);
     controller.abort();
 
     const out = getUndeliveredMessages();
-    expect(out).toHaveLength(1);
-    expect(out[0].platform_id).toBe('chan-1');
+    // Each turn produced its own outbound — no fold, no drop.
+    expect(out.length).toBeGreaterThanOrEqual(2);
+    // Every outbound carries the correct origin routing.
+    expect(out.every((o) => o.platform_id === 'chan-1')).toBe(true);
+    // The task row was consumed (not left pending after its isolated turn).
+    const pendingTask = getPendingMessages().find((m) => m.id === 't-task');
+    expect(pendingTask).toBeUndefined();
 
     await loopPromise.catch(() => {});
   });
@@ -390,6 +403,58 @@ describe('poll loop integration', () => {
     // The agent's prompt must NOT contain mackchiu's accumulated chat content.
     expect(capturedPrompt).not.toContain('Not at hole in ones');
     expect(capturedPrompt).not.toContain('mackchiu');
+
+    await loopPromise.catch(() => {});
+  });
+
+  it('task wake isolates trigger=1 sticky-engage chat (AI-Friends 2026-05-16 leak)', async () => {
+    // Repro: 2026-05-16 13:22 — the degenerate agent's silent dream task
+    // (trigger=1, kind=task) was manually fired via the dashboard. It
+    // co-arrived with AI-Friends mention-sticky chat that the router had
+    // marked trigger=1. The OLD isolation only fired when EVERY trigger=1
+    // row was a task (`taskOnlyWake`), so the trigger=1 sticky chat made
+    // it false, isolation was skipped, the conversation folded into the
+    // silent dream turn, and the agent reply-pilled the dream-cycle
+    // summary onto "Lame…" in AI Friends. The fix isolates on ANY task
+    // trigger and defers chat regardless of its trigger flag.
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, trigger, platform_id, channel_type, content)
+         VALUES ('m-sticky', 'chat-sdk', datetime('now', '-5 minutes'), 'pending', 1, 'chan-1', 'discord', ?)`,
+      )
+      .run(JSON.stringify({ sender: 'someone', text: 'Lame…' }));
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, trigger, platform_id, channel_type, content)
+         VALUES ('t-dream', 'task', datetime('now'), 'pending', 1, 'chan-1', 'discord', ?)`,
+      )
+      .run(JSON.stringify({ prompt: 'silent maintenance — do NOT send any messages to the chat' }));
+
+    // Accumulate EVERY prompt the provider saw across all turns. The fix
+    // is correct iff no single prompt contains both the silent-task
+    // instruction and the sticky chat — i.e. they were never folded into
+    // one provider turn. The chat may still be answered in its OWN later
+    // turn (correct: deferring ≠ dropping), so asserting "still pending"
+    // would be wrong; asserting "never co-folded" is the real invariant.
+    const prompts: string[] = [];
+    const provider = new MockProvider({}, (prompt: string) => {
+      prompts.push(prompt);
+      return '<internal>noted</internal>';
+    });
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
+
+    await sleep(1500);
+    controller.abort();
+
+    // The silent dream task ran (its prompt reached the provider).
+    const taskPrompt = prompts.find((p) => p.includes('silent maintenance'));
+    expect(taskPrompt).toBeDefined();
+    // …and the sticky "Lame…" chat was NOT folded into that task turn.
+    expect(taskPrompt).not.toContain('Lame…');
+    // No prompt anywhere co-folded the task with the sticky chat.
+    const folded = prompts.find((p) => p.includes('silent maintenance') && p.includes('Lame…'));
+    expect(folded).toBeUndefined();
 
     await loopPromise.catch(() => {});
   });

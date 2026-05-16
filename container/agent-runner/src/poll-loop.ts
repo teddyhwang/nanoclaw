@@ -148,26 +148,46 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       continue;
     }
 
-    // Task-fire isolation: when the only trigger=1 rows in the batch are
-    // tasks (recurring or one-shot), drop trigger=0 chat rows from this
-    // batch. The chat rows stay pending — they'll ride along the next
-    // real user-triggered wake. Without this, silent-maintenance tasks
-    // ("do NOT send any messages") get accumulated chat shoved into the
-    // prompt and the model overrides the silence instruction to reply
-    // to what looks like a live user turn (shit-talk 2026-05-11 04:01:
-    // mackchiu's accumulated chats from May 10 20:42 dragged into the
-    // 04:02 maintenance wake; agent posted a chat reply despite the
-    // explicit silent-task instruction). RSS-style tasks that *do* want
-    // to post still post via MCP send_message — the gate only removes
+    // Task/chat isolation: a kind='task' trigger row must NEVER share a
+    // provider turn with chat rows. If the batch contains any task
+    // trigger, isolate the task(s) into their own stream and defer ALL
+    // chat/chat-sdk rows (left pending — they ride along the next
+    // chat-triggered wake). Without this, silent-maintenance tasks
+    // ("do NOT send any messages") get chat shoved into the prompt and
+    // the model overrides the silence instruction to reply to what
+    // looks like a live user turn. RSS-style tasks that *do* want to
+    // post still post via MCP send_message — isolation only removes
     // chat-as-context from the prompt, not outbound delivery.
+    //
+    // Two incidents motivate the *generalized* form below:
+    //  - 2026-05-11 04:01 (shit-talk): mackchiu's trigger=0 accumulate
+    //    chats from May 10 20:42 dragged into the 04:02 maintenance
+    //    wake; agent posted a chat reply despite the silent-task
+    //    instruction. The original fix dropped only trigger=0 chat when
+    //    `taskOnlyWake` (every trigger=1 row is a task).
+    //  - 2026-05-16 13:22 (AI Friends dream leak): the original fix's
+    //    hole. The dream task (trigger=1, kind=task) co-arrived with
+    //    AI-Friends mention-sticky chat that the router had marked
+    //    trigger=1. `taskOnlyWake` = triggerRows.every(kind==='task')
+    //    was therefore false, isolation was skipped, the conversation
+    //    folded into the silent dream turn, and the agent reply-pilled
+    //    the dream-cycle summary onto "Lame…" in AI Friends. The fix:
+    //    isolation triggers on *any* task trigger present, and defers
+    //    chat rows regardless of their trigger flag (sticky-engage
+    //    chat is still chat — it must not ride a maintenance turn).
     const triggerRows = messages.filter((m) => m.trigger === 1);
-    const taskOnlyWake = triggerRows.every((m) => m.kind === 'task');
+    const hasTaskTrigger = triggerRows.some((m) => m.kind === 'task');
+    const isChatRow = (m: MessageInRow) => m.kind === 'chat' || m.kind === 'chat-sdk';
     let batch = messages;
-    if (taskOnlyWake) {
-      const dropped = messages.filter((m) => m.trigger === 0 && (m.kind === 'chat' || m.kind === 'chat-sdk'));
+    if (hasTaskTrigger) {
+      const dropped = messages.filter(isChatRow);
       if (dropped.length > 0) {
-        log(`Task-only wake: dropping ${dropped.length} accumulated chat row(s) from prompt (left pending)`);
-        batch = messages.filter((m) => !(m.trigger === 0 && (m.kind === 'chat' || m.kind === 'chat-sdk')));
+        const stickyDeferred = dropped.filter((m) => m.trigger === 1).length;
+        log(
+          `Task trigger present: isolating task turn, deferring ${dropped.length} chat row(s) ` +
+            `(${stickyDeferred} trigger=1 sticky-engage) — left pending for next chat wake`,
+        );
+        batch = messages.filter((m) => !isChatRow(m));
       }
     }
 
