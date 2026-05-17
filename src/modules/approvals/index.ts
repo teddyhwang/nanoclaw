@@ -22,8 +22,16 @@ import { handleApprovalsResponse } from './response-handler.js';
 import { startOneCLIApprovalHandler, stopOneCLIApprovalHandler } from './onecli-approvals.js';
 
 // Public API re-exports so consumers import from the module root.
-export { requestApproval, registerApprovalHandler, notifyAgent } from './primitive.js';
-export type { ApprovalHandler, ApprovalHandlerContext, RequestApprovalOptions } from './primitive.js';
+export { requestApproval, requestConfirmation, registerApprovalHandler, notifyAgent } from './primitive.js';
+export type {
+  ApprovalHandler,
+  ApprovalHandlerContext,
+  RequestApprovalOptions,
+  RequestConfirmationOptions,
+} from './primitive.js';
+
+// Self-registers the `sensitive_mcp_confirm` approval handler at import.
+import './sensitive-mcp-confirm.js';
 
 registerResponseHandler(handleApprovalsResponse);
 

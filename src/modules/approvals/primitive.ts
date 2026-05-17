@@ -38,6 +38,16 @@ const APPROVAL_OPTIONS: RawOption[] = [
   { label: 'Reject', selectedLabel: '❌ Rejected', value: 'reject' },
 ];
 
+/**
+ * Two-button self-confirmation UI for `requestConfirmation()`. The value
+ * strings are what the response handler matches on; keep `confirm`/`cancel`
+ * stable (the sensitive-action handler keys off them).
+ */
+const CONFIRM_OPTIONS: RawOption[] = [
+  { label: 'Confirm', selectedLabel: '✅ Confirmed', value: 'confirm' },
+  { label: 'Cancel', selectedLabel: '❌ Cancelled', value: 'cancel' },
+];
+
 // ── Approval handler registry ──
 // Modules that want to be called back when an admin approves a pending row
 // register here at import time, keyed by the `action` string they used in
@@ -220,4 +230,99 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
   }
 
   log.info('Approval requested', { action, approvalId, agentName, approver: target.userId });
+}
+
+export interface RequestConfirmationOptions {
+  session: Session;
+  agentName: string;
+  /** Free-form action id; must match the key registered via registerApprovalHandler. */
+  action: string;
+  /**
+   * Resolved `<channel>:<senderId>` of the triggering sender — the ONLY
+   * user whose click counts (clicker-auth, Phase 0 re-keyed). Carried on
+   * the row's payload as `actorId`.
+   */
+  actorId: string;
+  /** Optional human label for the actor, woven into the card text. */
+  actorName?: string;
+  /** JSON-serializable opaque payload. Carried on the row, handed to the handler on Confirm. */
+  payload: Record<string, unknown>;
+  /** Card title. */
+  title: string;
+  /** Card body. */
+  question: string;
+}
+
+/**
+ * Self-confirmation sibling of `requestApproval`. Differences:
+ *   - Delivers the ask_question card IN-CHANNEL to the originating chat
+ *     (`session.messaging_group_id`), NOT to a resolved approver's DM.
+ *     No `pickApprover` / `pickApprovalDelivery` / `ensureUserDm`.
+ *   - Options are [Confirm, Cancel]; the confirming user must be the
+ *     recorded `actorId` (enforced by the response handler / Phase 0).
+ *   - `actorId` is stored on the payload so the response handler can both
+ *     authorize the clicker and (on Confirm) create the session grant.
+ *
+ * Runs in the engine/optimus-host process (where the delivery adapter and
+ * response registry are live). It is NOT called by the dashboard-server
+ * preHandler directly — that process signals the host over the
+ * dashboard-bridge IPC, and the host calls this. See
+ * knowledge/projects/sensitive-action-approvals.md (v6).
+ *
+ * Fire-and-forget: the actor's click drives the registered handler for
+ * `action` via the response dispatcher.
+ */
+export async function requestConfirmation(opts: RequestConfirmationOptions): Promise<void> {
+  const { session, action, actorId, actorName, payload, title, question, agentName } = opts;
+
+  const messagingGroup = session.messaging_group_id ? getMessagingGroup(session.messaging_group_id) : undefined;
+  if (!messagingGroup) {
+    // No originating chat to deliver into — self-confirm is in-channel only,
+    // there is no DM fallback by design. Tell the agent so the held-back
+    // call fails closed rather than silently proceeding.
+    notifyAgent(session, `${action} could not be confirmed: no originating chat to deliver the confirmation to.`);
+    return;
+  }
+
+  const approvalId = `cfm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const normalizedOptions = normalizeOptions(CONFIRM_OPTIONS);
+  // actorId is force-merged last so a caller can't accidentally shadow the
+  // authorization key via the opaque payload.
+  const rowPayload = { ...payload, actorId };
+  createPendingApproval({
+    approval_id: approvalId,
+    session_id: session.id,
+    request_id: approvalId,
+    action,
+    payload: JSON.stringify(rowPayload),
+    created_at: new Date().toISOString(),
+    title,
+    options_json: JSON.stringify(normalizedOptions),
+  });
+
+  const adapter = getDeliveryAdapter();
+  if (adapter) {
+    const body = actorName ? `${actorName}: ${question}` : question;
+    try {
+      await adapter.deliver(
+        messagingGroup.channel_type,
+        messagingGroup.platform_id,
+        null,
+        'chat-sdk',
+        JSON.stringify({
+          type: 'ask_question',
+          questionId: approvalId,
+          title,
+          question: body,
+          options: CONFIRM_OPTIONS,
+        }),
+      );
+    } catch (err) {
+      log.error('Failed to deliver confirmation card', { action, approvalId, err });
+      notifyAgent(session, `${action} could not be confirmed: failed to deliver the confirmation card.`);
+      return;
+    }
+  }
+
+  log.info('Confirmation requested', { action, approvalId, agentName, actorId });
 }

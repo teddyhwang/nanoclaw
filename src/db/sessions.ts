@@ -1,4 +1,4 @@
-import type { PendingApproval, PendingQuestion, Session } from '../types.js';
+import type { ConfirmationGrant, PendingApproval, PendingQuestion, Session } from '../types.js';
 import { getDb, hasTable } from './connection.js';
 
 // ── Sessions ──
@@ -151,6 +151,9 @@ export function updateSession(
 }
 
 export function deleteSession(id: string): void {
+  // Cascade: a deleted session must not leave dangling confirmation grants
+  // (and a re-created session reusing this id must never inherit them).
+  deleteConfirmationGrantsForSession(id);
   getDb().prepare('DELETE FROM sessions WHERE id = ?').run(id);
 }
 
@@ -249,6 +252,53 @@ export function deletePendingApproval(approvalId: string): void {
 
 export function getPendingApprovalsByAction(action: string): PendingApproval[] {
   return getDb().prepare('SELECT * FROM pending_approvals WHERE action = ?').all(action) as PendingApproval[];
+}
+
+// ── Confirmation grants (sensitive-action gate, Phase 1) ──
+//
+// Keyed (session_id, actor_id). See the `confirmation-grants` migration
+// for the rationale (not session alone — cross-user leak in shared
+// sessions). All four accessors no-op safely when the table is absent
+// (the approvals module migration may not have run in a minimal install),
+// guarded by hasTable so a host without the gate doesn't crash.
+
+/** Create or fully refresh a grant (called on a successful Confirm click). */
+export function upsertConfirmationGrant(sessionId: string, actorId: string, now: string): void {
+  const db = getDb();
+  if (!hasTable(db, 'confirmation_grants')) return;
+  db.prepare(
+    `INSERT INTO confirmation_grants (session_id, actor_id, granted_at, last_used_at)
+     VALUES (@session_id, @actor_id, @now, @now)
+     ON CONFLICT(session_id, actor_id)
+     DO UPDATE SET granted_at = @now, last_used_at = @now`,
+  ).run({ session_id: sessionId, actor_id: actorId, now });
+}
+
+/** Fetch a grant, or undefined if none / table absent. */
+export function getConfirmationGrant(sessionId: string, actorId: string): ConfirmationGrant | undefined {
+  const db = getDb();
+  if (!hasTable(db, 'confirmation_grants')) return undefined;
+  return db
+    .prepare('SELECT * FROM confirmation_grants WHERE session_id = ? AND actor_id = ?')
+    .get(sessionId, actorId) as ConfirmationGrant | undefined;
+}
+
+/** Bump last_used_at on a silent live-grant allow (does NOT extend the hard cap). */
+export function touchConfirmationGrant(sessionId: string, actorId: string, now: string): void {
+  const db = getDb();
+  if (!hasTable(db, 'confirmation_grants')) return;
+  db.prepare('UPDATE confirmation_grants SET last_used_at = ? WHERE session_id = ? AND actor_id = ?').run(
+    now,
+    sessionId,
+    actorId,
+  );
+}
+
+/** Drop all grants for a session — engine-authoritative cascade on session clear/reset. */
+export function deleteConfirmationGrantsForSession(sessionId: string): void {
+  const db = getDb();
+  if (!hasTable(db, 'confirmation_grants')) return;
+  db.prepare('DELETE FROM confirmation_grants WHERE session_id = ?').run(sessionId);
 }
 
 /**

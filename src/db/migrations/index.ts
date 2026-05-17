@@ -16,6 +16,7 @@ import { migration015 } from './015-cli-scope.js';
 import { migration016 } from './016-optimus-container-config-fields.js';
 import { moduleApprovalsPendingApprovals } from './module-approvals-pending-approvals.js';
 import { moduleApprovalsTitleOptions } from './module-approvals-title-options.js';
+import { moduleApprovalsConfirmationGrants } from './module-approvals-confirmation-grants.js';
 
 export interface Migration {
   version: number;
@@ -29,6 +30,7 @@ const migrations: Migration[] = [
   moduleApprovalsPendingApprovals,
   moduleAgentToAgentDestinations,
   moduleApprovalsTitleOptions,
+  moduleApprovalsConfirmationGrants,
   migration008,
   migration009,
   migration010,

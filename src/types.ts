@@ -218,6 +218,18 @@ export interface PendingApproval {
   options_json: string;
 }
 
+/**
+ * Session-scoped sensitive-action confirmation grant. Keyed
+ * `(session_id, actor_id)` — see the `confirmation-grants` migration for
+ * why it is NOT keyed on session alone (cross-user leak in shared sessions).
+ */
+export interface ConfirmationGrant {
+  session_id: string;
+  actor_id: string;
+  granted_at: string;
+  last_used_at: string;
+}
+
 // ── Agent destinations (central DB) ──
 
 export interface AgentDestination {

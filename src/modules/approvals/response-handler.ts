@@ -86,30 +86,59 @@ async function handleRegisteredApproval(
     }).catch((err) => log.error('writeSessionMessage failed in notify', { err }));
   };
 
-  // Clicker authorization. The card was delivered to an eligible approver's
-  // DM, but a click only carries a questionId + the clicking user's id, so
-  // without this check any user who can reach the card's callback could
-  // approve OR reject. Re-resolve the eligible approvers for this row's
-  // agent group and require the clicker to be one of them. An unauthorized
-  // click (or one with no resolvable user id) is dropped WITHOUT consuming
-  // the row — the row stays pending so a real approver can still act, and a
-  // bystander cannot deny a legitimate request by clicking Reject. No
-  // wakeContainer: nothing changed for the requesting agent.
-  const eligible = pickApprover(approval.agent_group_id);
-  if (!userId || !eligible.includes(userId)) {
+  // Clicker authorization. A click only carries a questionId + the clicking
+  // user's id, so without this check any user who can reach the card's
+  // callback could resolve it (approve/reject/confirm/cancel). Two trust
+  // models, keyed by the row's action:
+  //
+  //   - sensitive_mcp_confirm (self-confirm gate): the authorized clicker
+  //     is the recorded actor (the triggering sender), NOT an approver.
+  //     The card is delivered in-channel where every member can see it, so
+  //     a bystander clicking Confirm must be a no-op. Authorize against
+  //     payload.actorId.
+  //   - everything else (CLI / OneCLI / self-mod admin-approval): the card
+  //     is in an approver's DM; authorize against pickApprover.
+  //
+  // An unauthorized click (or one with no resolvable user id) is dropped
+  // WITHOUT consuming the row — it stays pending so a legitimate actor /
+  // approver can still act, and a bystander cannot deny it by clicking the
+  // negative option. No wakeContainer: nothing changed for the agent.
+  let authorized: boolean;
+  if (approval.action === 'sensitive_mcp_confirm') {
+    let actorId = '';
+    try {
+      actorId = (JSON.parse(approval.payload) as { actorId?: string }).actorId ?? '';
+    } catch {
+      actorId = '';
+    }
+    authorized = !!userId && !!actorId && userId === actorId;
+  } else {
+    const eligible = pickApprover(approval.agent_group_id);
+    authorized = !!userId && eligible.includes(userId);
+  }
+  if (!authorized) {
     log.warn('Approval click from unauthorized user ignored — row left pending', {
       approvalId: approval.approval_id,
       action: approval.action,
       clickerUserId: userId || '(none)',
       selectedOption,
-      eligibleCount: eligible.length,
     });
     return;
   }
 
-  if (selectedOption !== 'approve') {
-    notify(`Your ${approval.action} request was rejected by admin.`);
-    log.info('Approval rejected', { approvalId: approval.approval_id, action: approval.action, userId });
+  // Positive option is action-dependent: admin-approval cards use
+  // 'approve'; the self-confirm gate uses 'confirm'. Anything else is the
+  // negative path (reject / cancel) — drop the row, tell the agent.
+  const positiveValue = approval.action === 'sensitive_mcp_confirm' ? 'confirm' : 'approve';
+  if (selectedOption !== positiveValue) {
+    const verb = approval.action === 'sensitive_mcp_confirm' ? 'cancelled' : 'rejected by admin';
+    notify(`Your ${approval.action} request was ${verb}.`);
+    log.info('Approval not granted', {
+      approvalId: approval.approval_id,
+      action: approval.action,
+      selectedOption,
+      userId,
+    });
     deletePendingApproval(approval.approval_id);
     await wakeContainer(session);
     return;
