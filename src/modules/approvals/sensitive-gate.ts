@@ -65,15 +65,122 @@ export interface ToolClass {
   argPredicate?: (args: unknown) => Classification | null;
 }
 
+// ─── Multiplexer arg predicates ───────────────────────────────────────
+//
+// `google_call` and `lunchmoney_call` are ONE MCP tool each spanning the
+// whole upstream API, so a flat classification can't work — the call's
+// arguments decide read vs write vs destructive. These predicates inspect
+// only the verb/HTTP-method (never the LLM-supplied free text — that
+// would be the confused-deputy hole the v6 doc rejected). They are
+// fail-safe by construction: any verb they don't positively recognise as
+// a read returns 'write', and an unparseable arg shape returns 'write'
+// (NOT null — null would fall back to the entry's base `read`, opening a
+// hole for a malformed/novel mutating verb). The base entry's
+// `classification: 'read'` only takes effect when the predicate
+// affirmatively recognises a read verb.
+
+/** Google API method verbs that only ever read. Everything else mutates. */
+const GOOGLE_READ_VERBS = new Set(['get', 'list', 'search', 'aggregatedlist', 'watch', 'export']);
+
 /**
- * Per-integration tool classification registry. Phase 1 ships it EMPTY
- * on purpose: with no entries every tool is unmapped and therefore gated
- * (fail-closed). Phase 2 fills these maps; until then the gate is
- * maximally conservative, which is the intended security posture.
+ * `google_call` args: { service, resource, method, body?, target_user_id? }.
+ * `method` is the bare Google verb ("list", "insert", "create", "update",
+ * "patch", "batchupdate", "send", "delete", "copy", ...). Classify by it:
+ *   - a known read verb            → read   (PII per the base entry)
+ *   - "delete"                     → destructive
+ *   - anything else / unparseable  → write  (fail-safe: never silent-read
+ *     a mutating or novel verb; drive.permissions.create with
+ *     body.type ∈ {anyone,domain} — the headline public-share — lands
+ *     here as `write`, gated in ANY chat by policy rule 1)
+ */
+export function classifyGoogleCall(args: unknown): Classification | null {
+  if (!args || typeof args !== 'object') return 'write';
+  const method = (args as { method?: unknown }).method;
+  if (typeof method !== 'string' || method.length === 0) return 'write';
+  const verb = method.trim().toLowerCase();
+  if (verb === 'delete') return 'destructive';
+  if (GOOGLE_READ_VERBS.has(verb)) return 'read';
+  return 'write';
+}
+
+/**
+ * `lunchmoney_call` args: { endpoint, method: 'GET'|'POST'|'PUT'|'DELETE',
+ * body?, target_user_id? }. HTTP method is the clean discriminator:
+ *   GET → read (financial PII), DELETE → destructive, POST/PUT/anything
+ *   else / unparseable → write (fail-safe).
+ */
+export function classifyLunchMoneyCall(args: unknown): Classification | null {
+  if (!args || typeof args !== 'object') return 'write';
+  const method = (args as { method?: unknown }).method;
+  if (typeof method !== 'string') return 'write';
+  const m = method.trim().toUpperCase();
+  if (m === 'GET') return 'read';
+  if (m === 'DELETE') return 'destructive';
+  return 'write'; // POST / PUT / unknown
+}
+
+/**
+ * Per-integration tool classification registry (Phase 2 — filled from
+ * the real registered tool surface of every dashboard `*-mcp.ts` route,
+ * 2026-05-17). Rules applied (see knowledge/projects/sensitive-action-approvals.md):
+ *   - any mutation (create/update/add/book) → `write`  (gated ANY chat)
+ *   - cancellation/delete                    → `destructive` (gated ANY chat)
+ *   - read whose payload carries personal data (contacts, financials,
+ *     someone's reservations/calendar/mail, AND every `*_workspace_members`
+ *     tool which returns member names+emails) → `read, pii:true`
+ *     (gated in PUBLIC channels only — operator's locked rule 2)
+ *   - read of public/reference data (restaurant/property listings, API
+ *     schema, own capability flags) → `read` (no pii → always allow)
+ * `target_user_id` (cross-user access on google/lunchmoney/opentable/…)
+ * does NOT change classification: cross-user *reads* are still PII reads
+ * (rule 2, public-only) and cross-user *writes* are writes (rule 1, any
+ * chat) — both already covered. Anything NOT in this map stays
+ * fail-closed → require_confirmation (unmapped strictest default), so a
+ * newly-added tool is gated until it is classified here.
  */
 export const CLASSIFICATION_REGISTRY: Record<string, Record<string, ToolClass>> = {
-  // google: { google_call: { classification: 'read', pii: true, argPredicate: classifyGoogleCall }, ... },
-  // lunchmoney: { ... }, ixact: { ... }, ...
+  google: {
+    google_call: { classification: 'read', pii: true, argPredicate: classifyGoogleCall },
+    google_schema: { classification: 'read' }, // API shape only — no user data
+    google_capabilities: { classification: 'read' }, // own capability flags
+    google_workspace_members: { classification: 'read', pii: true }, // member names+emails
+  },
+  lunchmoney: {
+    lunchmoney_call: { classification: 'read', pii: true, argPredicate: classifyLunchMoneyCall },
+    lunchmoney_workspace_members: { classification: 'read', pii: true },
+  },
+  ixact: {
+    ixact_search_contacts: { classification: 'read', pii: true }, // names/email/phone
+    ixact_get_contact: { classification: 'read', pii: true }, // full contact record
+    ixact_get_today_tasks: { classification: 'read', pii: true }, // tasks reference contacts
+    ixact_get_task: { classification: 'read', pii: true },
+    ixact_create_contact: { classification: 'write' },
+    ixact_update_contact: { classification: 'write' },
+    ixact_add_follow_up: { classification: 'write' },
+    ixact_create_task: { classification: 'write' },
+    ixact_update_task: { classification: 'write' },
+    ixact_workspace_members: { classification: 'read', pii: true },
+  },
+  opentable: {
+    opentable_search: { classification: 'read' }, // public restaurant data
+    opentable_availability: { classification: 'read' },
+    opentable_restaurant: { classification: 'read' },
+    opentable_reservations: { classification: 'read', pii: true }, // personal reservations
+    opentable_book: { classification: 'write' },
+    opentable_cancel: { classification: 'destructive' },
+    opentable_workspace_members: { classification: 'read', pii: true },
+  },
+  housesigma: {
+    housesigma_search_map: { classification: 'read' }, // public listings
+    housesigma_listing_preview: { classification: 'read' },
+    housesigma_address_suggest: { classification: 'read' },
+    housesigma_listing_detail: { classification: 'read' },
+    housesigma_workspace_members: { classification: 'read', pii: true },
+  },
+  realtorca: {
+    realtorca_location_suggest: { classification: 'read' }, // public reference
+    realtorca_search: { classification: 'read' }, // public listings
+  },
 };
 
 export interface PolicyContext {
