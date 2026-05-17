@@ -23,6 +23,19 @@ function hasOnWakeColumn(db: ReturnType<typeof openInboundDb>): boolean {
   return _hasOnWake;
 }
 
+/**
+ * Test-only: clear the process-lifetime `on_wake` schema-probe cache.
+ * The cache is correct in production (one inbound.db per container
+ * process) but leaks across tests that open different-schema DBs in one
+ * process — a pre-migration-schema test would otherwise read a `true`
+ * cached from an earlier normal-schema test (or vice-versa) and assert
+ * the wrong branch. Call in beforeEach/afterEach. Mirrors the
+ * `_reset*ForTests` convention used elsewhere in the codebase.
+ */
+export function _resetOnWakeCacheForTests(): void {
+  _hasOnWake = null;
+}
+
 export interface MessageInRow {
   id: string;
   seq: number | null;
@@ -195,10 +208,7 @@ export function markFailed(id: string): void {
 /** Get a message by ID (read from inbound.db). */
 export function getMessageIn(id: string): MessageInRow | undefined {
   return withInboundDb(
-    (inbound) =>
-      inbound.prepare('SELECT * FROM messages_in WHERE id = ?').get(id) as
-        | MessageInRow
-        | undefined,
+    (inbound) => inbound.prepare('SELECT * FROM messages_in WHERE id = ?').get(id) as MessageInRow | undefined,
   );
 }
 
@@ -226,4 +236,3 @@ export function findQuestionResponse(questionId: string): MessageInRow | undefin
 
   return response;
 }
-

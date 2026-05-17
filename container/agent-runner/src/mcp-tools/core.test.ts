@@ -247,3 +247,79 @@ describe('add_reaction / remove_reaction MCP tools', () => {
     expect(getUndeliveredMessages()).toHaveLength(0);
   });
 });
+
+/**
+ * Regression: send_message with `to` omitted must reply to the session's
+ * ORIGIN (the chat/thread the conversation is in), not silently misroute
+ * or error (fix 57dad14, "default to replying to the origin
+ * destination"). resolveRouting's `!to` branch is the contract:
+ *   1. session_routing present  → reply in place (channel + thread).
+ *   2. no session_routing, 1 destination → legacy single-dest shortcut.
+ *   3. no session_routing, >1 destinations → explicit error (never
+ *      guess — guessing is the misroute this fix exists to prevent).
+ * Only behavior #2/#3 were implicitly reachable in the prior suite (the
+ * test DB has no session_routing table, so getSessionRouting() always
+ * returned nulls); #1 — the actual fix — was never exercised. We create
+ * the production session_routing table here to pin it.
+ */
+describe('send_message MCP tool — origin-default routing (57dad14)', () => {
+  function createSessionRoutingTable() {
+    getInboundDb().exec(`
+      CREATE TABLE IF NOT EXISTS session_routing (
+        id           INTEGER PRIMARY KEY CHECK (id = 1),
+        channel_type TEXT,
+        platform_id  TEXT,
+        thread_id    TEXT
+      );
+    `);
+  }
+
+  it('to omitted → replies to the session origin channel + thread (reply in place)', async () => {
+    createSessionRoutingTable();
+    getInboundDb()
+      .prepare(
+        `INSERT INTO session_routing (id, channel_type, platform_id, thread_id)
+         VALUES (1, 'discord', 'discord:gid:cid', 'thread-77')`,
+      )
+      .run();
+
+    // No `to`. Pre-fix (or if the origin branch breaks) this would fall
+    // through to the single-dest shortcut and land on 'peer' (the agent
+    // destination seeded in beforeEach) — a cross-destination misroute.
+    await sendMessage.handler({ text: 'reply in place' });
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].channel_type).toBe('discord');
+    expect(out[0].platform_id).toBe('discord:gid:cid');
+    expect(out[0].thread_id).toBe('thread-77');
+  });
+
+  it('to omitted, no session routing, single destination → legacy shortcut still works', async () => {
+    // No session_routing table at all (mirrors agent-shared / internal-
+    // only agents). beforeEach seeded exactly one destination ('peer').
+    await sendMessage.handler({ text: 'fallback' });
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    // 'peer' is an agent destination → routed as channel_type 'agent'.
+    expect(out[0].channel_type).toBe('agent');
+    expect(out[0].platform_id).toBe('ag-peer');
+  });
+
+  it('to omitted, no session routing, multiple destinations → explicit error, no send', async () => {
+    // Add a second destination so the single-dest shortcut cannot apply.
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+         VALUES ('peer2', 'Peer2', 'agent', NULL, NULL, 'ag-peer2')`,
+      )
+      .run();
+
+    const res = await sendMessage.handler({ text: 'ambiguous' });
+
+    // Must refuse and name the options — never silently pick one.
+    expect(res.isError).toBe(true);
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+});
