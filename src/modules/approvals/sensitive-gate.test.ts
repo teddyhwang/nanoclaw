@@ -139,7 +139,6 @@ describe('decideSensitiveGate — fail-closed resolution', () => {
     tool: 'google_call',
     args: {},
     rawSenderId: '999',
-    channelType: 'discord',
   };
 
   it('no agent group → fail_closed, no card', async () => {
@@ -169,7 +168,6 @@ describe('decideSensitiveGate — grant + policy path', () => {
     tool: 'google_call',
     args: {},
     rawSenderId: '777',
-    channelType: 'discord',
     senderDisplayName: 'Actor',
   };
 

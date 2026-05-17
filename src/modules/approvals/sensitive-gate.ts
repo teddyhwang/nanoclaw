@@ -162,11 +162,12 @@ export interface SensitiveGateInput {
   /**
    * Raw platform sender id from the host-written sender-identity.json
    * (e.g. `159867859914790@lid`, `1234567890`). NOT namespaced — this
-   * function namespaces it so the form matches clicker-auth exactly.
+   * function namespaces it (using the channel resolved from the session's
+   * messaging group, NOT a caller-supplied value) so the form matches
+   * clicker-auth exactly. dashboard-server only knows the raw id; the
+   * channel is single-sourced here from the session.
    */
   rawSenderId: string;
-  /** Channel kind of the originating chat (discord, whatsapp, ...). */
-  channelType: string;
   /** Optional human label for the @-mention on the card. */
   senderDisplayName?: string | null;
 }
@@ -189,7 +190,7 @@ export type SensitiveGateDecision =
  * NEVER a silent allow. A security gate that fails open is not a gate.
  */
 export async function decideSensitiveGate(input: SensitiveGateInput): Promise<SensitiveGateDecision> {
-  const { groupFolder, integration, tool, args, rawSenderId, channelType, senderDisplayName } = input;
+  const { groupFolder, integration, tool, args, rawSenderId, senderDisplayName } = input;
 
   const agentGroup = getAgentGroupByFolder(groupFolder);
   if (!agentGroup) {
@@ -204,8 +205,19 @@ export async function decideSensitiveGate(input: SensitiveGateInput): Promise<Se
     // chat has nowhere to deliver the card, so it cannot be confirmed.
     return { decision: 'fail_closed', reason: `session ${session.id} has no originating chat` };
   }
+  const mg = getMessagingGroup(session.messaging_group_id);
+  if (!mg) {
+    return {
+      decision: 'fail_closed',
+      reason: `messaging group ${session.messaging_group_id} not found for session ${session.id}`,
+    };
+  }
 
-  const actorId = namespaceActorId(channelType, rawSenderId);
+  // Channel comes from the session's messaging group, NOT from the
+  // caller — so the actor-id namespacing is single-sourced here and can
+  // never drift from clicker-auth via a wrong caller-supplied channel.
+  const actorId = namespaceActorId(mg.channel_type, rawSenderId);
+  const isPublicChannel = mg.is_group === 1;
   const nowMs = Date.now();
 
   // 1. Live grant short-circuits everything (the re-entry mechanism).
@@ -218,8 +230,6 @@ export async function decideSensitiveGate(input: SensitiveGateInput): Promise<Se
   }
 
   // 2. No live grant — evaluate the policy.
-  const mg = getMessagingGroup(session.messaging_group_id);
-  const isPublicChannel = mg?.is_group === 1;
   const policy = evaluatePolicy({ integration, tool, args, isPublicChannel });
   if (policy === 'allow') {
     return { decision: 'allow', reason: 'policy_allow' };
