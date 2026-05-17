@@ -11,6 +11,21 @@
  *
  * The response handler is registered via core's `registerResponseHandler`;
  * core iterates handlers and the first one to return `true` claims the response.
+ *
+ * Clicker authorization (Phase 0, sensitive-action-approvals design): a card
+ * is delivered to an eligible approver's DM, but the response plumbing does
+ * not intrinsically bind the click to that approver — historically ANY user
+ * whose click carried the card's questionId could approve/reject. That made
+ * the security of an approval contingent purely on the delivery channel
+ * staying private (security-by-delivery, not authorization-on-click). We now
+ * additionally re-verify, on every click, that the clicking user is in
+ * `pickApprover(approval.agent_group_id)` for module-initiated approvals.
+ * An unauthorized click (including a click with no resolvable user id) is
+ * ignored and the row is LEFT PENDING so a real approver can still act —
+ * it is never consumed, so a bystander cannot deny a legitimate request by
+ * clicking Reject either. OneCLI credential approvals keep their existing
+ * in-memory-promise path (the card is short-id'd and DM-only; the registered
+ * pending row is dropped without dispatch — see `handleApprovalsResponse`).
  */
 import { wakeContainer } from '../../container-runner.js';
 import { deletePendingApproval, getPendingApproval, getSession } from '../../db/sessions.js';
@@ -19,7 +34,7 @@ import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { PendingApproval } from '../../types.js';
 import { ONECLI_ACTION, resolveOneCLIApproval } from './onecli-approvals.js';
-import { getApprovalHandler } from './primitive.js';
+import { getApprovalHandler, pickApprover } from './primitive.js';
 
 export async function handleApprovalsResponse(payload: ResponsePayload): Promise<boolean> {
   // OneCLI credential approvals — resolved via in-memory Promise first.
@@ -70,6 +85,27 @@ async function handleRegisteredApproval(
       content: JSON.stringify({ text, sender: 'system', senderId: 'system' }),
     }).catch((err) => log.error('writeSessionMessage failed in notify', { err }));
   };
+
+  // Clicker authorization. The card was delivered to an eligible approver's
+  // DM, but a click only carries a questionId + the clicking user's id, so
+  // without this check any user who can reach the card's callback could
+  // approve OR reject. Re-resolve the eligible approvers for this row's
+  // agent group and require the clicker to be one of them. An unauthorized
+  // click (or one with no resolvable user id) is dropped WITHOUT consuming
+  // the row — the row stays pending so a real approver can still act, and a
+  // bystander cannot deny a legitimate request by clicking Reject. No
+  // wakeContainer: nothing changed for the requesting agent.
+  const eligible = pickApprover(approval.agent_group_id);
+  if (!userId || !eligible.includes(userId)) {
+    log.warn('Approval click from unauthorized user ignored — row left pending', {
+      approvalId: approval.approval_id,
+      action: approval.action,
+      clickerUserId: userId || '(none)',
+      selectedOption,
+      eligibleCount: eligible.length,
+    });
+    return;
+  }
 
   if (selectedOption !== 'approve') {
     notify(`Your ${approval.action} request was rejected by admin.`);
