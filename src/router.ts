@@ -317,6 +317,14 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     typeof (parsed as { replyTo?: { messageId?: string } }).replyTo?.messageId === 'string'
       ? ((parsed as { replyTo: { messageId: string } }).replyTo.messageId as string)
       : null;
+  // A reply-chain-walking extractor sets `botInChain` when an ancestor
+  // @-mentions the bot but was human-authored, so there is no bot-outbound
+  // id for `isReplyToOurBot`'s wasDeliveredByBot lookup to resolve. It is
+  // still a reply continuing a bot-addressed thread, so it counts as a
+  // reply-to-bot trigger directly. (#ai-friends 2026-05-16: Mack replied
+  // to Barret's "<@Optimus> do X" — the author-only chain walk never woke
+  // Optimus even though the sub-thread was addressed to it.)
+  const replyBotInChain = (parsed as { replyTo?: { botInChain?: boolean } }).replyTo?.botInChain === true;
 
   let engagedCount = 0;
   let accumulatedCount = 0;
@@ -329,10 +337,19 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     // Loopback short-circuit: bot's own message bouncing back never engages,
     // regardless of the wiring's engage_mode. The accumulate branch below
     // still stores the message so the agent retains self-context.
-    const isReplyToBot =
+    // wasDeliveredByBot-backed signal: replied-to (or reacted-to) message
+    // id is a known bot outbound. Used directly by the reaction rule —
+    // a reaction is only a soft trigger on one of OUR messages, never on
+    // a human ancestor that merely mentions us.
+    const isReplyToBotOutbound =
       !isBotLoopback && replyToMessageId
         ? isReplyToOurBot(agent.agent_group_id, mg.id, event.threadId, replyToMessageId)
         : false;
+    // Reply-to-bot trigger for engage_mode: the bot-outbound reply OR a
+    // human ancestor that @-mentions the bot (botInChain). The latter is
+    // a *reply*-thread signal only, deliberately NOT fed to the reaction
+    // rule below.
+    const isReplyToBot = !isBotLoopback && (isReplyToBotOutbound || replyBotInChain);
     // Emoji reactions get a dedicated, deliberately quiet engagement rule
     // that bypasses the wiring's engage_mode entirely. A reaction on one
     // of THIS agent's own messages is a soft trigger (reuses the same
@@ -347,7 +364,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       isBotLoopback || isBackfill
         ? false
         : isReaction
-          ? evaluateReactionEngage(isReplyToBot)
+          ? evaluateReactionEngage(isReplyToBotOutbound)
           : evaluateEngage(agent, messageText, isMention, isReplyToBot);
 
     const accessOk = engages && (!accessGate || accessGate(event, userId, mg, agent.agent_group_id).allowed);

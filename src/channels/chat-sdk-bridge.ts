@@ -47,6 +47,18 @@ export interface ReplyContext {
    * bot's prior message counts as a trigger even without an @mention.
    */
   messageId?: string;
+  /**
+   * Set by reply-chain-walking extractors when an ancestor in the chain
+   * is bot *participation* that has no resolvable bot-outbound id to put
+   * in `messageId` — specifically an ancestor that @-mentions the bot
+   * but was authored by a human (e.g. someone replies to "@Optimus do
+   * X"). `messageId`'s `wasDeliveredByBot` lookup can't see that (no bot
+   * outbound row), so the walker flags it here and the router treats it
+   * as a reply-to-bot trigger directly. v1 achieved the same UX by
+   * prepending `@ASSISTANT_NAME` to such messages; v2 keeps the signal
+   * structured. Only meaningful in `mention` / `mention-sticky` modes.
+   */
+  botInChain?: boolean;
 }
 
 /**
