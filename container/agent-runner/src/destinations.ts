@@ -87,13 +87,26 @@ export function findByRouting(
 }
 
 /**
- * Generate the system-prompt addendum: agent identity + destination map.
+ * Generate the system-prompt addendum: agent identity + runtime model
+ * + destination map.
  *
  * Identity is injected here (not in the shared CLAUDE.md) because it's
  * per-agent-group and changes when the operator renames an agent, while
  * the shared base is identical across all agents.
+ *
+ * `runtime` carries the resolved provider + model so the agent can
+ * honestly answer "what model are you on?". The agent has no other
+ * runtime-visible model id (the Claude SDK and the codex app-server
+ * both run the model out-of-band; nothing surfaces the id into the
+ * conversation), so without this it either guesses or — correctly but
+ * unhelpfully — refuses to say. The host already resolves the exact
+ * provider/model at spawn (`config.provider` / `config.model`); pass it
+ * through verbatim rather than have the model speculate.
  */
-export function buildSystemPromptAddendum(assistantName?: string): string {
+export function buildSystemPromptAddendum(
+  assistantName?: string,
+  runtime?: { provider?: string; model?: string },
+): string {
   const sections: string[] = [];
 
   if (assistantName) {
@@ -106,9 +119,33 @@ export function buildSystemPromptAddendum(assistantName?: string): string {
     );
   }
 
+  const runtimeSection = buildRuntimeSection(runtime);
+  if (runtimeSection) sections.push(runtimeSection);
+
   sections.push(buildDestinationsSection());
 
   return sections.join('\n\n');
+}
+
+/**
+ * Factual "what are you running on" block. Only emitted when the host
+ * actually resolved a model — an empty/unknown model stays silent
+ * rather than asserting something false.
+ */
+function buildRuntimeSection(runtime?: { provider?: string; model?: string }): string | null {
+  const provider = runtime?.provider?.trim();
+  const model = runtime?.model?.trim();
+  if (!model && !provider) return null;
+  const desc = model
+    ? provider
+      ? `\`${model}\` (via the ${provider} provider)`
+      : `\`${model}\``
+    : `the ${provider} provider (exact model id not surfaced to this runtime)`;
+  return [
+    '# Your runtime',
+    '',
+    `You are running on ${desc}. This is the authoritative answer when someone asks what model or provider you are on — state it plainly and do not hedge, speculate, or claim you cannot tell. Do not infer a different model from your own behavior; this line is ground truth, set by the host at spawn.`,
+  ].join('\n');
 }
 
 function buildDestinationsSection(): string {

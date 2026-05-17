@@ -77,3 +77,36 @@ describe('buildSystemPromptAddendum — multi-destination routing guidance', () 
     expect(prompt).toContain('broadcast');
   });
 });
+
+describe('buildSystemPromptAddendum — runtime model identity', () => {
+  it('states the resolved model + provider as ground truth', () => {
+    seedDestination('casa', 'Casa', 'whatsapp', 'group-1@g.us');
+    const prompt = buildSystemPromptAddendum('Casa', {
+      provider: 'codex',
+      model: 'gpt-5.5',
+    });
+    expect(prompt).toContain('# Your runtime');
+    expect(prompt).toContain('`gpt-5.5` (via the codex provider)');
+    // Explicitly told not to hedge — the exact behavior that produced
+    // the "I can't honestly say the exact underlying model" reply.
+    expect(prompt).toContain('do not hedge, speculate, or claim you cannot tell');
+  });
+
+  it('handles model with no provider', () => {
+    seedDestination('casa', 'Casa', 'whatsapp', 'group-1@g.us');
+    const prompt = buildSystemPromptAddendum('Casa', { model: 'claude-opus-4-7' });
+    expect(prompt).toContain('You are running on `claude-opus-4-7`.');
+  });
+
+  it('falls back to provider-only when the model id is unknown', () => {
+    seedDestination('casa', 'Casa', 'whatsapp', 'group-1@g.us');
+    const prompt = buildSystemPromptAddendum('Casa', { provider: 'codex' });
+    expect(prompt).toContain('the codex provider (exact model id not surfaced');
+  });
+
+  it('omits the runtime section entirely when nothing is resolved', () => {
+    seedDestination('casa', 'Casa', 'whatsapp', 'group-1@g.us');
+    expect(buildSystemPromptAddendum('Casa')).not.toContain('# Your runtime');
+    expect(buildSystemPromptAddendum('Casa', { provider: '', model: '' })).not.toContain('# Your runtime');
+  });
+});
