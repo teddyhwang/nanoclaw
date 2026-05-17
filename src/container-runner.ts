@@ -54,8 +54,61 @@ import type { AgentGroup, Session } from './types.js';
 
 const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
 
+/** How many trailing stderr lines to retain per container for crash diagnostics. */
+const STDERR_TAIL_LINES = 50;
+
+/**
+ * Classify a container exit so a genuine crash is logged loudly and tagged
+ * accurately, instead of every exit being silently reported as 'idle' with
+ * its stderr swallowed at debug level (the diagnostic gap that forced manual
+ * `docker logs` repro during the 2026-05-16 crash-loop incidents).
+ *
+ * Pure so the precedence can be unit-tested without spawning a process.
+ *
+ * @param code     close-event exit code (null when killed by a signal)
+ * @param signal   close-event signal name (null on a normal code exit)
+ * @param intentional  true when the host deliberately stopped this container
+ *                      (idle sweep, model/harness switch, shutdown) — such an
+ *                      exit is expected, not a crash, even though it arrives
+ *                      as a SIGKILL/non-zero code.
+ */
+export function classifyExit(
+  code: number | null,
+  signal: NodeJS.Signals | null,
+  intentional: boolean,
+): { reason: 'idle' | 'killed' | 'crashed'; level: 'info' | 'warn' } {
+  // Host-initiated stop via killContainer(): expected (idle sweep,
+  // absolute-ceiling, claim-stuck, self-mod rebuild).
+  if (intentional) return { reason: 'killed', level: 'info' };
+  // Clean exit: the agent-runner's poll loop ended normally.
+  if (code === 0) return { reason: 'idle', level: 'info' };
+  // Graceful external termination. `docker stop` (the dashboard
+  // model/harness-switch path `stopV2ContainersForFolder`, and any
+  // orchestrator) sends SIGTERM; a container that exits on SIGTERM —
+  // directly (signal) or relayed by the `docker run` client as 143
+  // (128+15) — was asked to shut down, it did not crash. Crashes do not
+  // arrive as SIGTERM.
+  if (signal === 'SIGTERM' || code === 143) return { reason: 'killed', level: 'info' };
+  // Killed by a signal we did NOT initiate and is NOT a graceful term —
+  // SIGKILL/137 (OOM), SIGSEGV, SIGABRT. The EXIT:137 crash-loop shape.
+  if (signal != null) return { reason: 'crashed', level: 'warn' };
+  // Non-zero exit code we did not initiate — the SQLITE_CANTOPEN /
+  // readSessionStats process.exit(1) shape.
+  return { reason: 'crashed', level: 'warn' };
+}
+
 /** Active containers tracked by session ID. */
-const activeContainers = new Map<string, { process: ChildProcess; containerName: string }>();
+const activeContainers = new Map<
+  string,
+  {
+    process: ChildProcess;
+    containerName: string;
+    /** Set by killContainer so an intentional stop isn't mislabeled a crash. */
+    intentionalStop: boolean;
+    /** Bounded ring of the most recent stderr lines, for crash diagnostics. */
+    stderrTail: string[];
+  }
+>();
 
 /**
  * In-flight wake promises, keyed by session id. Deduplicates concurrent
@@ -181,14 +234,25 @@ async function spawnContainer(session: Session): Promise<void> {
 
   const container = spawn(CONTAINER_RUNTIME_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
-  activeContainers.set(session.id, { process: container, containerName });
+  const entry = {
+    process: container,
+    containerName,
+    intentionalStop: false,
+    stderrTail: [] as string[],
+  };
+  activeContainers.set(session.id, entry);
   markContainerRunning(session.id);
   emitEngineEvent('container.spawn', { sessionId: session.id, agentGroupId: agentGroup.id });
 
-  // Log stderr
+  // Stream stderr to debug as before, but also retain a bounded tail so a
+  // crash exit can log WHY the container died without a manual `docker logs`
+  // repro (the 2026-05-16 diagnostic gap).
   container.stderr?.on('data', (data) => {
     for (const line of data.toString().trim().split('\n')) {
-      if (line) log.debug(line, { container: agentGroup.folder });
+      if (!line) continue;
+      log.debug(line, { container: agentGroup.folder });
+      entry.stderrTail.push(line);
+      if (entry.stderrTail.length > STDERR_TAIL_LINES) entry.stderrTail.shift();
     }
   });
 
@@ -200,13 +264,33 @@ async function spawnContainer(session: Session): Promise<void> {
   // (see src/host-sweep.ts). This avoids killing long-running legitimate work
   // on a wall-clock timer.
 
-  container.on('close', (code) => {
+  container.on('close', (code, signal) => {
     activeContainers.delete(session.id);
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
     cleanupSeededDream(agentGroup);
-    log.info('Container exited', { sessionId: session.id, code, containerName });
-    emitEngineEvent('container.stop', { sessionId: session.id, agentGroupId: agentGroup.id, reason: 'idle' });
+
+    const { reason, level } = classifyExit(code, signal, entry.intentionalStop);
+    if (level === 'warn') {
+      // A genuine crash. Surface the exit + the retained stderr tail at WARN
+      // so the cause is in the host log, not swallowed at debug.
+      log.warn('Container crashed', {
+        sessionId: session.id,
+        agentGroup: agentGroup.name,
+        containerName,
+        code,
+        signal,
+        reason,
+        stderrTail: entry.stderrTail.length ? entry.stderrTail.join('\n') : '(no stderr captured)',
+      });
+    } else {
+      log.info('Container exited', { sessionId: session.id, code, signal, reason, containerName });
+    }
+    emitEngineEvent('container.stop', {
+      sessionId: session.id,
+      agentGroupId: agentGroup.id,
+      reason,
+    });
   });
 
   container.on('error', (err) => {
@@ -251,6 +335,10 @@ export function killContainer(sessionId: string, reason: string, onExit?: () => 
   if (onExit) {
     entry.process.once('close', onExit);
   }
+
+  // Mark BEFORE terminating so the close handler classifies the resulting
+  // SIGKILL/non-zero exit as an expected 'killed', not a 'crashed' WARN.
+  entry.intentionalStop = true;
 
   log.info('Killing container', { sessionId, reason, containerName: entry.containerName });
   try {

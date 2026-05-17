@@ -146,7 +146,11 @@ export interface EngineEventMap {
   'outbound.delivered': { sessionId: string; agentGroupId: string; channelType: string; platformId: string };
   'outbound.failed': { sessionId: string; agentGroupId: string; channelType: string; platformId: string; err: unknown };
   'container.spawn': { sessionId: string; agentGroupId: string };
-  'container.stop': { sessionId: string; agentGroupId: string; reason: 'idle' | 'shutdown' | 'killed' };
+  'container.stop': {
+    sessionId: string;
+    agentGroupId: string;
+    reason: 'idle' | 'shutdown' | 'killed' | 'crashed';
+  };
   'container.stuck': { sessionId: string; agentGroupId: string };
   'tool.started': { sessionId: string; agentGroupId: string; tool: string };
   'tool.completed': { sessionId: string; agentGroupId: string; tool: string; ok: boolean };

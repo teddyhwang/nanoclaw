@@ -4,7 +4,7 @@ import path from 'path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { resolveProviderName, syncSkillSymlinks } from './container-runner.js';
+import { classifyExit, resolveProviderName, syncSkillSymlinks } from './container-runner.js';
 import { addSkillRoot } from './engine/skill-roots.js';
 
 describe('resolveProviderName', () => {
@@ -28,6 +28,40 @@ describe('resolveProviderName', () => {
   it('treats empty string as unset (falls through)', () => {
     expect(resolveProviderName('', 'opencode')).toBe('opencode');
     expect(resolveProviderName(null, '')).toBe('claude');
+  });
+});
+
+describe('classifyExit', () => {
+  it('host-initiated kill (killContainer) is an expected killed/info', () => {
+    // intentional wins regardless of code/signal — sweep idle-timeout,
+    // absolute-ceiling, claim-stuck, self-mod rebuild all SIGKILL.
+    expect(classifyExit(null, 'SIGKILL', true)).toEqual({ reason: 'killed', level: 'info' });
+    expect(classifyExit(137, null, true)).toEqual({ reason: 'killed', level: 'info' });
+    expect(classifyExit(0, null, true)).toEqual({ reason: 'killed', level: 'info' });
+  });
+
+  it('clean exit code 0 is idle/info', () => {
+    expect(classifyExit(0, null, false)).toEqual({ reason: 'idle', level: 'info' });
+  });
+
+  it('SIGTERM / 143 is a graceful external stop, not a crash', () => {
+    // docker stop -t 1 (the dashboard model/harness-switch path
+    // stopV2ContainersForFolder) sends SIGTERM. Must NOT warn.
+    expect(classifyExit(null, 'SIGTERM', false)).toEqual({ reason: 'killed', level: 'info' });
+    expect(classifyExit(143, null, false)).toEqual({ reason: 'killed', level: 'info' });
+  });
+
+  it('uninitiated SIGKILL/137 (OOM) is crashed/warn', () => {
+    // The EXIT:137 crash-loop shape from the 2026-05-16 incident.
+    expect(classifyExit(137, null, false)).toEqual({ reason: 'crashed', level: 'warn' });
+    expect(classifyExit(null, 'SIGKILL', false)).toEqual({ reason: 'crashed', level: 'warn' });
+    expect(classifyExit(null, 'SIGSEGV', false)).toEqual({ reason: 'crashed', level: 'warn' });
+  });
+
+  it('uninitiated non-zero exit code is crashed/warn', () => {
+    // The SQLITE_CANTOPEN / missing-readSessionStats process.exit(1) shape.
+    expect(classifyExit(1, null, false)).toEqual({ reason: 'crashed', level: 'warn' });
+    expect(classifyExit(125, null, false)).toEqual({ reason: 'crashed', level: 'warn' });
   });
 });
 
