@@ -233,3 +233,18 @@ export { resolveSession, writeSessionMessage, writeSessionRouting } from '../ses
 // sender resolution, access gate, session resolution, write, wake all
 // run identically to a real chat message.
 export { routeInbound } from '../router.js';
+
+// Sensitive-action gate (Phase 1, v6/v7). The dashboard-server MCP
+// preHandler can't call requestConfirmation directly (separate process,
+// no engine link, adapter+registry engine-only — spike-verified). It
+// forwards every tools/call to the optimus dashboard-bridge, which calls
+// decideSensitiveGate() here, in-process with the engine, so the actor-id
+// namespacing, the (session,actor) grant check, and the policy all have
+// one source of truth (zero drift vs clicker-auth — the reason for the
+// bridge-decides seam). See modules/approvals/sensitive-gate.ts and
+// knowledge/projects/sensitive-action-approvals.md.
+export {
+  decideSensitiveGate,
+  type SensitiveGateInput,
+  type SensitiveGateDecision,
+} from '../modules/approvals/sensitive-gate.js';
