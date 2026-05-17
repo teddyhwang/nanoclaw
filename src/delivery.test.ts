@@ -28,6 +28,7 @@ const TEST_DIR = '/tmp/nanoclaw-test-delivery';
 
 import {
   initTestDb,
+  getDb,
   closeDb,
   runMigrations,
   createAgentGroup,
@@ -269,5 +270,49 @@ describe('deliverSessionMessages — permission check', () => {
     const delivered = getDeliveredIds(inDb);
     inDb.close();
     expect(delivered.has('out-unauth')).toBe(true);
+  });
+});
+
+describe('deliverSessionMessages — reply pills', () => {
+  it('preserves native reply pills for agent-shared sessions on mention-sticky wirings', async () => {
+    seedAgentAndChannel();
+    createMessagingGroupAgent({
+      id: 'mga-1',
+      messaging_group_id: 'mg-1',
+      agent_group_id: 'ag-1',
+      engage_mode: 'mention-sticky',
+      engage_pattern: null,
+      sender_scope: 'all',
+      ignored_message_policy: 'accumulate',
+      session_mode: 'agent-shared',
+      priority: 0,
+      created_at: now(),
+    });
+
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'agent-shared');
+    getDb().prepare('UPDATE sessions SET messaging_group_id = NULL WHERE id = ?').run(session.id);
+    session.messaging_group_id = null;
+    expect(session.messaging_group_id).toBeNull();
+
+    const outDb = new Database(outboundDbPath('ag-1', session.id));
+    outDb
+      .prepare(
+        `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, in_reply_to, content)
+         VALUES (?, datetime('now'), 'chat', 'telegram:123', 'telegram', ?, ?)`,
+      )
+      .run('out-reply', 'platform-parent:ag-1', JSON.stringify({ text: 'threaded reply' }));
+    outDb.close();
+
+    const inReplyToValues: Array<string | null | undefined> = [];
+    setDeliveryAdapter({
+      async deliver(_channelType, _platformId, _threadId, _kind, _content, _files, inReplyTo) {
+        inReplyToValues.push(inReplyTo);
+        return 'plat-msg-id';
+      },
+    });
+
+    await deliverSessionMessages(session);
+
+    expect(inReplyToValues).toEqual(['platform-parent:ag-1']);
   });
 });

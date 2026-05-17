@@ -332,12 +332,13 @@ async function deliverMessage(
   // path in deliverSessionMessages and eventually marks the message as failed
   // (instead of marking it delivered when nothing was actually delivered,
   // which was the pre-refactor bug).
+  const deliveryMessagingGroup =
+    msg.channel_type && msg.platform_id ? getMessagingGroupByPlatform(msg.channel_type, msg.platform_id) : undefined;
   if (msg.channel_type && msg.platform_id) {
-    const mg = getMessagingGroupByPlatform(msg.channel_type, msg.platform_id);
-    if (!mg) {
+    if (!deliveryMessagingGroup) {
       throw new Error(`unknown messaging group for ${msg.channel_type}/${msg.platform_id} (message ${msg.id})`);
     }
-    const isOriginChat = session.messaging_group_id === mg.id;
+    const isOriginChat = session.messaging_group_id === deliveryMessagingGroup.id;
     // Guarded: without the agent-to-agent module, `agent_destinations`
     // doesn't exist and we permit all non-origin channel sends (the
     // origin-chat case is always allowed regardless). Inlined SQL instead
@@ -347,10 +348,10 @@ async function deliverMessage(
         .prepare(
           'SELECT local_name FROM agent_destinations WHERE agent_group_id = ? AND target_type = ? AND target_id = ? LIMIT 1',
         )
-        .get(session.agent_group_id, 'channel', mg.id) as { local_name: string } | undefined;
+        .get(session.agent_group_id, 'channel', deliveryMessagingGroup.id) as { local_name: string } | undefined;
       if (!row) {
         throw new Error(
-          `unauthorized channel destination: ${session.agent_group_id} cannot send to ${mg.channel_type}/${mg.platform_id}`,
+          `unauthorized channel destination: ${session.agent_group_id} cannot send to ${deliveryMessagingGroup.channel_type}/${deliveryMessagingGroup.platform_id}`,
         );
       }
       // Static row passed. Now run any registered host guards — these
@@ -365,16 +366,16 @@ async function deliverMessage(
       const verdict = await runDestinationGuards({
         agentGroupId: session.agent_group_id,
         sessionId: session.id,
-        messagingGroup: mg,
+        messagingGroup: deliveryMessagingGroup,
         destination: {
           localName: row.local_name,
           targetType: 'channel',
-          targetId: mg.id,
+          targetId: deliveryMessagingGroup.id,
         },
       });
       if (!verdict.allowed) {
         throw new Error(
-          `destination guard rejected: ${session.agent_group_id} → ${mg.channel_type}/${mg.platform_id} (${row.local_name}) — ${verdict.reason}`,
+          `destination guard rejected: ${session.agent_group_id} → ${deliveryMessagingGroup.channel_type}/${deliveryMessagingGroup.platform_id} (${row.local_name}) — ${verdict.reason}`,
         );
       }
     }
@@ -431,13 +432,13 @@ async function deliverMessage(
   // agent-runner stamps in_reply_to on every outbound regardless, so we drop
   // it here when the wiring isn't trigger-required.
   let inReplyTo: string | null = msg.in_reply_to;
-  if (inReplyTo && session.messaging_group_id) {
-    const wiring = getMessagingGroupAgentByPair(session.messaging_group_id, session.agent_group_id);
+  if (inReplyTo) {
+    const messagingGroupId = session.messaging_group_id ?? deliveryMessagingGroup?.id ?? null;
+    const wiring = messagingGroupId
+      ? getMessagingGroupAgentByPair(messagingGroupId, session.agent_group_id)
+      : undefined;
     const triggerRequired = wiring?.engage_mode === 'mention' || wiring?.engage_mode === 'mention-sticky';
     if (!triggerRequired) inReplyTo = null;
-  } else if (inReplyTo && !session.messaging_group_id) {
-    // No messaging_group → no wiring lookup possible; default to no pill.
-    inReplyTo = null;
   }
 
   // Resolve per-session assistant brand from the agent group's
