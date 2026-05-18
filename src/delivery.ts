@@ -198,8 +198,44 @@ async function drainSession(session: Session): Promise<void> {
   }
 
   try {
-    // Read all due messages from outbound.db (read-only)
-    const allDue = getDueOutboundMessages(outDb);
+    // Read all due messages from outbound.db (read-only).
+    //
+    // Transient-journal guard: the host opens outbound.db `{ readonly: true }`
+    // but the container writes it in journal_mode=DELETE. When a container is
+    // torn down mid-write (idle-timeout SIGKILL, fleet restart, claim-stuck
+    // recovery) outbound.db can momentarily carry a hot rollback journal.
+    // SQLite must roll that journal back to produce a consistent read, and
+    // rollback is a *write* — which a readonly handle refuses with
+    // SQLITE_READONLY ("attempt to write a readonly database"). SQLITE_BUSY
+    // is the sibling case (writer mid-commit). Both are expected, self-
+    // healing, and lose nothing: the throw skips this session for one tick,
+    // deliveryAttempts is untouched (it only increments in the per-message
+    // catch below, which we never reach), and the next ~25s poll retries
+    // once the journal clears. Logging it at ERROR with a full stack on
+    // every fleet restart only pollutes the error log and trains the eye
+    // to ignore real failures (it cost a full mis-triage during the
+    // 2026-05-18 RSS investigation). Treat it as a debug-level soft skip;
+    // let any other error propagate to the existing ERROR path unchanged.
+    let allDue;
+    try {
+      allDue = getDueOutboundMessages(outDb);
+    } catch (err) {
+      // Match the whole SQLITE_READONLY* / SQLITE_BUSY* extended-code
+      // family by prefix. The production teardown race surfaces as
+      // SQLITE_READONLY_ROLLBACK (readonly handle can't replay the hot
+      // journal) — matching only the bare 'SQLITE_READONLY' would miss it
+      // and re-introduce the exact ERROR-log spam this guards against.
+      const code = (err as { code?: string } | null)?.code ?? '';
+      if (code.startsWith('SQLITE_READONLY') || code.startsWith('SQLITE_BUSY')) {
+        log.debug('outbound.db busy mid-journal (container teardown), will retry next poll', {
+          sessionId: session.id,
+          agentGroupId: session.agent_group_id,
+          code,
+        });
+        return;
+      }
+      throw err;
+    }
     if (allDue.length === 0) return;
 
     // Filter out already-delivered messages using inbound.db's delivered table

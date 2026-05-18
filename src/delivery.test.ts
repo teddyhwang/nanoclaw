@@ -221,6 +221,56 @@ describe('deliverSessionMessages — retry and permanent failure', () => {
   });
 });
 
+describe('deliverSessionMessages — transient outbound.db journal race', () => {
+  // The host opens outbound.db readonly; the container writes it in
+  // journal_mode=DELETE. A container torn down mid-write leaves a hot
+  // rollback journal. SQLite must roll it back to read consistently, but
+  // rollback is a write the readonly handle refuses → SQLITE_READONLY.
+  // This must be a silent, non-destructive, self-healing soft skip — NOT
+  // a thrown error and NOT a permanent delivery failure. (2026-05-18: this
+  // exact error spammed the error log and caused a mis-triage.)
+  it('swallows SQLITE_READONLY mid-journal, does not fail the message, recovers next poll', async () => {
+    seedAgentAndChannel();
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound('ag-1', session.id, 'out-journal-race');
+
+    let delivered = 0;
+    setDeliveryAdapter({
+      async deliver() {
+        delivered++;
+        return 'plat-ok';
+      },
+    });
+
+    // Plant a hot rollback journal next to outbound.db. A non-empty
+    // -journal makes SQLite attempt journal playback on open/read; the
+    // readonly host handle can't write the rollback → SQLITE_READONLY,
+    // exactly the production teardown race.
+    const journalPath = `${outboundDbPath('ag-1', session.id)}-journal`;
+    fs.writeFileSync(journalPath, Buffer.alloc(512, 1));
+
+    // Must NOT throw and must NOT call the adapter (read failed before
+    // any message was dispatched).
+    await expect(deliverSessionMessages(session)).resolves.toBeUndefined();
+    expect(delivered).toBe(0);
+
+    // The message must NOT be marked failed — it stays undelivered,
+    // eligible for the next poll.
+    let inDb = openInboundDb('ag-1', session.id);
+    expect(getDeliveredIds(inDb).has('out-journal-race')).toBe(false);
+    inDb.close();
+
+    // Journal clears (container finished/exited) → next poll delivers it.
+    fs.rmSync(journalPath);
+    await deliverSessionMessages(session);
+    expect(delivered).toBe(1);
+
+    inDb = openInboundDb('ag-1', session.id);
+    expect(getDeliveredIds(inDb).has('out-journal-race')).toBe(true);
+    inDb.close();
+  });
+});
+
 describe('deliverSessionMessages — permission check', () => {
   it('rejects delivery to an unauthorized channel destination', async () => {
     seedAgentAndChannel();
