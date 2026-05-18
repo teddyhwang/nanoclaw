@@ -5,11 +5,14 @@ import {
   clearAllSessionTrackingState,
   clearContinuation,
   clearContinuationStartedAt,
+  clearCurrentBatchReplyTarget,
   getContinuation,
   getContinuationStartedAt,
+  getCurrentBatchReplyTarget,
   migrateLegacyContinuation,
   setContinuation,
   setContinuationStartedAt,
+  setCurrentBatchReplyTarget,
 } from './session-state.js';
 
 beforeEach(() => {
@@ -68,9 +71,7 @@ describe('session-state — per-provider continuations', () => {
     expect(getContinuation('codex')).toBeUndefined();
     expect(getContinuationStartedAt('claude')).toBeUndefined();
     expect(getContinuationStartedAt('codex')).toBeUndefined();
-    const remaining = getOutboundDb()
-      .prepare('SELECT key FROM session_state ORDER BY key')
-      .all() as { key: string }[];
+    const remaining = getOutboundDb().prepare('SELECT key FROM session_state ORDER BY key').all() as { key: string }[];
     expect(remaining.map((r) => r.key)).toEqual(['last_user_seen']);
   });
 
@@ -155,5 +156,57 @@ describe('session-state — legacy migration', () => {
 
     const second = migrateLegacyContinuation('claude');
     expect(second).toBe('once');
+  });
+});
+
+describe('session-state — current batch reply target (tri-state)', () => {
+  test('a real message id round-trips back as that id', () => {
+    setCurrentBatchReplyTarget('1505756483206512700:ag-x');
+    expect(getCurrentBatchReplyTarget()).toBe('1505756483206512700:ag-x');
+  });
+
+  // Regression for the 8875a91 NUL-sentinel bug: the authoritative-null
+  // case (poll-loop says "task/accumulate turn — NO reply pill") was
+  // encoded as REPLY_TARGET_NONE = '\0none'. SQLite TEXT silently
+  // truncates at the first NUL, so the row stored/read back as '' →
+  // getCurrentBatchReplyTarget() returned `undefined` (legacy path)
+  // instead of `null`. resolveInReplyTo then fell to the racy
+  // isTaskOnlyTurn() heuristic and reply-pilled RSS/AI-status broadcasts
+  // onto a stale chat message (observed live 2026-05-18 in AI Friends).
+  // This test round-trips through the real outbound.db and MUST see
+  // `null`, not `undefined` — it fails on the NUL sentinel.
+  test('authoritative null round-trips back as null, not undefined', () => {
+    setCurrentBatchReplyTarget(null);
+    const v = getCurrentBatchReplyTarget();
+    expect(v).toBeNull();
+    expect(v).not.toBeUndefined();
+  });
+
+  test('empty-string id is normalized to the authoritative-null sentinel', () => {
+    setCurrentBatchReplyTarget('');
+    expect(getCurrentBatchReplyTarget()).toBeNull();
+  });
+
+  test('the NONE sentinel survives the SQLite TEXT round-trip intact', () => {
+    setCurrentBatchReplyTarget(null);
+    const raw = getOutboundDb()
+      .prepare("SELECT value FROM session_state WHERE key = 'current_batch:in_reply_to'")
+      .get() as { value: string } | undefined;
+    expect(raw).toBeDefined();
+    // Must be non-empty and NUL-free, or SQLite truncates it to '' and the
+    // tri-state collapses (this is exactly what the '\0none' bug did).
+    expect(raw!.value.length).toBeGreaterThan(0);
+    expect(raw!.value.includes('\0')).toBe(false);
+  });
+
+  test('absent key reads back as undefined (legacy fallback path)', () => {
+    expect(getCurrentBatchReplyTarget()).toBeUndefined();
+  });
+
+  test('clear drops the key so it reads back as undefined', () => {
+    setCurrentBatchReplyTarget('some-id');
+    expect(getCurrentBatchReplyTarget()).toBe('some-id');
+    clearCurrentBatchReplyTarget();
+    expect(getCurrentBatchReplyTarget()).toBeUndefined();
   });
 });
