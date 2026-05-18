@@ -6,10 +6,12 @@ import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/con
 import {
   clearContinuation,
   clearContinuationStartedAt,
+  clearCurrentBatchReplyTarget,
   getContinuationStartedAt,
   migrateLegacyContinuation,
   setContinuation,
   setContinuationStartedAt,
+  setCurrentBatchReplyTarget,
 } from './db/session-state.js';
 import { computeRotationDate, evaluateRotation } from './session-rotation.js';
 import { TIMEZONE } from './timezone.js';
@@ -406,7 +408,17 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
     // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
     // can stamp it on outbound rows — needed for a2a return-path routing.
+    // Two transports, both required: module state for any in-process
+    // consumer, AND session_state (outbound.db) because the built-in MCP
+    // server runs as a separate stdio subprocess that cannot see this
+    // process's module state. The DB value is the AUTHORITATIVE reply
+    // target — it is `null` for task-only / accumulate-only turns
+    // (extractRouting → pickInReplyToMessage already excluded task rows),
+    // which is exactly the signal that stops a recurring RSS/status post
+    // from inheriting a stale human @mention's reply pill. See
+    // setCurrentBatchReplyTarget's docstring for the full incident chain.
     setCurrentInReplyTo(routing.inReplyTo);
+    setCurrentBatchReplyTarget(routing.inReplyTo);
     try {
       const result = await processQuery(
         query,
@@ -484,6 +496,11 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       }
     } finally {
       clearCurrentInReplyTo();
+      // Drop the DB-published target too. Once the key is absent the MCP
+      // subprocess falls back to its legacy heuristic — correct for any
+      // stray off-turn send, and prevents a finished turn's target from
+      // leaking onto the next turn before poll-loop republishes.
+      clearCurrentBatchReplyTarget();
     }
 
     // Ensure completed even if processQuery ended without a result event
@@ -1089,6 +1106,13 @@ async function processQuery(
         const target = pickInReplyToMessage(keep);
         if (target?.id) {
           routing.inReplyTo = target.id;
+          // Re-publish on BOTH transports. The DB transport is what the
+          // stdio MCP subprocess actually reads; without this republish a
+          // long multi-batch turn would keep the subprocess pinned to the
+          // ORIGINAL batch's target (set at the top of the turn) and
+          // reply-pill follow-up sends onto the wrong message.
+          setCurrentInReplyTo(target.id);
+          setCurrentBatchReplyTarget(target.id);
         }
       } catch (err) {
         // Without this catch the rejection escapes the void IIFE and Node

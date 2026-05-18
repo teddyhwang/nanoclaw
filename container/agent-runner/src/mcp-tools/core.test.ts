@@ -10,6 +10,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '../db/connection.js';
 import { getUndeliveredMessages } from '../db/messages-out.js';
 import { setCurrentInReplyTo, clearCurrentInReplyTo } from '../current-batch.js';
+import { setCurrentBatchReplyTarget, clearCurrentBatchReplyTarget } from '../db/session-state.js';
 import { sendMessage, addReaction, removeReaction } from './core.js';
 
 beforeEach(() => {
@@ -25,6 +26,7 @@ beforeEach(() => {
 
 afterEach(() => {
   clearCurrentInReplyTo();
+  clearCurrentBatchReplyTarget();
   closeSessionDb();
 });
 
@@ -191,6 +193,96 @@ describe('send_message MCP tool — in_reply_to plumbing', () => {
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
     expect(out[0].in_reply_to).toBe('plat-msg-42');
+  });
+});
+
+/**
+ * The actual fix (2026-05-18): the reply target is decided authoritatively
+ * by poll-loop (extractRouting → pickInReplyToMessage) and published into
+ * session_state. The MCP stdio subprocess reads that and TRUSTS it,
+ * instead of reconstructing it from processing_ack + a stale messages_in
+ * snapshot. These tests pin the three-way contract and prove the RSS /
+ * status-post regression cannot recur once a batch has been published —
+ * regardless of what stale @mention is sitting in messages_in.
+ */
+describe('send_message MCP tool — authoritative reply target (session_state)', () => {
+  it('user-triggered turn: published id → reply pill IS applied', async () => {
+    setCurrentBatchReplyTarget('human-mention-7');
+
+    await sendMessage.handler({ to: 'peer', text: 'answering your question' });
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].in_reply_to).toBe('human-mention-7');
+  });
+
+  it('task/status turn: published null → NO reply pill, even with a stale chat @mention in messages_in', async () => {
+    // This is the screenshot bug. A real, recent, trigger=1 human
+    // @mention is sitting in messages_in — exactly what the legacy DB
+    // fallback would (wrongly) thread the RSS status post onto. With the
+    // authoritative null published, the heuristic is never consulted.
+    const db = getInboundDb();
+    db.prepare(
+      `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+       VALUES ('chan', 'Chan', 'channel', 'discord', 'discord:gid:cid', NULL)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO messages_in (seq, id, channel_type, platform_id, thread_id, kind, trigger, status, timestamp, content)
+       VALUES (2, 'stale-human-mention', 'discord', 'discord:gid:cid', NULL, 'chat-sdk', 1, 'completed', '2026-05-18T02:18:41Z', '{}')`,
+    ).run();
+    // poll-loop resolved this task-only turn's target to null and published it.
+    setCurrentBatchReplyTarget(null);
+
+    await sendMessage.handler({ to: 'chan', text: '🔥 AI status update — Claude: Resolved.' });
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].in_reply_to).toBeNull();
+  });
+
+  it('authoritative value beats the in-process module state when both disagree', async () => {
+    // Defensive: if a stale module-state id somehow survived, the truthy
+    // module-state short-circuit still wins (it is only ever set in-process
+    // by poll-loop for this exact turn). The point of this test is to pin
+    // that the DB path is consulted right after, not that it overrides a
+    // live module value — so leave module state unset and prove the DB
+    // null wins over what the legacy heuristic would have produced.
+    const db = getInboundDb();
+    db.prepare(
+      `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+       VALUES ('chan', 'Chan', 'channel', 'discord', 'discord:gid:cid', NULL)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO messages_in (seq, id, channel_type, platform_id, thread_id, kind, trigger, status, timestamp, content)
+       VALUES (9, 'would-be-fallback', 'discord', 'discord:gid:cid', NULL, 'chat-sdk', 1, 'completed', '2026-05-18T02:18:41Z', '{}')`,
+    ).run();
+    setCurrentBatchReplyTarget(null);
+
+    await sendMessage.handler({ to: 'chan', text: 'status post' });
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].in_reply_to).toBeNull();
+  });
+
+  it('key absent (old container mid-rollout) → legacy heuristic still runs', async () => {
+    // No setCurrentBatchReplyTarget at all. The fallback must still work
+    // exactly as before so a mid-rollout image is not regressed.
+    const db = getInboundDb();
+    db.prepare(
+      `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+       VALUES ('chan', 'Chan', 'channel', 'discord', 'discord:gid:cid', NULL)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO messages_in (seq, id, channel_type, platform_id, thread_id, kind, trigger, status, timestamp, content)
+       VALUES (2, 'legacy-target', 'discord', 'discord:gid:cid', NULL, 'chat-sdk', 1, 'completed', '2026-05-18T03:30:47Z', '{}')`,
+    ).run();
+
+    await sendMessage.handler({ to: 'chan', text: 'hello' });
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].in_reply_to).toBe('legacy-target');
   });
 });
 

@@ -11,6 +11,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { getCurrentInReplyTo } from '../current-batch.js';
+import { getCurrentBatchReplyTarget } from '../db/session-state.js';
 import { getInboundDb, getOutboundDb } from '../db/connection.js';
 import { findByName, getAllDestinations } from '../destinations.js';
 import { getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
@@ -21,41 +22,29 @@ import type { McpToolDefinition } from './types.js';
 /**
  * Resolve in_reply_to for an outbound row.
  *
- * The upstream design uses module-level `currentInReplyTo` populated by
- * poll-loop's `setCurrentInReplyTo(routing.inReplyTo)`. That works when the
- * MCP tool runs in the same process as poll-loop (upstream tests do this),
- * but the nanoclaw built-in MCP server is configured as `type: 'stdio'`
- * (see container/agent-runner/src/index.ts), so it's spawned as a SEPARATE
- * bun subprocess. Module state in that subprocess is uninitialized — every
- * `send_message` call read `null` and outbounds went out with no reply
- * pill, even though poll-loop had correctly picked a target on its side.
+ * PRIMARY mechanism (see resolveInReplyTo): poll-loop publishes the
+ * batch's already-resolved reply target into `session_state`
+ * (outbound.db) via `setCurrentBatchReplyTarget`. The built-in MCP
+ * server runs as a SEPARATE stdio subprocess (index.ts spawns
+ * `bun run mcp-tools/index.ts`), so poll-loop's in-process
+ * `setCurrentInReplyTo` module state is invisible here — the DB row is
+ * the cross-process transport. That value already went through
+ * `extractRouting → pickInReplyToMessage`, so it is authoritatively
+ * `null` for task-only / accumulate-only turns and the triggering
+ * message id for a user-addressed turn. When the key is present we
+ * trust it and never reconstruct.
  *
- * Fall back to a DB query (same shape as poll-loop's `resolveDestination-
- * Thread`): the newest trigger=1 non-task inbound row for the destination's
- * channel+platform. Filters out task rows (synthetic UUIDs) and trigger=0
- * accumulate rows for the same reasons documented in poll-loop.ts.
- *
- * Task-turn guard: poll-loop computes `taskOnlyWake` (the wake's only
- * trigger rows are kind='task') and, for those turns, `extractRouting`'s
- * `pickInReplyToMessage` correctly yields null — a scheduled task fire
- * is not answering any human message, so it must post as a plain
- * message, not a reply. But that null lives in poll-loop's process
- * module state and never reaches this stdio subprocess, so the bare
- * fallback below would still hunt up the newest human @mention and
- * reply-pill the task post onto a stale, unrelated message (observed
- * 2026-05-15: an RSS status post threaded under "@Teddy try again look
- * at the cybertron docs"). The DB-visible equivalent of `taskOnlyWake`
- * is processing_ack: poll-loop marks the in-flight batch 'processing'
- * before the agent runs, so during a task-only turn every 'processing'
- * row maps to a kind='task' messages_in row. If there is no
- * 'processing' NON-task row, this turn isn't answering a chat message
- * — suppress the reply target. A task that *wants* to reply still can
- * by passing an explicit in_reply_to through the tool call (handled by
- * the caller, not this fallback).
- *
- * Module state still takes precedence when populated — keeps in-process
- * tests deterministic and lets future in-process MCP wirings short-circuit
- * the DB hop.
+ * `isTaskOnlyTurn()` below is the DEMOTED legacy fallback, reached only
+ * when the session_state key is entirely absent (an old container image
+ * mid-rollout). It reconstructs `taskOnlyWake` from processing_ack:
+ * during a task-only turn the only 'processing' rows are kind='task',
+ * so if there is no 'processing' NON-task row this turn isn't answering
+ * a chat message and the reply target is suppressed. This heuristic
+ * races poll-loop's cross-process markProcessing/markCompleted and was
+ * the source of the recurring RSS/status reply-pill regression
+ * (2026-05-11/15/18) precisely because it was load-bearing; it is no
+ * longer the mechanism, only a safety net. Do not "improve" it — the
+ * fix was to stop relying on it.
  */
 function isTaskOnlyTurn(): boolean {
   // True when at least one row is processing AND none of the
@@ -65,9 +54,9 @@ function isTaskOnlyTurn(): boolean {
   // DB hiccup can't silently strip reply pills from real chat replies.
   try {
     const out = getOutboundDb();
-    const processing = out
-      .prepare("SELECT message_id FROM processing_ack WHERE status = 'processing'")
-      .all() as Array<{ message_id: string }>;
+    const processing = out.prepare("SELECT message_id FROM processing_ack WHERE status = 'processing'").all() as Array<{
+      message_id: string;
+    }>;
     if (processing.length === 0) return false;
     const ids = processing.map((r) => r.message_id);
     const placeholders = ids.map(() => '?').join(',');
@@ -88,12 +77,32 @@ function isTaskOnlyTurn(): boolean {
   }
 }
 
-function resolveInReplyTo(
-  channelType: string,
-  platformId: string,
-): string | null {
+function resolveInReplyTo(channelType: string, platformId: string): string | null {
   const fromBatch = getCurrentInReplyTo();
   if (fromBatch) return fromBatch;
+
+  // Authoritative path. poll-loop publishes the batch's resolved reply
+  // target into session_state (outbound.db) precisely because this MCP
+  // server runs as a separate stdio subprocess and can't see poll-loop's
+  // module state. That value already went through extractRouting →
+  // pickInReplyToMessage, which yields:
+  //   - a triggering message id  → a real user-addressed turn: reply-pill it.
+  //   - null                     → a task-only / accumulate-only turn:
+  //                                 NO reply pill (this is the fix for the
+  //                                 recurring RSS/status post threading onto
+  //                                 a stale @mention — 2026-05-11/15/18).
+  //   - undefined (key absent)   → no batch published (old container
+  //                                 mid-rollout) → fall through to legacy.
+  // When the key is present we TRUST it absolutely and never reconstruct —
+  // the reconstruction is exactly what kept regressing.
+  const published = getCurrentBatchReplyTarget();
+  if (published !== undefined) return published; // string → reply; null → no pill
+
+  // ---- Legacy fallback (key absent only) -------------------------------
+  // Reached on a container that predates the session_state transport.
+  // Kept intact so a mid-rollout old image still suppresses task-turn
+  // pills as well as it did before; new images never get here.
+  //
   // Scheduled-task fires must not inherit a stale chat reply target.
   if (isTaskOnlyTurn()) return null;
   try {
