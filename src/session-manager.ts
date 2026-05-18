@@ -148,8 +148,26 @@ export function initSessionFolder(agentGroupId: string, sessionId: string): void
  * Write the default reply routing for a session into its inbound.db.
  *
  * The container reads this as the default (channel_type, platform_id, thread_id)
- * for outbound messages when the agent doesn't specify an explicit destination.
- * Derived from session.messaging_group_id → messaging_groups row + session.thread_id.
+ * for outbound messages when the agent doesn't specify an explicit destination,
+ * and (via getSessionRouting) as the source-chat coords stamped into
+ * search_conversations / escalate_to_dev_agent requests.
+ *
+ * Coords are derived from session.messaging_group_id → messaging_groups row
+ * for a single-chat session. For a **merged / agent-shared session**
+ * (session.messaging_group_id is NULL by design — one session serves N
+ * chats, e.g. the merged AI Friends / Boys Night / Golf "Degenerates"
+ * group) that derivation yields NULL, which used to write empty
+ * session_routing. That broke every consumer that needs "which chat is
+ * this turn about": search_conversations fell through to its
+ * no-chat-scope error (2026-05-17 AI Friends — user got "session has no
+ * messaging_group_id and no source-chat coords"), and escalate_to_dev_agent
+ * only worked by accident via a different coords path. Fix: when
+ * messaging_group_id is NULL, fall back to the most-recent **triggering**
+ * chat row in this session's inbound.db — that row's channel_type /
+ * platform_id IS the chat the current wake is about (this is the same
+ * per-message-coords mechanism the engine's delivery path already uses to
+ * route agent-shared replies, not a parallel source of truth). thread_id
+ * still comes from the session row.
  *
  * Called on every container wake alongside the agent-to-agent module's
  * writeDestinations() (when installed) so the latest routing is always in
@@ -174,6 +192,43 @@ export function writeSessionRouting(agentGroupId: string, sessionId: string): vo
 
   const db = openInboundDb(agentGroupId, sessionId);
   try {
+    // Agent-shared / merged session: no messaging_group_id to derive
+    // from. Use the most-recent triggering chat row's coords — the chat
+    // this wake is actually handling. Without this, getSessionRouting()
+    // returns nulls for these sessions and source-chat-scoped tools
+    // (search_conversations, escalate_to_dev_agent) have no chat scope.
+    if (!channelType || !platformId) {
+      try {
+        const row = db
+          .prepare(
+            // channel_type='agent' is the agent-to-agent pseudo-channel
+            // (agent-route.ts writes a2a inbound as kind='chat',
+            // channel_type='agent'). It is NOT a user-facing chat scope —
+            // getMessagingGroupByPlatform could never resolve it, and an
+            // A2A-only session legitimately has no chat routing (bug
+            // #2332's known shape). Exclude it so an a2a row never gets
+            // mistaken for "the chat this wake is about".
+            `SELECT channel_type, platform_id
+               FROM messages_in
+              WHERE trigger = 1
+                AND kind IN ('chat', 'chat-sdk')
+                AND channel_type IS NOT NULL
+                AND channel_type != 'agent'
+                AND platform_id IS NOT NULL
+              ORDER BY seq DESC
+              LIMIT 1`,
+          )
+          .get() as { channel_type: string; platform_id: string } | undefined;
+        if (row) {
+          channelType = row.channel_type;
+          platformId = row.platform_id;
+        }
+      } catch {
+        // messages_in shape older than expected — leave coords null,
+        // same degraded behavior as before this fallback existed.
+      }
+    }
+
     upsertSessionRouting(db, {
       channel_type: channelType,
       platform_id: platformId,

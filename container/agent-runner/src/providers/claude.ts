@@ -457,7 +457,20 @@ export class ClaudeProvider implements AgentProvider {
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'compact_boundary') {
           const meta = (message as { compact_metadata?: { pre_tokens?: number } }).compact_metadata;
           const detail = meta?.pre_tokens ? ` (${meta.pre_tokens.toLocaleString()} tokens compacted)` : '';
-          yield { type: 'result', text: `Context compacted${detail}.` };
+          // compact_boundary is an SDK *lifecycle* signal ("your context
+          // was just auto-compacted"), NOT an agent turn result. Yielding
+          // it as `type:'result'` (the prior bug) made processQuery feed
+          // "Context compacted (N tokens)." to dispatchResultText with no
+          // <message> wrapper → the unwrapped-output safety-net broadcast
+          // it to the channel with a [degraded] label (observed 2026-05-17
+          // in AI Friends, mid-turn after the search_conversations fix:
+          // user saw "[degraded — agent did not wrap reply...] Context
+          // compacted (135,106 tokens compacted)." instead of the agent
+          // just compacting and carrying on — which it did, the very next
+          // turn). It's a status signal like task_notification below:
+          // emit as `progress` so the poll loop logs it and never delivers
+          // it. Compaction is transparent to the user by design.
+          yield { type: 'progress', message: `Context compacted${detail}.` };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'task_notification') {
           const tn = message as { summary?: string };
           yield { type: 'progress', message: tn.summary || 'Task notification' };

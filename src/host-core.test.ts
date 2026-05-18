@@ -915,7 +915,13 @@ describe('writeSessionRouting', () => {
     expect(row!.thread_id).toBeNull();
   });
 
-  it('writes null routing for agent-shared session (no messaging group)', async () => {
+  it('writes null routing for agent-shared session with NO inbound yet (nothing to derive from)', async () => {
+    // A merged/agent-shared session has no messaging_group_id AND, before
+    // any message lands, no triggering row either — so coords are
+    // genuinely unresolvable and stay null (degraded, but honest; the
+    // host's search handler then returns its no-chat-scope error rather
+    // than scope-creeping). The interesting case — coords DO resolve once
+    // a triggering row exists — is the next test.
     createAgentGroup({
       id: 'ag-1',
       name: 'Agent',
@@ -941,6 +947,74 @@ describe('writeSessionRouting', () => {
     expect(row!.channel_type).toBeNull();
     expect(row!.platform_id).toBeNull();
     expect(row!.thread_id).toBeNull();
+  });
+
+  it('agent-shared session: derives coords from the latest triggering chat row (2026-05-17 AI Friends fix)', async () => {
+    // The merged Degenerates regression: messaging_group_id is NULL by
+    // design, so the messaging-group derivation yields nothing. Before
+    // this fix session_routing was written empty → getSessionRouting()
+    // returned nulls → search_conversations / escalate had no chat scope.
+    // Now the most-recent trigger=1 chat row's coords ARE the routing.
+    createAgentGroup({
+      id: 'ag-1',
+      name: 'Agent',
+      folder: 'agent',
+      agent_provider: null,
+      created_at: now(),
+    });
+
+    const { session } = resolveSession('ag-1', null, null, 'agent-shared');
+
+    // An older triggering row from a DIFFERENT chat, then the current
+    // one — must pick the newest (highest seq), like the engine's
+    // per-message reply routing does.
+    await writeSessionMessage('ag-1', session.id, {
+      id: 'msg-old',
+      kind: 'chat-sdk',
+      timestamp: now(),
+      channelType: 'discord',
+      platformId: 'discord:guild:OTHER-chat',
+      trigger: 1,
+      content: JSON.stringify({ text: 'earlier, different chat' }),
+    });
+    await writeSessionMessage('ag-1', session.id, {
+      id: 'msg-current',
+      kind: 'chat-sdk',
+      timestamp: now(),
+      channelType: 'discord',
+      platformId: 'discord:1158397269079506955:1355364313342148629',
+      trigger: 1,
+      content: JSON.stringify({ text: 'the message this wake is about' }),
+    });
+    // A non-triggering (accumulate-only) row that must be ignored even
+    // though it is newest.
+    await writeSessionMessage('ag-1', session.id, {
+      id: 'msg-ambient',
+      kind: 'chat-sdk',
+      timestamp: now(),
+      channelType: 'discord',
+      platformId: 'discord:guild:AMBIENT-noise',
+      trigger: 0,
+      content: JSON.stringify({ text: 'ambient chatter' }),
+    });
+
+    writeSessionRouting('ag-1', session.id);
+
+    const db = new Database(inboundDbPath('ag-1', session.id));
+    const row = db.prepare('SELECT channel_type, platform_id, thread_id FROM session_routing WHERE id = 1').get() as
+      | {
+          channel_type: string | null;
+          platform_id: string | null;
+          thread_id: string | null;
+        }
+      | undefined;
+    db.close();
+
+    expect(row).toBeDefined();
+    expect(row!.channel_type).toBe('discord');
+    // The newest trigger=1 row — not the older trigger=1, not the newer
+    // trigger=0 ambient row.
+    expect(row!.platform_id).toBe('discord:1158397269079506955:1355364313342148629');
   });
 
   it('includes thread_id from per-thread session', async () => {
@@ -1131,9 +1205,16 @@ describe('agent-to-agent routing', () => {
     expect(discordA2a).toHaveLength(0);
   });
 
-  it('BUG: A2A-only session gets null session_routing (#2332)', async () => {
-    // Researcher only has an agent-shared session (no channel wiring).
-    // writeSessionRouting writes nulls because messaging_group_id is null.
+  it('A2A-only session correctly gets null session_routing (no user chat scope) (#2332)', async () => {
+    // Researcher only has an agent-shared session reached via
+    // agent-to-agent (no channel wiring). messaging_group_id is null AND
+    // the only inbound is an a2a row (kind='chat', channel_type='agent').
+    // The 2026-05-17 agent-shared coords fallback deliberately EXCLUDES
+    // channel_type='agent' (it is the a2a pseudo-channel, not a
+    // searchable user chat), so routing stays null here — which is the
+    // correct answer for an A2A-only session, not the bug #2332 once
+    // implied. A session that also has a real chat row would resolve via
+    // that row (covered by the writeSessionRouting agent-shared test).
     const { routeAgentMessage } = await import('./modules/agent-to-agent/agent-route.js');
 
     const { session: paSession } = resolveSession('ag-pa', 'mg-slack', null, 'shared');
@@ -1157,7 +1238,8 @@ describe('agent-to-agent routing', () => {
       | undefined;
     rDb.close();
 
-    // BUG: session_routing is all null — researcher has no default routing
+    // Correct: an A2A-only session has no user chat scope, so routing is
+    // null (the a2a row's channel_type='agent' is excluded by design).
     expect(routing).toBeDefined();
     expect(routing!.channel_type).toBeNull();
     expect(routing!.platform_id).toBeNull();
