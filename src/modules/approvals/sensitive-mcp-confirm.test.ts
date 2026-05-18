@@ -24,6 +24,20 @@ vi.mock('../../session-manager.js', () => ({
   writeSessionMessage: (...args: unknown[]) => writeSessionMessage(...args),
 }));
 
+// Fix B: the confirm handler now calls dashboard-server to replay the
+// held MCP call. Mock the client so the suite is hermetic (no real
+// localhost fetch) and so we can assert the engine-driven replay path.
+const replayConfirmedMcpCall = vi.fn(
+  async (..._args: unknown[]): Promise<unknown> => ({
+    status: 'ok',
+    content: [{ type: 'text', text: 'CALENDAR-RESULT' }],
+    isError: false,
+  }),
+);
+vi.mock('./mcp-replay-client.js', () => ({
+  replayConfirmedMcpCall: (...args: unknown[]) => replayConfirmedMcpCall(...args),
+}));
+
 import { createAgentGroup, closeDb, initTestDb, runMigrations } from '../../db/index.js';
 import {
   createSession,
@@ -236,6 +250,80 @@ describe('handleApprovalsResponse — sensitive_mcp_confirm confirm/cancel/click
     expect(claimed).toBe(true);
     expect(getPendingApproval(qid)).toBeUndefined();
     expect(getConfirmationGrant(SESSION, ACTOR)).toBeUndefined();
+  });
+
+  // ── Fix B (2026-05-18): engine-driven replay on Confirm ───────────
+  async function seedConfirmCardWithGroup(): Promise<string> {
+    await requestConfirmation({
+      session: {
+        id: SESSION,
+        agent_group_id: AG,
+        messaging_group_id: MG,
+      } as never,
+      agentName: 'Test',
+      action: 'sensitive_mcp_confirm',
+      actorId: ACTOR,
+      // groupFolder present ⇒ the new engine-driven replay path is used.
+      payload: {
+        integration: 'google',
+        tool: 'google_call',
+        groupFolder: 'fam',
+      },
+      title: 'Confirm',
+      question: 'ok?',
+    });
+    return JSON.parse(delivered[0].body).questionId as string;
+  }
+
+  it('Fix B: Confirm replays the call engine-side and injects the REAL result (no model re-issue)', async () => {
+    replayConfirmedMcpCall.mockResolvedValueOnce({
+      status: 'ok',
+      content: [{ type: 'text', text: 'CALENDAR-RESULT' }],
+      isError: false,
+    });
+    const qid = await seedConfirmCardWithGroup();
+    await handleApprovalsResponse(click(qid, 'confirm', ACTOR));
+
+    // Grant still created (defense-in-depth for OTHER sensitive calls).
+    expect(getConfirmationGrant(SESSION, ACTOR)).toBeDefined();
+    // The replay client was called with the exact gate identity.
+    expect(replayConfirmedMcpCall).toHaveBeenCalledWith({
+      groupFolder: 'fam',
+      integration: 'google',
+      tool: 'google_call',
+    });
+    // The REAL tool result was injected back into the session as a
+    // system message — NOT a "re-issue the call" instruction.
+    const injected = writeSessionMessage.mock.calls
+      .map((c) => JSON.parse((c[2] as { content: string }).content).text)
+      .join('\n');
+    expect(injected).toMatch(/CALENDAR-RESULT/);
+    expect(injected).not.toMatch(/re-issue the call and it will go through/);
+  });
+
+  it('Fix B: replay expired (3-min TTL elapsed) → definitive non-looping message', async () => {
+    replayConfirmedMcpCall.mockResolvedValueOnce({ status: 'expired' });
+    const qid = await seedConfirmCardWithGroup();
+    await handleApprovalsResponse(click(qid, 'confirm', ACTOR));
+    const injected = writeSessionMessage.mock.calls
+      .map((c) => JSON.parse((c[2] as { content: string }).content).text)
+      .join('\n');
+    expect(injected).toMatch(/could not be auto-completed/);
+    expect(injected).toMatch(/confirmation window elapsed/);
+  });
+
+  it('Fix B: replay round-trip error → surfaces the failure, grant still on record', async () => {
+    replayConfirmedMcpCall.mockResolvedValueOnce({
+      status: 'error',
+      message: 'dashboard unreachable',
+    });
+    const qid = await seedConfirmCardWithGroup();
+    await handleApprovalsResponse(click(qid, 'confirm', ACTOR));
+    expect(getConfirmationGrant(SESSION, ACTOR)).toBeDefined();
+    const injected = writeSessionMessage.mock.calls
+      .map((c) => JSON.parse((c[2] as { content: string }).content).text)
+      .join('\n');
+    expect(injected).toMatch(/dashboard unreachable/);
   });
 
   it('bystander Cancel does NOT consume the row (cannot deny the actor)', async () => {

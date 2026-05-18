@@ -15,22 +15,44 @@
  *      only (the response handler invokes registered handlers solely on
  *      the positive option).
  *
- * Re-entry is **grant-based, not transport-replay**: the engine cannot
- * re-run the credentialed MCP call (it lives in the dashboard-server
- * process). On Confirm we (a) create/refresh the (session_id, actor_id)
- * confirmation grant and (b) tell the agent the action is approved. The
- * agent re-issues the tool call; the preHandler finds the live grant and
- * passes it straight through. The grant *is* the re-entry mechanism —
- * deliberately avoiding a host→dashboard HTTP loopback.
+ * Re-entry is **engine-driven replay** (Fix B, 2026-05-18 — supersedes
+ * the original grant-only, model-voluntary-reissue design). The old path
+ * created a (session,actor) grant and told the model "re-issue the
+ * call"; that relied on the model voluntarily re-emitting the
+ * function_call. Codex does NOT reliably do this after the gate's prior
+ * tool result, so a confirmed action hung forever (Teddy repro: claude
+ * re-issues, codex never does, gate-off works). Now on Confirm we
+ * (a) still create/refresh the (session_id, actor_id) grant — kept as
+ * defense-in-depth so any OTHER sensitive call this session is
+ * friction-free — and (b) call dashboard-server's `/mcp/_replay` so it
+ * runs the stashed, now-grant-satisfied credentialed call IN ITS OWN
+ * process, then we inject the REAL result back into the session. The
+ * model does nothing special; provider/harness-agnostic. This is the
+ * deliberate, bounded host→dashboard loopback the original design
+ * avoided — the necessary price of correctness across providers.
  */
 import { registerApprovalHandler } from './primitive.js';
 import { upsertConfirmationGrant } from '../../db/sessions.js';
 import { log } from '../../log.js';
+import { replayConfirmedMcpCall } from './mcp-replay-client.js';
 
 interface SensitiveMcpConfirmPayload {
   actorId?: string;
   integration?: string;
   tool?: string;
+  /** Set by requestConfirmation() — needed to address the replay. */
+  groupFolder?: string;
+}
+
+/** Flatten an MCP CallToolResult content array to a single text blob for
+ *  injection back into the agent session as a system message. */
+function renderReplayContent(content: { type: string; text?: string; [k: string]: unknown }[]): string {
+  const parts: string[] = [];
+  for (const c of content) {
+    if (c.type === 'text' && typeof c.text === 'string') parts.push(c.text);
+    else parts.push(JSON.stringify(c));
+  }
+  return parts.join('\n').trim();
 }
 
 registerApprovalHandler('sensitive_mcp_confirm', async ({ session, payload, userId, notify }) => {
@@ -62,11 +84,77 @@ registerApprovalHandler('sensitive_mcp_confirm', async ({ session, payload, user
     tool: p.tool,
   });
 
-  // Grant-based re-entry: the agent re-issues the tool call; the preHandler
-  // now finds the live grant and lets it through. Tell it explicitly so it
-  // does, rather than waiting (cli_command parity — system message).
   const what = p.tool ? `\`${p.tool}\`${p.integration ? ` (${p.integration})` : ''}` : 'the requested action';
+
+  // Fix B (2026-05-18): engine-driven replay, NOT model-voluntary
+  // re-issue. The old path told the model "re-issue the call" and relied
+  // on it doing so — codex never reliably did (it does not re-emit a
+  // function_call after the gate's prior result), so a confirmed action
+  // hung forever. Now: we ask dashboard-server to run the stashed,
+  // now-grant-satisfied call in its own process and we inject the REAL
+  // result back into the session. Provider/harness-agnostic; the model
+  // does nothing special. The grant above still stands so any OTHER
+  // sensitive call this session is friction-free.
+  if (!p.groupFolder || !p.integration || !p.tool) {
+    // No replay identity (older/edge payload) — fall back to the legacy
+    // model-reissue nudge rather than silently dropping the action.
+    notify(
+      `Confirmed. ${what} is approved for this session — re-issue the call and it will go through (no further confirmation needed for the rest of this session).`,
+    );
+    return;
+  }
+
+  const outcome = await replayConfirmedMcpCall({
+    groupFolder: p.groupFolder,
+    integration: p.integration,
+    tool: p.tool,
+  });
+
+  if (outcome.status === 'ok') {
+    const rendered = renderReplayContent(outcome.content) || '(the action returned no output)';
+    // Deliver the actual tool result as a system message the agent reads
+    // and continues from — exactly as if the tool had returned inline.
+    notify(
+      `Confirmed — ${what} ran. Result:\n${rendered}\n\n` + `Continue from this result. Do not re-issue the call.`,
+    );
+    log.info('sensitive_mcp_confirm: engine-driven replay delivered', {
+      sessionId: session.id,
+      integration: p.integration,
+      tool: p.tool,
+      isError: outcome.isError,
+    });
+    return;
+  }
+
+  if (outcome.status === 'expired' || outcome.status === 'already_done') {
+    // Bounded loop-exit (task #25): the stash GC'd (3-min TTL) or the
+    // call already ran. Never silent, never a retry-loop — tell the
+    // agent definitively so it can inform the user / move on.
+    notify(
+      `Confirmed, but ${what} could not be auto-completed ` +
+        `(${outcome.status === 'expired' ? 'the confirmation window elapsed' : 'it was already completed'}). ` +
+        `If you still need it, ask the user to trigger the action again.`,
+    );
+    log.warn('sensitive_mcp_confirm: replay not runnable', {
+      sessionId: session.id,
+      integration: p.integration,
+      tool: p.tool,
+      status: outcome.status,
+    });
+    return;
+  }
+
+  // outcome.status === 'error' — replay round-trip failed. Surface it;
+  // the grant still exists so a manual re-issue would also work.
   notify(
-    `Confirmed. ${what} is approved for this session — re-issue the call and it will go through (no further confirmation needed for the rest of this session).`,
+    `Confirmed and approved for this session, but auto-running ${what} ` +
+      `failed (${outcome.message}). You may re-issue the call once — the ` +
+      `confirmation is now on record so it will go straight through.`,
   );
+  log.error('sensitive_mcp_confirm: replay failed', {
+    sessionId: session.id,
+    integration: p.integration,
+    tool: p.tool,
+    message: outcome.message,
+  });
 });
