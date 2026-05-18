@@ -43,6 +43,7 @@
  *   every tool is gated (fail-closed) until Phase 2 fills it.
  */
 import { getAgentGroupByFolder } from '../../db/agent-groups.js';
+import { getSensitiveGateMode } from '../../db/container-configs.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
 import { findSessionByAgentGroup, getConfirmationGrant, touchConfirmationGrant } from '../../db/sessions.js';
 import { log } from '../../log.js';
@@ -280,7 +281,7 @@ export interface SensitiveGateInput {
 }
 
 export type SensitiveGateDecision =
-  | { decision: 'allow'; reason: 'policy_allow' | 'live_grant' }
+  | { decision: 'allow'; reason: 'policy_allow' | 'live_grant' | 'gate_disabled_by_admin' }
   | { decision: 'confirm' }
   | { decision: 'fail_closed'; reason: string };
 
@@ -303,6 +304,26 @@ export async function decideSensitiveGate(input: SensitiveGateInput): Promise<Se
   if (!agentGroup) {
     return { decision: 'fail_closed', reason: `no agent group for folder ${groupFolder}` };
   }
+
+  // Phase 5 — admin-controlled per-agent disable. A workspace owner/global-
+  // admin can mark a trusted agent group 'off'; container-side `ncl` can
+  // NEVER write this (dispatch.ts blocks it for caller==='agent' regardless
+  // of cli_scope), so an injected agent cannot disable its own gate. This
+  // check is AFTER agentGroup resolution on purpose: an unresolvable folder
+  // still fail-closes above — disabling requires a real, admin-configured
+  // group, not a forged/missing one. NULL/unset ⇒ 'enforce' (fail-safe).
+  // Logged loud on every bypass so a disabled gate is never silent.
+  if (getSensitiveGateMode(agentGroup.id) === 'off') {
+    log.warn('sensitive-gate: BYPASSED — admin-disabled for this agent group', {
+      agentGroupId: agentGroup.id,
+      agentGroupName: agentGroup.name,
+      groupFolder,
+      integration,
+      tool,
+    });
+    return { decision: 'allow', reason: 'gate_disabled_by_admin' };
+  }
+
   const session: Session | undefined = findSessionByAgentGroup(agentGroup.id);
   if (!session) {
     return { decision: 'fail_closed', reason: `no active session for agent group ${agentGroup.id}` };

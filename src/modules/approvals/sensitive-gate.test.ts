@@ -29,6 +29,11 @@ vi.mock('../../session-manager.js', () => ({
 }));
 
 import { createAgentGroup, closeDb, initTestDb, runMigrations } from '../../db/index.js';
+import {
+  ensureContainerConfig,
+  getSensitiveGateMode,
+  updateContainerConfigScalars,
+} from '../../db/container-configs.js';
 import { createSession, getConfirmationGrant, upsertConfirmationGrant } from '../../db/sessions.js';
 import { createMessagingGroup } from '../../db/messaging-groups.js';
 import { setDeliveryAdapter, type ChannelDeliveryAdapter } from '../../delivery.js';
@@ -213,5 +218,89 @@ describe('decideSensitiveGate — grant + policy path', () => {
     const r = await decideSensitiveGate(base);
     expect(r).toEqual({ decision: 'allow', reason: 'policy_allow' });
     expect(delivered).toHaveLength(0);
+  });
+});
+
+describe('Phase 5 — admin-controlled per-agent gate disable', () => {
+  const base = {
+    groupFolder: FOLDER,
+    integration: 'google',
+    tool: 'google_call', // unmapped ⇒ would normally require_confirmation
+    args: {},
+    rawSenderId: '777',
+    senderDisplayName: 'Actor',
+  };
+
+  it('getSensitiveGateMode: no config row ⇒ enforce (fail-safe)', () => {
+    seedGroupAndSession(1);
+    expect(getSensitiveGateMode(AG)).toBe('enforce');
+  });
+
+  it('getSensitiveGateMode: NULL column ⇒ enforce; explicit enforce ⇒ enforce', () => {
+    seedGroupAndSession(1);
+    ensureContainerConfig(AG); // row exists, sensitive_gate_mode NULL
+    expect(getSensitiveGateMode(AG)).toBe('enforce');
+    updateContainerConfigScalars(AG, { sensitive_gate_mode: 'enforce' });
+    expect(getSensitiveGateMode(AG)).toBe('enforce');
+  });
+
+  it('getSensitiveGateMode: any junk value ⇒ enforce (only literal "off" disables)', () => {
+    seedGroupAndSession(1);
+    ensureContainerConfig(AG);
+    // Simulate a bad/legacy value sneaking in — must still fail safe.
+    updateContainerConfigScalars(AG, {
+      sensitive_gate_mode: 'disabled' as unknown as 'off',
+    });
+    expect(getSensitiveGateMode(AG)).toBe('enforce');
+  });
+
+  it('mode unset ⇒ gate still runs (unmapped tool ⇒ confirm + card)', async () => {
+    seedGroupAndSession(1);
+    const r = await decideSensitiveGate(base);
+    expect(r.decision).toBe('confirm');
+    expect(delivered).toHaveLength(1);
+  });
+
+  it('mode "off" ⇒ allow with reason gate_disabled_by_admin, BEFORE policy, no card', async () => {
+    seedGroupAndSession(1);
+    ensureContainerConfig(AG);
+    updateContainerConfigScalars(AG, { sensitive_gate_mode: 'off' });
+    // Tool is unmapped — without the bypass this is a guaranteed confirm.
+    const r = await decideSensitiveGate(base);
+    expect(r).toEqual({ decision: 'allow', reason: 'gate_disabled_by_admin' });
+    expect(delivered).toHaveLength(0); // short-circuited before requestConfirmation
+  });
+
+  it('mode "off" short-circuits even a write-classified tool (before policy eval)', async () => {
+    seedGroupAndSession(1); // public channel — a write here would always confirm
+    CLASSIFICATION_REGISTRY.google = { google_call: { classification: 'write' } };
+    ensureContainerConfig(AG);
+    updateContainerConfigScalars(AG, { sensitive_gate_mode: 'off' });
+    const r = await decideSensitiveGate(base);
+    expect(r).toEqual({ decision: 'allow', reason: 'gate_disabled_by_admin' });
+    expect(delivered).toHaveLength(0);
+  });
+
+  it('disable is keyed per agent group: an unresolvable folder still fail-closes', async () => {
+    // No agent group seeded at all. 'off' cannot be reached because there
+    // is no group to carry the setting — the resolution miss wins. Proves
+    // the bypass requires a real, admin-configured group (not a forged or
+    // missing folder).
+    const r = await decideSensitiveGate({ ...base, groupFolder: 'no-such-folder' });
+    expect(r.decision).toBe('fail_closed');
+    expect(delivered).toHaveLength(0);
+  });
+
+  it('flipping "off" → "enforce" re-arms the gate on the next call', async () => {
+    seedGroupAndSession(1);
+    ensureContainerConfig(AG);
+    updateContainerConfigScalars(AG, { sensitive_gate_mode: 'off' });
+    const off = await decideSensitiveGate(base);
+    expect(off).toEqual({ decision: 'allow', reason: 'gate_disabled_by_admin' });
+    updateContainerConfigScalars(AG, { sensitive_gate_mode: 'enforce' });
+    delivered.length = 0;
+    const reenforced = await decideSensitiveGate(base);
+    expect(reenforced.decision).toBe('confirm');
+    expect(delivered).toHaveLength(1);
   });
 });

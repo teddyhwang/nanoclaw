@@ -80,6 +80,11 @@ export function backfillContainerConfigs(): void {
       // stays NULL = legacy `": "` default.
       suppress_embeds: legacy.suppressEmbeds === false ? 0 : 1,
       assistant_prefix_separator: legacy.assistantPrefixSeparator ?? null,
+      // Optimus fork patch (migration 017) — backfilled rows start with
+      // the gate ENFORCED (fail-safe). NULL would also read as enforce;
+      // we leave it NULL rather than writing 'enforce' so a later admin
+      // 'off' is distinguishable from "never configured" in audits.
+      sensitive_gate_mode: null,
       updated_at: new Date().toISOString(),
     };
 

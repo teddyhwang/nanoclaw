@@ -47,6 +47,22 @@ export async function dispatch(req: RequestFrame, ctx: CallerContext): Promise<R
       return err(req.id, 'forbidden', 'CLI access is disabled for this agent group.');
     }
 
+    // Phase 5 — the sensitive-action gate kill-switch is owner/admin-only.
+    // This block is OUTSIDE the cliScope==='group' branch on purpose: it
+    // must hold for EVERY container caller, including cli_scope==='global'
+    // owner agents. An agent (injected or not) disabling its own sensitive
+    // gate is precisely the confused-deputy escalation the gate exists to
+    // stop, so no container-side caller may ever write sensitive_gate_mode
+    // regardless of scope. Host callers (the real `ncl` socket / dashboard)
+    // are unaffected — this branch is `ctx.caller === 'agent'` only.
+    if (req.args.sensitive_gate_mode !== undefined || req.args['sensitive-gate'] !== undefined) {
+      return err(
+        req.id,
+        'forbidden',
+        'The sensitive-action gate is owner/admin-controlled and cannot be changed from inside an agent.',
+      );
+    }
+
     if (cliScope === 'group') {
       const allowed = new Set(['groups', 'sessions', 'destinations', 'members']);
       // Only allow whitelisted resources and general commands (no resource, like help)

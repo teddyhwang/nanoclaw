@@ -1,4 +1,4 @@
-import type { ContainerConfigRow } from '../types.js';
+import type { ContainerConfigRow, SensitiveGateMode } from '../types.js';
 import { getDb } from './connection.js';
 
 const SCALAR_COLUMNS = new Set([
@@ -12,6 +12,8 @@ const SCALAR_COLUMNS = new Set([
   // Optimus fork patch (migration 016).
   'suppress_embeds',
   'assistant_prefix_separator',
+  // Optimus fork patch (migration 017).
+  'sensitive_gate_mode',
 ]);
 const JSON_COLUMNS = new Set(['skills', 'mcp_servers', 'packages_apt', 'packages_npm', 'additional_mounts']);
 
@@ -23,6 +25,19 @@ export function getContainerConfig(agentGroupId: string): ContainerConfigRow | u
 
 export function getAllContainerConfigs(): ContainerConfigRow[] {
   return getDb().prepare('SELECT * FROM container_configs').all() as ContainerConfigRow[];
+}
+
+/**
+ * The single source of truth for "is the sensitive gate on for this agent
+ * group?". NULL, missing row, or any unrecognized value ⇒ `'enforce'`
+ * (fail-safe default — see migration 017). Only an explicit, deliberate
+ * admin `'off'` disables the gate. The gate decision fn and any UI/CLI that
+ * reports the mode MUST go through this so the NULL⇒enforce normalization
+ * lives in exactly one place.
+ */
+export function getSensitiveGateMode(agentGroupId: string): SensitiveGateMode {
+  const row = getContainerConfig(agentGroupId);
+  return row?.sensitive_gate_mode === 'off' ? 'off' : 'enforce';
 }
 
 /** Insert a new config row. Caller must supply all JSON fields (use defaults for empty). */
@@ -69,6 +84,7 @@ export function updateContainerConfigScalars(
       | 'cli_scope'
       | 'suppress_embeds'
       | 'assistant_prefix_separator'
+      | 'sensitive_gate_mode'
     >
   >,
 ): void {

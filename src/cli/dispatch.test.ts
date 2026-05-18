@@ -246,6 +246,62 @@ describe('CLI scope enforcement', () => {
     }
   });
 
+  // ── Phase 5 — sensitive-gate kill-switch is owner/admin-only ──
+  // The guard sits OUTSIDE the cliScope==='group' branch, so it must hold
+  // for EVERY container caller including cli_scope==='global' owner agents.
+  // An agent disabling its own sensitive gate is the exact confused-deputy
+  // escalation the gate exists to stop.
+
+  it('agent (group scope): blocks sensitive_gate_mode change', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+
+    const resp = await dispatch({ id: '1', command: 'groups-test', args: { sensitive_gate_mode: 'off' } }, agentCtx());
+
+    expect(resp.ok).toBe(false);
+    if (!resp.ok) {
+      expect(resp.error.code).toBe('forbidden');
+      expect(resp.error.message).toContain('sensitive-action gate');
+    }
+  });
+
+  it('agent (group scope): blocks --sensitive-gate (hyphenated)', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+
+    const resp = await dispatch({ id: '1', command: 'groups-test', args: { 'sensitive-gate': 'off' } }, agentCtx());
+
+    expect(resp.ok).toBe(false);
+    if (!resp.ok) expect(resp.error.code).toBe('forbidden');
+  });
+
+  it('agent (GLOBAL scope): STILL blocks sensitive_gate_mode change', async () => {
+    // The critical case: a cli_scope==='global' owner agent is otherwise
+    // unrestricted, but must NOT be able to flip its own gate. This is the
+    // gap the guard's placement (outside the 'group' branch) closes.
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+
+    const resp = await dispatch({ id: '1', command: 'groups-test', args: { 'sensitive-gate': 'off' } }, agentCtx());
+
+    expect(resp.ok).toBe(false);
+    if (!resp.ok) {
+      expect(resp.error.code).toBe('forbidden');
+      expect(resp.error.message).toContain('sensitive-action gate');
+    }
+  });
+
+  it('agent (global scope): a NON-gate config change still passes (guard is targeted)', async () => {
+    // Proves the guard only blocks the gate field, not all global-scope
+    // config writes — no collateral lockout.
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'global' });
+
+    const resp = await dispatch({ id: '1', command: 'groups-test', args: { model: 'opus' } }, agentCtx());
+
+    // Not a forbidden-by-gate rejection. (May still fail downstream for
+    // unrelated reasons, but NOT with the sensitive-gate message.)
+    if (!resp.ok) {
+      expect(resp.error.message).not.toContain('sensitive-action gate');
+    }
+  });
+
   it('group: blocks non-group resources', async () => {
     mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
 

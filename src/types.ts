@@ -21,11 +21,20 @@ export interface AgentGroup {
  *  - suppress_embeds: 1 = pass SUPPRESS_EMBEDS flag on Discord outbound
  *    (default for new groups).
  *  - assistant_prefix_separator: separator placed between the assistant
- *    name and message body in shared-number adapters (WhatsApp). */
+ *    name and message body in shared-number adapters (WhatsApp).
+ *  - sensitive_gate_mode: per-agent-group sensitive-action gate control
+ *    (Phase 5, migration 017). NULL/unset ⇒ enforce (fail-safe default);
+ *    'enforce' ⇒ gate runs; 'off' ⇒ admin-disabled, decideSensitiveGate
+ *    short-circuits to allow. Only an owner/global-admin can set 'off';
+ *    container-side ncl can never write it. */
 export interface OptimusContainerConfigExt {
   suppress_embeds: number; // 0 | 1
   assistant_prefix_separator: string | null;
+  sensitive_gate_mode: SensitiveGateMode | null; // null ⇒ enforce
 }
+
+/** Per-agent-group sensitive-action gate mode. `null`/absent ⇒ 'enforce'. */
+export type SensitiveGateMode = 'enforce' | 'off';
 
 /** Per-agent-group container runtime config. Source of truth in the DB;
  *  materialized to `groups/<folder>/container.json` at spawn time. */

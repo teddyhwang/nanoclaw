@@ -29,6 +29,9 @@ function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
     cli_scope: row.cli_scope,
     suppress_embeds: row.suppress_embeds === 1,
     assistant_prefix_separator: row.assistant_prefix_separator,
+    // Phase 5: NULL/unset normalizes to 'enforce' for display so the
+    // operator never sees an ambiguous blank for a security control.
+    sensitive_gate_mode: row.sensitive_gate_mode === 'off' ? 'off' : 'enforce',
     updated_at: row.updated_at,
   };
 }
@@ -125,7 +128,8 @@ registerResource({
       access: 'approval',
       description:
         'Update container config scalar fields. Changes are saved but do NOT take effect until you run `ncl groups restart`. ' +
-        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope.',
+        'Use --id <group-id> and any of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --sensitive-gate. ' +
+        '--sensitive-gate enforce|off controls the sensitive-action confirmation gate for this agent group (owner/admin only; takes effect immediately, no restart needed).',
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');
@@ -135,7 +139,14 @@ registerResource({
         const updates: Partial<
           Pick<
             ContainerConfigRow,
-            'provider' | 'model' | 'effort' | 'image_tag' | 'assistant_name' | 'max_messages_per_prompt' | 'cli_scope'
+            | 'provider'
+            | 'model'
+            | 'effort'
+            | 'image_tag'
+            | 'assistant_name'
+            | 'max_messages_per_prompt'
+            | 'cli_scope'
+            | 'sensitive_gate_mode'
           >
         > = {};
         if (args.provider !== undefined) updates.provider = args.provider as string;
@@ -152,10 +163,20 @@ registerResource({
           }
           updates.cli_scope = scope;
         }
+        if (args['sensitive-gate'] !== undefined || args.sensitive_gate_mode !== undefined) {
+          const mode = (args['sensitive-gate'] ?? args.sensitive_gate_mode) as string;
+          if (!['enforce', 'off'].includes(mode)) {
+            throw new Error('--sensitive-gate must be one of: enforce, off');
+          }
+          // Persist 'enforce' explicitly (vs leaving NULL) so `config get`
+          // reflects a deliberate operator decision; the read path treats
+          // NULL and 'enforce' identically anyway (fail-safe default).
+          updates.sensitive_gate_mode = mode as 'enforce' | 'off';
+        }
 
         if (Object.keys(updates).length === 0) {
           throw new Error(
-            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope',
+            'Nothing to update — provide at least one of: --provider, --model, --effort, --image-tag, --assistant-name, --max-messages-per-prompt, --cli-scope, --sensitive-gate',
           );
         }
 
