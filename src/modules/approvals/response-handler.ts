@@ -53,15 +53,39 @@ export async function handleApprovalsResponse(payload: ResponsePayload): Promise
     return true;
   }
 
-  await handleRegisteredApproval(approval, payload.value, payload.userId ?? '');
+  await handleRegisteredApproval(approval, payload.value, payload.userId ?? '', payload.channelType ?? '');
   return true;
+}
+
+/**
+ * Namespace a raw platform clicker id into the `users(id)` /
+ * `pending_approvals.payload.actorId` form so clicker-auth's equality
+ * check works across channels. MUST stay byte-identical to the engine's
+ * sender namespacing (modules/permissions/index.ts:233-237 and
+ * modules/approvals/sensitive-gate.ts `namespaceActorId`): only prefix
+ * when the raw id has no colon — some platforms (Teams `29:xxx`,
+ * channel-prefixed WhatsApp `whatsapp:...@lid`) already carry a
+ * namespace. Bug C (2026-05-17): the WhatsApp /confirm slash path
+ * (whatsapp-channel.ts:1429) passes the RAW jid `<n>@lid` while
+ * decideSensitiveGate recorded the actor as `whatsapp:<n>@lid`, so a
+ * strict `userId === actorId` made the actor's own Confirm look like a
+ * bystander click — no grant, task never ran, infinite re-prompt.
+ */
+function namespaceClickerId(channelType: string, rawUserId: string): string {
+  if (!rawUserId) return '';
+  return rawUserId.includes(':') ? rawUserId : `${channelType}:${rawUserId}`;
 }
 
 async function handleRegisteredApproval(
   approval: PendingApproval,
   selectedOption: string,
-  userId: string,
+  rawUserId: string,
+  channelType: string,
 ): Promise<void> {
+  // Normalize the clicker id to the namespaced form BEFORE any auth
+  // comparison or grant write — the recorded actorId and pickApprover
+  // ids are all in `<channel>:<handle>` form.
+  const userId = namespaceClickerId(channelType, rawUserId);
   if (!approval.session_id) {
     deletePendingApproval(approval.approval_id);
     return;

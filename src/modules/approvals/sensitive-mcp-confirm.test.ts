@@ -209,8 +209,8 @@ describe('handleApprovalsResponse — sensitive_mcp_confirm confirm/cancel/click
     return JSON.parse(delivered[0].body).questionId as string;
   }
 
-  function click(questionId: string, value: string, userId: string | null): ResponsePayload {
-    return { questionId, value, userId, channelType: 'discord', platformId: 'chan-public', threadId: null };
+  function click(questionId: string, value: string, userId: string | null, channelType = 'discord'): ResponsePayload {
+    return { questionId, value, userId, channelType, platformId: 'chan-public', threadId: null };
   }
 
   it('bystander Confirm is ignored, row left pending, NO grant', async () => {
@@ -243,5 +243,61 @@ describe('handleApprovalsResponse — sensitive_mcp_confirm confirm/cancel/click
     await handleApprovalsResponse(click(qid, 'cancel', BYSTANDER));
     expect(getPendingApproval(qid)).toBeDefined();
     expect(getConfirmationGrant(SESSION, ACTOR)).toBeUndefined();
+  });
+
+  // ── Bug C regression (2026-05-17): WhatsApp /confirm reproduction ──
+  //
+  // decideSensitiveGate records the card's actorId in the NAMESPACED
+  // form (`whatsapp:<jid>` via namespaceActorId — confirmed in prod
+  // logs). The WhatsApp slash-reply path (whatsapp-channel.ts:1429)
+  // calls onAction(questionId, value, sender) with the RAW JID (no
+  // `whatsapp:` prefix). Clicker-auth does a strict `userId === actorId`
+  // equality, so raw `<jid>` !== `whatsapp:<jid>` → the actor's own
+  // Confirm is treated as a bystander click → row left pending, NO
+  // grant, agent never told → the task never executes and the next
+  // request re-prompts. This is exactly the screenshot.
+  const WA_NAMESPACED = 'whatsapp:159867859914790@lid';
+  const WA_RAW = '159867859914790@lid';
+
+  async function seedWaConfirmCard(): Promise<string> {
+    await requestConfirmation({
+      session: { id: SESSION, agent_group_id: AG, messaging_group_id: MG } as never,
+      agentName: 'Test',
+      action: 'sensitive_mcp_confirm',
+      actorId: WA_NAMESPACED,
+      payload: { integration: 'google', tool: 'google_call' },
+      title: 'Confirm',
+      question: 'ok?',
+    });
+    return JSON.parse(delivered[0].body).questionId as string;
+  }
+
+  it('Bug C regression: WhatsApp /confirm with the RAW jid grants under the NAMESPACED key', async () => {
+    // The fix namespaces the clicker id (channelType:rawId) before
+    // clicker-auth, so the WhatsApp raw jid authorizes against the
+    // recorded namespaced actorId and the grant lands under the
+    // namespaced key — exactly the key decideSensitiveGate later looks
+    // up. The raw key must NOT be used (would never be found by the gate).
+    const qid = await seedWaConfirmCard();
+    await handleApprovalsResponse(click(qid, 'confirm', WA_RAW, 'whatsapp'));
+    expect(getConfirmationGrant(SESSION, WA_NAMESPACED)).toBeDefined();
+    expect(getConfirmationGrant(SESSION, WA_RAW)).toBeUndefined();
+    expect(getPendingApproval(qid)).toBeUndefined();
+  });
+
+  it('FIX TARGET: clicker-auth must namespace the clicker id before comparing', async () => {
+    // After the fix, the same raw-jid click MUST authorize against the
+    // recorded namespaced actorId and create the grant under the
+    // namespaced key (the form decideSensitiveGate later looks up).
+    const qid = await seedWaConfirmCard();
+    await handleApprovalsResponse(click(qid, 'confirm', WA_RAW, 'whatsapp'));
+    expect(getConfirmationGrant(SESSION, WA_NAMESPACED)).toBeDefined();
+    expect(getPendingApproval(qid)).toBeUndefined();
+  });
+
+  it('already-namespaced clicker (Discord button path) still works', async () => {
+    const qid = await seedWaConfirmCard();
+    await handleApprovalsResponse(click(qid, 'confirm', WA_NAMESPACED, 'whatsapp'));
+    expect(getConfirmationGrant(SESSION, WA_NAMESPACED)).toBeDefined();
   });
 });
