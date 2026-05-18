@@ -1,12 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
-import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './db/connection.js';
+import { initTestSessionDb, closeSessionDb, getInboundDb } from './db/connection.js';
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
 import { MockProvider } from './providers/mock.js';
 import { shouldSendErrorResponseForBatch, dispatchResultText } from './poll-loop.js';
 import type { RoutingContext } from './formatter.js';
+import type { ProviderEvent } from './providers/types.js';
 
 beforeEach(() => {
   initTestSessionDb();
@@ -47,9 +48,9 @@ function insertMessage(
  */
 function readMessageInRow(id: string, kind: string, content: object) {
   insertMessage(id, kind, content);
-  return getInboundDb()
-    .prepare('SELECT * FROM messages_in WHERE id = ?')
-    .get(id) as Parameters<typeof formatMessages>[0][number];
+  return getInboundDb().prepare('SELECT * FROM messages_in WHERE id = ?').get(id) as Parameters<
+    typeof formatMessages
+  >[0][number];
 }
 
 describe('formatter', () => {
@@ -96,11 +97,7 @@ describe('formatter', () => {
     // the LIMIT). The formatter retains a kind='system' branch for
     // tests / future use; call it directly here.
     const messages = [
-      readMessageInRow(
-        'm1',
-        'system',
-        { action: 'register_group', status: 'success', result: { id: 'ag-1' } },
-      ),
+      readMessageInRow('m1', 'system', { action: 'register_group', status: 'success', result: { id: 'ag-1' } }),
     ];
     const prompt = formatMessages(messages);
     expect(prompt).toContain('<system_response');
@@ -112,11 +109,7 @@ describe('formatter', () => {
     const chatMessages = getPendingMessages();
     // System row read directly — see above re: getPendingMessages
     // excluding kind='system'.
-    const systemMessage = readMessageInRow(
-      'm2',
-      'system',
-      { action: 'test', status: 'ok', result: null },
-    );
+    const systemMessage = readMessageInRow('m2', 'system', { action: 'test', status: 'ok', result: null });
     const prompt = formatMessages([...chatMessages, systemMessage]);
     expect(prompt).toContain('sender="John"');
     expect(prompt).toContain('<system_response');
@@ -188,12 +181,7 @@ describe('accumulate gate (trigger column)', () => {
     // represents work that needs to happen, not context that's gone
     // stale. The age cap only applies to trigger=0 accumulate rows.
     const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
-    insertMessage(
-      'old-task',
-      'task',
-      { prompt: 'maintenance' },
-      { trigger: 1, timestamp: threeDaysAgo },
-    );
+    insertMessage('old-task', 'task', { prompt: 'maintenance' }, { trigger: 1, timestamp: threeDaysAgo });
 
     const messages = getPendingMessages();
     expect(messages.map((m) => m.id)).toEqual(['old-task']);
@@ -308,7 +296,13 @@ describe('origin metadata (from= attribute)', () => {
       .run(name, name, channelType, platformId);
   }
 
-  function insertWithRouting(id: string, kind: string, content: object, channelType: string | null, platformId: string | null): void {
+  function insertWithRouting(
+    id: string,
+    kind: string,
+    content: object,
+    channelType: string | null,
+    platformId: string | null,
+  ): void {
     getInboundDb()
       .prepare(
         `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, content)
@@ -366,9 +360,9 @@ describe('origin metadata (from= attribute)', () => {
     // formatter check.
     seedDestination('discord-main', 'discord', 'chan-1');
     insertWithRouting('s1', 'system', { action: 'test', status: 'ok', result: null }, 'discord', 'chan-1');
-    const row = getInboundDb()
-      .prepare('SELECT * FROM messages_in WHERE id = ?')
-      .get('s1') as Parameters<typeof formatMessages>[0][number];
+    const row = getInboundDb().prepare('SELECT * FROM messages_in WHERE id = ?').get('s1') as Parameters<
+      typeof formatMessages
+    >[0][number];
     const prompt = formatMessages([row]);
     expect(prompt).toContain('<system_response');
     expect(prompt).toContain('from="discord-main"');
@@ -383,7 +377,7 @@ describe('mock provider', () => {
       cwd: '/tmp',
     });
 
-    const events: Array<{ type: string }> = [];
+    const events: ProviderEvent[] = [];
     setTimeout(() => query.end(), 50);
 
     for await (const event of query.events) {
@@ -393,8 +387,9 @@ describe('mock provider', () => {
     const typed = events.filter((e) => e.type !== 'activity');
     expect(typed.length).toBeGreaterThanOrEqual(2);
     expect(typed[0].type).toBe('init');
-    expect(typed[1].type).toBe('result');
-    expect((typed[1] as { text: string }).text).toBe('Echo: Hello');
+    const resultEvent = typed[1];
+    expect(resultEvent.type).toBe('result');
+    expect(resultEvent.type === 'result' ? resultEvent.text : undefined).toBe('Echo: Hello');
   });
 
   it('should handle push() during active query', async () => {
@@ -404,7 +399,7 @@ describe('mock provider', () => {
       cwd: '/tmp',
     });
 
-    const events: Array<{ type: string; text?: string }> = [];
+    const events: ProviderEvent[] = [];
 
     setTimeout(() => query.push('Second'), 30);
     setTimeout(() => query.end(), 60);
@@ -413,7 +408,7 @@ describe('mock provider', () => {
       events.push(event);
     }
 
-    const results = events.filter((e) => e.type === 'result');
+    const results = events.filter((e): e is Extract<ProviderEvent, { type: 'result' }> => e.type === 'result');
     expect(results).toHaveLength(2);
     expect(results[0].text).toBe('Re: First');
     expect(results[1].text).toBe('Re: Second');
@@ -521,10 +516,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
   it('does not invoke safety net when at least one <message> block is dispatched (mixed turn)', () => {
     insertChannelDestination('boys-night');
 
-    dispatchResultText(
-      'Some scratchpad notes.\n<message to="boys-night">Booked.</message>\nMore scratchpad.',
-      ROUTING,
-    );
+    dispatchResultText('Some scratchpad notes.\n<message to="boys-night">Booked.</message>\nMore scratchpad.', ROUTING);
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
@@ -642,6 +634,99 @@ describe('dispatchResultText safety net (local fork patch)', () => {
 
     dispatchResultText('I did the thing.', blankRouting);
 
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+
+  // Regression: 2026-05-17 AI Friends. The merged Degenerates agent was
+  // @mentioned + replied-to, search_conversations failed (NULL
+  // messaging_group_id), the agent produced no output and emitted a bare
+  // silent_turn_complete. The user saw nothing and read it as the bot
+  // being broken. An addressed turn with zero deliverable output must
+  // deliver an explicit visible fallback, never a silent control row.
+  it('addressed + zero output: delivers explicit fallback chat, NOT silent_turn_complete', () => {
+    insertChannelDestination('boys-night');
+
+    // Empty result (the incident shape: agent had nothing because its
+    // tool kept failing) on an addressed turn.
+    dispatchResultText('   \n\n   ', ROUTING, /* addressed */ true);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    // Visible chat to the origin channel, not a kind=system control row.
+    expect(out[0].kind).toBe('chat');
+    expect(out[0].channel_type).toBe(ROUTING.channelType);
+    expect(out[0].platform_id).toBe(ROUTING.platformId);
+    const text = JSON.parse(out[0].content).text;
+    expect(text).toContain('addressed turn produced no output');
+    expect(text).toContain("couldn't produce a reply");
+    // Must NOT be the silent control row.
+    expect(text).not.toContain('silent_turn_complete');
+  });
+
+  it('addressed + <internal>-only output: still delivers explicit fallback (not silent)', () => {
+    insertChannelDestination('boys-night');
+
+    dispatchResultText('<internal>I cannot answer this, search failed</internal>', ROUTING, true);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].kind).toBe('chat');
+    const text = JSON.parse(out[0].content).text;
+    expect(text).toContain('addressed turn produced no output');
+    // The private <internal> content must NOT leak to the user.
+    expect(text).not.toContain('search failed');
+  });
+
+  it('NOT addressed + zero output: keeps silent_turn_complete (ambient/maintenance unchanged)', () => {
+    insertChannelDestination('boys-night');
+
+    // Same empty turn, but not addressed (ambient group lull / task).
+    dispatchResultText('   \n\n   ', ROUTING, /* addressed */ false);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].kind).toBe('system');
+    expect(JSON.parse(out[0].content)).toEqual({ action: 'silent_turn_complete' });
+  });
+
+  it('addressed defaults to false: omitting the arg preserves prior silent behavior', () => {
+    insertChannelDestination('boys-night');
+
+    // No third arg — every pre-existing caller/test path.
+    dispatchResultText('<internal>silent</internal>', ROUTING);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).action).toBe('silent_turn_complete');
+  });
+
+  it('addressed + a real <message> block: normal delivery, no fallback (addressed satisfied)', () => {
+    insertChannelDestination('boys-night');
+
+    dispatchResultText('<message to="boys-night">Here is your answer.</message>', ROUTING, true);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].kind).toBe('chat');
+    const text = JSON.parse(out[0].content).text;
+    expect(text).toBe('Here is your answer.');
+    expect(text).not.toContain('addressed turn produced no output');
+  });
+
+  it('addressed + zero output but no origin channel: drops (cannot fabricate a destination)', () => {
+    const blankRouting: RoutingContext = {
+      platformId: null,
+      channelType: null,
+      threadId: null,
+      inReplyTo: null,
+    };
+
+    dispatchResultText('   ', blankRouting, true);
+
+    // No channel to deliver the fallback to — same defensive drop as the
+    // unwrapped path. Nothing is emitted (no silent row either; the turn
+    // was addressed so we deliberately do NOT fall back to the control
+    // row, but we also cannot invent a destination).
     expect(getUndeliveredMessages()).toHaveLength(0);
   });
 });

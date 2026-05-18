@@ -20,6 +20,7 @@ import {
   pickInReplyToMessage,
   extractImageAttachments,
   formatAttachments,
+  isAddressedTurn,
 } from './formatter.js';
 import { TIMEZONE } from './timezone.js';
 
@@ -267,6 +268,7 @@ describe('pickInReplyToMessage', () => {
       status: 'pending',
       process_after: null,
       recurrence: null,
+      series_id: null,
       tries: 0,
       trigger,
       platform_id: 'discord:1158397269079506955:1192937484582142012',
@@ -366,6 +368,7 @@ describe('extractImageAttachments', () => {
       status: 'pending',
       process_after: null,
       recurrence: null,
+      series_id: null,
       tries: 0,
       trigger: 1,
       platform_id: 'discord:abc',
@@ -492,6 +495,7 @@ describe('extractImageAttachments', () => {
       status: 'pending',
       process_after: null,
       recurrence: null,
+      series_id: null,
       tries: 0,
       trigger: 1,
       platform_id: null,
@@ -783,5 +787,103 @@ describe('reaction rendering', () => {
     });
     const out = formatMessages(getPendingMessages());
     expect(out).toContain('emoji="👍"');
+  });
+});
+
+describe('isAddressedTurn', () => {
+  // Complete MessageInRow factory (includes series_id, unlike the older
+  // partial `row` helpers above — those predate the column and only
+  // typecheck loosely). Mirrors the persisted container content shape:
+  // top-level `isMention` + `replyTo:{toBot,sender,messageId}`.
+  function row(content: object, opts: { kind?: string; trigger?: 0 | 1 } = {}): MessageInRow {
+    return {
+      id: 'm1',
+      seq: 1,
+      kind: opts.kind ?? 'chat-sdk',
+      timestamp: '2026-05-17T20:37:21.000Z',
+      status: 'pending',
+      process_after: null,
+      recurrence: null,
+      series_id: null,
+      tries: 0,
+      trigger: opts.trigger ?? 1,
+      platform_id: 'discord:abc',
+      channel_type: 'discord',
+      thread_id: null,
+      content: JSON.stringify(content),
+    };
+  }
+
+  it('true when a chat row @mentions the agent (isMention flag)', () => {
+    expect(isAddressedTurn([row({ text: '<@123> hey', isMention: true })], 'Optimus')).toBe(true);
+  });
+
+  it('true on a reply whose parent sender is this agent (name match)', () => {
+    // The exact 2026-05-17 AI Friends incident shape: reply to the bot's
+    // own recap, replyTo.toBot was NULL in that data, sender="Optimus".
+    expect(
+      isAddressedTurn(
+        [row({ text: 'you over-extended again', replyTo: { sender: 'Optimus', messageId: 'x' } })],
+        'Optimus',
+      ),
+    ).toBe(true);
+  });
+
+  it('true on a reply with replyTo.toBot === true (bonus path, name not needed)', () => {
+    expect(isAddressedTurn([row({ text: 'thoughts?', replyTo: { toBot: true } })], '')).toBe(true);
+  });
+
+  it('name match is case/whitespace-insensitive', () => {
+    expect(isAddressedTurn([row({ text: 'q', replyTo: { sender: '  optimus ' } })], 'Optimus')).toBe(true);
+  });
+
+  it('false on a reply to ANOTHER human (not addressed to the agent)', () => {
+    // Host classifier treats any replyTo as addressed — we deliberately
+    // do not reproduce that bug. seq 714 in the incident session.
+    expect(isAddressedTurn([row({ text: 'lol', replyTo: { sender: 'bigdee_', messageId: 'y' } })], 'Optimus')).toBe(
+      false,
+    );
+  });
+
+  it('false for ambient chatter: no mention, no reply', () => {
+    expect(isAddressedTurn([row({ text: 'random group message' })], 'Optimus')).toBe(false);
+  });
+
+  it('false for trigger=0 accumulate-only rows even if they look addressed', () => {
+    expect(isAddressedTurn([row({ text: '<@123>', isMention: true }, { trigger: 0 })], 'Optimus')).toBe(false);
+  });
+
+  it('ignores non-chat rows (task / system / reaction)', () => {
+    expect(
+      isAddressedTurn(
+        [
+          row({ prompt: 'maintenance' }, { kind: 'task' }),
+          row({ action: 'search_conversations_response' }, { kind: 'system' }),
+        ],
+        'Optimus',
+      ),
+    ).toBe(false);
+  });
+
+  it('true when ANY eligible row in a mixed batch is addressed', () => {
+    expect(
+      isAddressedTurn(
+        [row({ text: 'ambient' }), row({ text: '<@123> ping', isMention: true }), row({ text: 'more ambient' })],
+        'Optimus',
+      ),
+    ).toBe(true);
+  });
+
+  it('empty assistantName skips the sender-name path (no false positive)', () => {
+    expect(isAddressedTurn([row({ text: 'q', replyTo: { sender: 'Optimus' } })], '')).toBe(false);
+  });
+
+  it('malformed JSON content is skipped, not thrown', () => {
+    const bad: MessageInRow = { ...row({}), content: '{not json' };
+    expect(isAddressedTurn([bad], 'Optimus')).toBe(false);
+  });
+
+  it('false on empty batch', () => {
+    expect(isAddressedTurn([], 'Optimus')).toBe(false);
   });
 });

@@ -175,6 +175,66 @@ export function extractRouting(messages: MessageInRow[]): RoutingContext {
 }
 
 /**
+ * Did a human aim this turn directly at THIS agent?
+ *
+ * `true` ⟺ at least one wake-eligible chat row in the batch is either an
+ * explicit @mention of this agent or a reply to one of this agent's own
+ * messages. This is the container-side analogue of the host's
+ * `classifyWakeCause` (modules/typing/index.ts) `addressed` signal, but
+ * strictly better: the host has to regex-scrape the message text because
+ * it claims the routing-time `isMention` boolean isn't persisted — it
+ * *is*, at the top level of the chat-row content the channel adapter
+ * writes, so we read it directly here.
+ *
+ * Why this exists: a silent turn is acceptable for ambient group chatter
+ * or a maintenance task, but NEVER when a human @mentioned the agent or
+ * replied to it — that reads as the bot being broken (the exact 2026-05-17
+ * AI Friends incident: the agent went silent on a reply-to-bot follow-up
+ * after `search_conversations` failed). `dispatchResultText` consumes this
+ * to force an explicit "I couldn't do that" reply instead of
+ * `silent_turn_complete` on an addressed-but-empty turn.
+ *
+ * Signal priority (each independently sufficient):
+ *   1. `content.isMention === true` — the channel adapter's authoritative
+ *      "this message @mentions me" flag. Reliable across platforms; the
+ *      one signal that was correct on every addressed row in the incident
+ *      session (`replyTo.toBot` was observed NULL/inverted in that data,
+ *      so we do NOT trust it alone).
+ *   2. A reply whose parent is one of THIS agent's messages —
+ *      `content.replyTo` present AND (`replyTo.toBot === true` OR
+ *      `replyTo.sender` equals this agent's `assistantName`). The sender
+ *      match is the robust path; `toBot` is a bonus, never required. A
+ *      reply to *another human* that merely happens to wake the agent is
+ *      deliberately NOT "addressed" — that's the host classifier's bug we
+ *      don't reproduce.
+ *
+ * `assistantName` is `RunnerConfig.assistantName` (e.g. "Optimus"); pass
+ * "" to skip the sender-name path (tests / unconfigured). Pure: no I/O,
+ * unit-testable like the sibling batch helpers.
+ */
+export function isAddressedTurn(messages: MessageInRow[], assistantName: string): boolean {
+  const self = assistantName.trim().toLowerCase();
+  for (const m of messages) {
+    if (m.kind !== 'chat' && m.kind !== 'chat-sdk') continue;
+    if (m.trigger !== 1) continue;
+    let parsed: { isMention?: unknown; replyTo?: { toBot?: unknown; sender?: unknown } };
+    try {
+      parsed = JSON.parse(m.content) as typeof parsed;
+    } catch {
+      continue;
+    }
+    if (parsed.isMention === true) return true;
+    const replyTo = parsed.replyTo;
+    if (replyTo) {
+      if (replyTo.toBot === true) return true;
+      const sender = typeof replyTo.sender === 'string' ? replyTo.sender.trim().toLowerCase() : '';
+      if (self.length > 0 && sender.length > 0 && sender === self) return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Format a batch of messages_in rows into a prompt string.
  *
  * Prepends a `<context timezone="<IANA>" />` header so the agent always knows

@@ -18,6 +18,7 @@ import fs from 'fs';
 import {
   formatMessages,
   extractRouting,
+  isAddressedTurn,
   pickInReplyToMessage,
   extractMessageSender,
   extractImageAttachments,
@@ -28,6 +29,7 @@ import {
   type InboundImageRef,
   type RoutingContext,
 } from './formatter.js';
+import { getConfig } from './config.js';
 import type { AgentProvider, AgentQuery, ImageContentBlock, ProviderEvent } from './providers/types.js';
 
 const POLL_INTERVAL_MS = 1000;
@@ -195,6 +197,28 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     markProcessing(ids);
 
     const routing = extractRouting(batch);
+    // Did a human @mention this agent or reply to one of its messages
+    // this turn? Computed once here from the same batch routing uses.
+    // Threaded into processQuery → dispatchResultText so an addressed
+    // turn that produces no deliverable output emits an explicit
+    // fallback instead of a bare silent_turn_complete the user never
+    // sees (2026-05-17 AI Friends incident).
+    //
+    // assistantName only powers isAddressedTurn's *secondary*
+    // reply-to-bot-by-name path; the primary isMention / replyTo.toBot
+    // signals don't need it. Resolve it defensively: getConfig() throws
+    // if loadConfig() hasn't run (the production entrypoint always calls
+    // it first, but integration tests drive runPollLoop directly without
+    // it). A throw here would crash the whole loop for a name-match
+    // nicety — degrade to "" (skip only the name path) instead.
+    let assistantName = '';
+    try {
+      assistantName = getConfig().assistantName;
+    } catch {
+      // config not loaded (test harness / very early boot) — name-match
+      // path is skipped, isMention/toBot still work.
+    }
+    const addressed = isAddressedTurn(batch, assistantName);
 
     // Command handling: the host router gates filtered and unauthorized
     // admin commands before they reach the container. The only command
@@ -390,6 +414,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         processingIds,
         config.providerName,
         activeSender,
+        addressed,
         taskFireContexts,
       );
       if (result.continuation && result.continuation !== continuation) {
@@ -582,6 +607,13 @@ async function processQuery(
   initialBatchIds: string[],
   providerName: string,
   activeSender: string | null,
+  // True when the initial batch @mentioned this agent or replied to it.
+  // Forwarded to dispatchResultText so a zero-output addressed turn
+  // delivers an explicit fallback rather than silent_turn_complete.
+  // Note: only the initial-turn dispatch is gated on this — follow-up
+  // pushes within a long-lived query keep the prior behavior (the
+  // follow-up path is ambient continuation, not a fresh direct address).
+  addressed: boolean,
   // Shared by reference with the follow-up poll closure so a follow-up
   // task that survives its pre-task script can register its own fire
   // context (see the scheduling-pre-task-followup hook). Pre-bug this was
@@ -593,6 +625,11 @@ async function processQuery(
   let queryContinuation: string | undefined;
   let done = false;
   let unwrappedNudged = false;
+  // Flips on the first `result` event. The initial @mention/reply-to-bot
+  // batch's response is the first result; later results in the same
+  // stream are follow-up-push continuations. Only the first is gated on
+  // `addressed` (see the result-event handler for why).
+  let firstResultSeen = false;
   // Attribution: result events fold into one provider stream and the SDK
   // does not tag which pushed prompt produced a given <message> block, so
   // per-task dispatch provenance across a task↔chat or task↔task boundary
@@ -1093,13 +1130,24 @@ async function processQuery(
           // follow-up pushes. The agent may have responded via MCP
           // (send_message) mid-turn, or the message may not need a response
           // at all — either way the turn is finished.
+          //
+          // `addressed` only gates the FIRST result: that's the response
+          // to the initial @mention/reply-to-bot batch. Subsequent
+          // results in this same stream come from follow-up pushes
+          // (ambient continuation within an already-active container) —
+          // those keep the prior silent-turn behavior so a long-lived
+          // warm container doesn't spam degraded fallbacks on every
+          // ambient lull. `initialBatchIds` is only completed once, on
+          // this same first result, so they move together.
+          const isFirstResult = !firstResultSeen;
+          firstResultSeen = true;
           markCompleted(initialBatchIds);
           if (event.text) {
             // Attribute this result to the most-recent unwritten task
             // context (best-effort — see processQuery's attribution note).
             const fireCtx = mostRecentTaskContext();
             if (fireCtx) fireCtx.assistantText = event.text;
-            const { hasUnwrapped, dispatched } = dispatchResultText(event.text, routing);
+            const { hasUnwrapped, dispatched } = dispatchResultText(event.text, routing, isFirstResult && addressed);
             if (fireCtx && dispatched.length > 0) {
               fireCtx.dispatched.push(...dispatched);
             }
@@ -1222,6 +1270,15 @@ export interface DispatchedMessage {
 export function dispatchResultText(
   text: string,
   routing: RoutingContext,
+  // True when a human @mentioned this agent or replied to one of its
+  // messages this turn (computed once per turn via formatter's
+  // isAddressedTurn). An addressed turn that produces zero deliverable
+  // output must NOT end as a bare silent_turn_complete — that reads as
+  // the bot being broken (2026-05-17 AI Friends incident: silent on a
+  // reply-to-bot follow-up after search_conversations failed). Defaults
+  // false so non-chat callers (tasks, tests that don't care) keep the
+  // prior silent-turn behavior unchanged.
+  addressed = false,
 ): { sent: number; hasUnwrapped: boolean; dispatched: DispatchedMessage[] } {
   const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
 
@@ -1254,7 +1311,7 @@ export function dispatchResultText(
       scratchpadParts.push(`[dropped: unknown destination "${toName}"] ${body}`);
       continue;
     }
-    const dedupKey = `${toName} ${body.replace(/\s+/g, ' ')}`;
+    const dedupKey = `${toName} ${body.replace(/\s+/g, ' ')}`;
     if (seen.has(dedupKey)) {
       log(`Suppressing duplicate <message to="${toName}"> block within one turn`);
       continue;
@@ -1298,12 +1355,40 @@ export function dispatchResultText(
 
   // Truly silent turn: no <message> blocks AND no user-facing scratchpad
   // (e.g. agent emitted only `<internal>...</internal>`, or returned an
-  // empty result). Tell the host the turn is over so it can stop the
-  // typing indicator immediately, instead of letting it refresh on
-  // heartbeat freshness for the full HEARTBEAT_FRESH_MS window after the
-  // container goes idle. The host's typing module registers the
-  // matching `silent_turn_complete` delivery-action handler.
+  // empty result).
   if (sent === 0) {
+    if (addressed) {
+      // A human @mentioned this agent or replied to it, and the agent
+      // produced nothing to send back. Staying silent here is always
+      // wrong — it reads as the bot being broken (2026-05-17 AI Friends:
+      // the agent went silent on a direct reply-to-bot follow-up because
+      // search_conversations kept failing, so it had no answer and chose
+      // silence over admitting it). The prompt already forbids this
+      // (destinations.ts: "A silent turn is NOT allowed when you were
+      // directly addressed") but the model violated it under tool-failure
+      // stress, so enforce it deterministically: deliver an explicit
+      // fallback to the origin channel via the same safety-net path used
+      // for unwrapped output, instead of a bare silent_turn_complete the
+      // user never sees. Visible-degraded beats invisible-silent.
+      log(
+        `WARNING: addressed turn produced no deliverable output — emitting explicit fallback instead of silent_turn_complete`,
+      );
+      deliverSafetyNet(
+        "I was addressed directly but couldn't produce a reply this turn — " +
+          'something I needed (a tool or lookup) likely failed. This is a bug, not me ignoring you; ' +
+          'please try again or rephrase, and it has been logged.',
+        routing,
+        'degraded — addressed turn produced no output (likely tool failure)',
+      );
+      dispatched.push({ destination: '__addressed_silent_fallback__', body: 'addressed-silent fallback' });
+      return { sent, hasUnwrapped, dispatched };
+    }
+    // Genuinely nothing-to-say (ambient chatter / maintenance task).
+    // Tell the host the turn is over so it can stop the typing
+    // indicator immediately, instead of letting it refresh on heartbeat
+    // freshness for the full HEARTBEAT_FRESH_MS window after the
+    // container goes idle. The host's typing module registers the
+    // matching `silent_turn_complete` delivery-action handler.
     emitSilentTurnComplete();
   }
   return { sent, hasUnwrapped, dispatched };
@@ -1346,12 +1431,21 @@ function emitSilentTurnComplete(): void {
   });
 }
 
-function deliverSafetyNet(body: string, routing: RoutingContext): void {
+function deliverSafetyNet(
+  body: string,
+  routing: RoutingContext,
+  // Visible prefix marking why this is a degraded delivery. Defaults to
+  // the unwrapped-output reason (the original sole caller); the
+  // addressed-silent enforcement path passes its own accurate label so
+  // the user isn't told "agent didn't wrap" when the real cause was a
+  // tool failure that left the turn empty.
+  label = 'degraded — agent did not wrap reply in <message> block',
+): void {
   if (!routing.platformId || !routing.channelType) {
     log(`safety-net: no origin channel in routing context, dropping`);
     return;
   }
-  const labeled = `[degraded — agent did not wrap reply in <message> block]\n\n${body}`;
+  const labeled = `[${label}]\n\n${body}`;
   const destRouting = resolveDestinationThread(routing.channelType, routing.platformId);
   writeMessageOut({
     id: generateId(),
