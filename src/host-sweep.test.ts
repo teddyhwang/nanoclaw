@@ -430,6 +430,96 @@ describe('resetStuckProcessingRows — orphan claim cleanup', () => {
     const row = inDb.prepare('SELECT tries FROM messages_in WHERE id = ?').get('m-2') as { tries: number };
     expect(row.tries).toBe(1); // not bumped, the skip path held
   });
+
+  it('recovers a message stranded at status=processing (codex resume-deadlock wedge, 2026-05-18)', () => {
+    // THE BUG: a codex resume deadlock leaves messages_in.status at
+    // 'processing' (the in-container agent-runner claimed it, then the
+    // turn hung and the container was reaped). The old reset path looked
+    // up the row with a 'pending'-only filter, got undefined, skipped it,
+    // then deleted its orphan processing_ack — stranding the message at
+    // 'processing' forever with NO path to ever re-dispatch it. Observed
+    // live: a Teddy DM silently wedged ~4h. This asserts the row is now
+    // reset back to 'pending' (re-dispatchable) AND its orphan claim is
+    // cleared — i.e. the wedge self-heals on the next sweep tick.
+    const { inDb, outDb } = makeSessionDbs();
+    const claimedAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(); // 2h ago
+
+    inDb
+      .prepare(
+        "INSERT INTO messages_in (id, seq, kind, timestamp, status, tries, content) VALUES ('m-proc', 1, 'chat', ?, 'processing', 0, '{}')",
+      )
+      .run(claimedAt);
+    outDb.prepare("INSERT INTO processing_ack VALUES ('m-proc', 'processing', ?)").run(claimedAt);
+
+    _resetStuckProcessingRowsForTesting(inDb, outDb, fakeSession(), 'claim-stuck');
+
+    // Orphan claim cleared.
+    expect(getProcessingClaims(outDb)).toEqual([]);
+    // And the stranded message is back to 'pending' with backoff — the
+    // wake path can now pick it up. Pre-fix this row stayed 'processing'.
+    const row = inDb.prepare('SELECT status, tries, process_after FROM messages_in WHERE id = ?').get('m-proc') as {
+      status: string;
+      tries: number;
+      process_after: string | null;
+    };
+    expect(row.status).toBe('pending');
+    expect(row.tries).toBe(1);
+    expect(row.process_after).not.toBeNull();
+  });
+
+  it('force-fails a processing-stranded message too (circuit-breaker drains the codex-wedge row)', () => {
+    // Same strand shape, but the circuit-breaker has tripped. Force-fail
+    // must terminate the 'processing' row (not skip it) so a repeated
+    // codex-deadlock loop cannot keep the session immortal.
+    const { inDb, outDb } = makeSessionDbs();
+    const claimedAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+
+    inDb
+      .prepare(
+        "INSERT INTO messages_in (id, seq, kind, timestamp, status, tries, content) VALUES ('m-proc-ff', 1, 'chat', ?, 'processing', 0, '{}')",
+      )
+      .run(claimedAt);
+    outDb.prepare("INSERT INTO processing_ack VALUES ('m-proc-ff', 'processing', ?)").run(claimedAt);
+
+    _resetStuckProcessingRowsForTesting(inDb, outDb, fakeSession(), 'claim-stuck', /* forceFail */ true);
+
+    expect(getProcessingClaims(outDb)).toEqual([]);
+    const row = inDb.prepare("SELECT status FROM messages_in WHERE id = 'm-proc-ff'").get() as { status: string };
+    expect(row.status).toBe('failed');
+  });
+
+  it('does NOT resurrect a terminal (completed/failed) message even if a stale claim lingers', () => {
+    // Guard the other direction: getRecoverableMessage must exclude
+    // terminal states. A finished message with a leftover processing_ack
+    // (e.g. ack write raced the completion) must stay terminal — only the
+    // orphan claim is swept, the message is not re-dispatched.
+    const { inDb, outDb } = makeSessionDbs();
+    const claimedAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+
+    inDb
+      .prepare(
+        "INSERT INTO messages_in (id, seq, kind, timestamp, status, tries, content) VALUES ('m-done', 1, 'chat', ?, 'completed', 0, '{}')",
+      )
+      .run(claimedAt);
+    inDb
+      .prepare(
+        "INSERT INTO messages_in (id, seq, kind, timestamp, status, tries, content) VALUES ('m-failed', 2, 'chat', ?, 'failed', 3, '{}')",
+      )
+      .run(claimedAt);
+    outDb.prepare("INSERT INTO processing_ack VALUES ('m-done', 'processing', ?)").run(claimedAt);
+    outDb.prepare("INSERT INTO processing_ack VALUES ('m-failed', 'processing', ?)").run(claimedAt);
+
+    _resetStuckProcessingRowsForTesting(inDb, outDb, fakeSession(), 'claim-stuck');
+
+    expect(getProcessingClaims(outDb)).toEqual([]);
+    const rows = inDb
+      .prepare("SELECT id, status FROM messages_in WHERE id IN ('m-done', 'm-failed') ORDER BY id")
+      .all() as Array<{ id: string; status: string }>;
+    expect(rows).toEqual([
+      { id: 'm-done', status: 'completed' },
+      { id: 'm-failed', status: 'failed' },
+    ]);
+  });
 });
 
 describe('claim-stuck circuit-breaker (2026-05-17 Degenerates infinite loop)', () => {

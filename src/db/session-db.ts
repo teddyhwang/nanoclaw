@@ -182,11 +182,26 @@ export function markMessageFailed(db: Database.Database, messageId: string): voi
 }
 
 export function retryWithBackoff(db: Database.Database, messageId: string, backoffSec: number): void {
+  // Normalize status back to 'pending'. The wake path (countDueMessages /
+  // getDueTaskRows) only picks up status='pending' rows. A claim-stuck
+  // codex deadlock leaves the row at 'processing'; bumping tries without
+  // resetting status would re-strand it (it'd never be re-dispatched).
+  // For an already-'pending' row this is a harmless no-op on status.
   db.prepare(
-    `UPDATE messages_in SET tries = tries + 1, process_after = datetime('now', '+${backoffSec} seconds') WHERE id = ?`,
+    `UPDATE messages_in
+        SET status = 'pending', tries = tries + 1,
+            process_after = datetime('now', '+${backoffSec} seconds')
+      WHERE id = ?`,
   ).run(messageId);
 }
 
+/**
+ * @deprecated Superseded by getRecoverableMessage for the claim-stuck
+ * reset path. A single-status lookup is the wrong contract there: the
+ * stuck row may be 'processing', not 'pending'. Kept for any external
+ * caller that genuinely wants an exact-status match; do not use it for
+ * stuck-claim recovery.
+ */
 export function getMessageForRetry(
   db: Database.Database,
   messageId: string,
@@ -195,6 +210,37 @@ export function getMessageForRetry(
   return db
     .prepare('SELECT id, tries, process_after as processAfter FROM messages_in WHERE id = ? AND status = ?')
     .get(messageId, status) as { id: string; tries: number; processAfter: string | null } | undefined;
+}
+
+/**
+ * Like getMessageForRetry but matches a message in ANY non-terminal state
+ * — both 'pending' AND 'processing'. The claim-stuck reset path must use
+ * this, not the 'pending'-only variant.
+ *
+ * Why: the engine never flips messages_in.status to 'processing' (only the
+ * in-container agent-runner does, when it claims a message to work it).
+ * When a container is killed claim-stuck AFTER the agent-runner claimed a
+ * message but BEFORE it finished (the exact shape of a codex resume
+ * deadlock: tool call issued, turn hung, container reaped), the
+ * messages_in row is left at 'processing'. getMessageForRetry(...,
+ * 'pending') then returns undefined, the reset loop skips it, the orphan
+ * processing_ack is deleted, and the message is stranded at 'processing'
+ * forever — no path picks up a 'processing' message, so the session wedges
+ * silently (observed: a Teddy DM wedged ~4h, 2026-05-18). Recovering both
+ * states closes that strand-forever hole. 'completed'/'failed' are terminal
+ * and intentionally excluded — a finished message must not be resurrected.
+ */
+export function getRecoverableMessage(
+  db: Database.Database,
+  messageId: string,
+): { id: string; tries: number; processAfter: string | null; status: string } | undefined {
+  return db
+    .prepare(
+      `SELECT id, tries, process_after as processAfter, status
+         FROM messages_in
+        WHERE id = ? AND status IN ('pending', 'processing')`,
+    )
+    .get(messageId) as { id: string; tries: number; processAfter: string | null; status: string } | undefined;
 }
 
 export function syncProcessingAcks(inDb: Database.Database, outDb: Database.Database): void {

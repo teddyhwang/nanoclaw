@@ -43,7 +43,7 @@ import {
   deleteOrphanProcessingClaims,
   getContainerState,
   getDueTaskRows,
-  getMessageForRetry,
+  getRecoverableMessage,
   getProcessingClaims,
   markMessageFailed,
   retryWithBackoff,
@@ -704,7 +704,15 @@ function resetStuckProcessingRows(
   const claims = getProcessingClaims(outDb);
   const now = Date.now();
   for (const { message_id } of claims) {
-    const msg = getMessageForRetry(inDb, message_id, 'pending');
+    // Recover a message stuck in EITHER 'pending' or 'processing'. A
+    // codex resume deadlock leaves the row at 'processing' (the in-
+    // container agent-runner claimed it, then the turn hung and the
+    // container was reaped). The old 'pending'-only lookup returned
+    // undefined for that row, so it was skipped here while its orphan
+    // processing_ack got deleted below — stranding the message at
+    // 'processing' with no path to ever pick it up (silent multi-hour
+    // wedge, Teddy DM 2026-05-18). 'completed'/'failed' stay excluded.
+    const msg = getRecoverableMessage(inDb, message_id);
     if (!msg) continue;
 
     if (forceFail) {
