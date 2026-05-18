@@ -82,6 +82,22 @@ export const MCP_TOOL_CEILING_MS = 60 * 60 * 1000;
 // Stuck tolerance window applied per 'processing' claim — "did we see any
 // signs of life since this message was claimed?"
 export const CLAIM_STUCK_MS = 60 * 1000;
+// Startup grace for a claim whose container has NOT yet written its first
+// heartbeat (heartbeatMtimeMs === 0). The agent-runner only touches the
+// heartbeat once the provider SDK stream opens (poll-loop.ts:731) — i.e.
+// AFTER provider cold start. The codex provider's cold start (bubblewrap +
+// ~19k-char kernel compose + camoufox prewarm + `codex app-server` spawn +
+// thread resume) routinely runs 2–4 min, far past CLAIM_STUCK_MS. Without a
+// wider window for the pre-first-heartbeat phase, decideStuckAction's
+// `heartbeatMtimeMs > claimedAt` guard is structurally unsatisfiable (0 is
+// never > a real claim time), so every codex-backed session that claims a
+// message is SIGKILL'd ~60s in, mid-cold-start, forever — the message is
+// never answered (observed 2026-05-18: Teddy DM silent ~12h, every respawn
+// claim-stuck-killed during codex startup). Only applies while no heartbeat
+// exists yet; once the container writes one, the normal CLAIM_STUCK_MS +
+// heartbeat-freshness logic takes over, so a genuinely hung post-startup
+// container is still caught on the normal timeline.
+export const CLAIM_STARTUP_GRACE_MS = 5 * 60 * 1000;
 const MAX_TRIES = 5;
 const BACKOFF_BASE_MS = 5000;
 
@@ -135,12 +151,24 @@ export function decideStuckAction(args: {
     typeof containerState?.current_tool === 'string' && containerState.current_tool.startsWith('mcp__')
       ? MCP_TOOL_CEILING_MS
       : 0;
-  const tolerance = Math.max(CLAIM_STUCK_MS, declaredBashMs ?? 0, mcpInFlightTolerance);
+  // No heartbeat written yet ⇒ the container is still in provider cold start
+  // (the runner's first touchHeartbeat is gated behind the SDK stream open).
+  // Use the wider startup grace so codex's multi-minute boot isn't mistaken
+  // for a stuck claim. Once any heartbeat exists, fall back to the normal
+  // tolerance + heartbeat-freshness check below — a container that booted and
+  // then hung is still caught on the steady-state timeline.
+  const inStartup = heartbeatMtimeMs === 0;
+  const tolerance = inStartup
+    ? Math.max(CLAIM_STARTUP_GRACE_MS, declaredBashMs ?? 0, mcpInFlightTolerance)
+    : Math.max(CLAIM_STUCK_MS, declaredBashMs ?? 0, mcpInFlightTolerance);
   for (const claim of claims) {
     const claimedAt = parseSqliteUtc(claim.status_changed);
     if (Number.isNaN(claimedAt)) continue;
     const claimAge = now - claimedAt;
     if (claimAge <= tolerance) continue;
+    // Heartbeat newer than the claim ⇒ the container showed life since it
+    // claimed this message; not stuck. (Never true while inStartup, by
+    // construction — the startup grace above is what protects that phase.)
     if (heartbeatMtimeMs > claimedAt) continue;
     return { action: 'kill-claim', messageId: claim.message_id, claimAgeMs: claimAge, toleranceMs: tolerance };
   }

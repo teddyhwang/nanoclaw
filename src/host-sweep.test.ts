@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { deleteOrphanProcessingClaims, getProcessingClaims } from './db/session-db.js';
 import {
   ABSOLUTE_CEILING_MS,
+  CLAIM_STARTUP_GRACE_MS,
   CLAIM_STUCK_MS,
   MCP_TOOL_CEILING_MS,
   _MAX_CONSECUTIVE_CLAIM_STUCK_KILLS_FOR_TESTING,
@@ -106,11 +107,28 @@ describe('decideStuckAction', () => {
     expect(res.action).toBe('ok');
   });
 
-  it('kills on claim-stuck when heartbeat is absent AND a claim has aged past tolerance', () => {
-    // Hanging fresh container: spawned, picked up a message (claim recorded
-    // in processing_ack), but never wrote a heartbeat. Falls through the
-    // skipped ceiling check into claim-stuck — which correctly fires.
-    const claimedAgeMs = CLAIM_STUCK_MS + 5_000;
+  it('does NOT claim-stuck-kill a heartbeat-less container still inside the startup grace', () => {
+    // Regression: 2026-05-18 Teddy DM silent ~12h. A container that claimed a
+    // message but hasn't written its first heartbeat is still in provider
+    // cold start (the runner's first touchHeartbeat is gated behind the SDK
+    // stream open; codex cold start is 2–4 min). Killing it ~60s in,
+    // mid-startup, every sweep, makes the message permanently unanswerable.
+    // While no heartbeat exists, the wider CLAIM_STARTUP_GRACE_MS applies.
+    const claimedAgeMs = CLAIM_STUCK_MS + 5_000; // past the OLD 60s tolerance…
+    const res = decideStuckAction({
+      now: BASE,
+      heartbeatMtimeMs: 0,
+      containerState: null,
+      claims: [claim('msg-1', claimedAgeMs)],
+    });
+    expect(res.action).toBe('ok'); // …but inside the startup grace ⇒ not stuck
+  });
+
+  it('claim-stuck-kills a heartbeat-less container once it exceeds the startup grace', () => {
+    // A container that has burned the entire startup grace without ever
+    // writing a heartbeat is genuinely wedged at the gate — kill it so a
+    // fresh one can retry.
+    const claimedAgeMs = CLAIM_STARTUP_GRACE_MS + 5_000;
     const res = decideStuckAction({
       now: BASE,
       heartbeatMtimeMs: 0,
@@ -118,6 +136,8 @@ describe('decideStuckAction', () => {
       claims: [claim('msg-1', claimedAgeMs)],
     });
     expect(res.action).toBe('kill-claim');
+    if (res.action !== 'kill-claim') return;
+    expect(res.toleranceMs).toBe(CLAIM_STARTUP_GRACE_MS);
   });
 
   it('extends the ceiling when Bash has a declared timeout longer than 30 min', () => {
