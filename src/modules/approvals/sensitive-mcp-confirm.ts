@@ -35,6 +35,7 @@ import { registerApprovalHandler } from './primitive.js';
 import { upsertConfirmationGrant } from '../../db/sessions.js';
 import { log } from '../../log.js';
 import { replayConfirmedMcpCall } from './mcp-replay-client.js';
+import { markReplaySucceeded, isReplayAlreadyResolved } from './replay-resolution.js';
 
 interface SensitiveMcpConfirmPayload {
   actorId?: string;
@@ -111,6 +112,12 @@ registerApprovalHandler('sensitive_mcp_confirm', async ({ session, payload, user
   });
 
   if (outcome.status === 'ok') {
+    // Authoritative: record success BEFORE notifying so a racing
+    // duplicate handler (stale-container `expired`, etc.) for the same
+    // call suppresses its contradictory failure appr-note. (2026-05-18:
+    // a stale `expired` note and this `ok` note landed together and the
+    // agent answered from the failure — user never saw the result.)
+    markReplaySucceeded(session.id, p.integration, p.tool);
     const rendered = renderReplayContent(outcome.content) || '(the action returned no output)';
     // Deliver the actual tool result as a system message the agent reads
     // and continues from — exactly as if the tool had returned inline.
@@ -127,12 +134,27 @@ registerApprovalHandler('sensitive_mcp_confirm', async ({ session, payload, user
   }
 
   if (outcome.status === 'expired' || outcome.status === 'already_done') {
-    // Bounded loop-exit (task #25): the stash GC'd (3-min TTL) or the
-    // call already ran. Never silent, never a retry-loop — tell the
-    // agent definitively so it can inform the user / move on.
+    // If a successful replay for this exact call already landed (a
+    // concurrent/earlier handler), do NOT emit a contradictory failure
+    // — the success delivered the real result; a failure note here only
+    // misleads the agent. `already_done` also means the call ran
+    // elsewhere, so it is success-equivalent and never warrants a
+    // failure note regardless.
+    if (outcome.status === 'already_done' || isReplayAlreadyResolved(session.id, p.integration, p.tool)) {
+      log.info('sensitive_mcp_confirm: failure note suppressed (call already succeeded)', {
+        sessionId: session.id,
+        integration: p.integration,
+        tool: p.tool,
+        status: outcome.status,
+      });
+      return;
+    }
+    // Bounded loop-exit (task #25): the stash GC'd (TTL) and no success
+    // recorded. Never silent, never a retry-loop — tell the agent
+    // definitively so it can inform the user / move on.
     notify(
       `Confirmed, but ${what} could not be auto-completed ` +
-        `(${outcome.status === 'expired' ? 'the confirmation window elapsed' : 'it was already completed'}). ` +
+        `(the confirmation window elapsed). ` +
         `If you still need it, ask the user to trigger the action again.`,
     );
     log.warn('sensitive_mcp_confirm: replay not runnable', {
@@ -144,8 +166,17 @@ registerApprovalHandler('sensitive_mcp_confirm', async ({ session, payload, user
     return;
   }
 
-  // outcome.status === 'error' — replay round-trip failed. Surface it;
-  // the grant still exists so a manual re-issue would also work.
+  // outcome.status === 'error' — replay round-trip failed. Suppress if a
+  // success for the same call already landed; otherwise surface it (the
+  // grant still exists so a manual re-issue would also work).
+  if (isReplayAlreadyResolved(session.id, p.integration, p.tool)) {
+    log.info('sensitive_mcp_confirm: error note suppressed (call already succeeded)', {
+      sessionId: session.id,
+      integration: p.integration,
+      tool: p.tool,
+    });
+    return;
+  }
   notify(
     `Confirmed and approved for this session, but auto-running ${what} ` +
       `failed (${outcome.message}). You may re-issue the call once — the ` +

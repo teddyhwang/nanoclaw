@@ -53,6 +53,7 @@ import { setDeliveryAdapter, type ChannelDeliveryAdapter } from '../../delivery.
 import type { ResponsePayload } from '../../response-registry.js';
 import { handleApprovalsResponse } from './response-handler.js';
 import { requestConfirmation } from './primitive.js';
+import { _resetReplayResolutionForTesting } from './replay-resolution.js';
 // Import for the registration side effect (registers sensitive_mcp_confirm).
 import './index.js';
 
@@ -80,6 +81,7 @@ beforeEach(() => {
   runMigrations(db);
   wakeContainer.mockClear();
   writeSessionMessage.mockClear();
+  _resetReplayResolutionForTesting();
   delivered.length = 0;
   setDeliveryAdapter(stubAdapter);
 
@@ -272,7 +274,10 @@ describe('handleApprovalsResponse — sensitive_mcp_confirm confirm/cancel/click
       title: 'Confirm',
       question: 'ok?',
     });
-    return JSON.parse(delivered[0].body).questionId as string;
+    // Latest delivered card — robust when several are seeded in one
+    // test (delivered[] is append-only; the Fix-B ordering tests seed
+    // two). Single-seed tests are unaffected (latest === [0]).
+    return JSON.parse(delivered[delivered.length - 1].body).questionId as string;
   }
 
   it('Fix B: Confirm replays the call engine-side and injects the REAL result (no model re-issue)', async () => {
@@ -324,6 +329,68 @@ describe('handleApprovalsResponse — sensitive_mcp_confirm confirm/cancel/click
       .map((c) => JSON.parse((c[2] as { content: string }).content).text)
       .join('\n');
     expect(injected).toMatch(/dashboard unreachable/);
+  });
+
+  it('Fix-B ordering: a SUCCESS then a stale EXPIRED for the same call suppresses the contradictory failure note', async () => {
+    // 2026-05-18 regression: a stale container returned `expired` for
+    // the same call a successful fresh-container replay had just
+    // delivered; both appr-notes landed and the agent answered from the
+    // failure ("approval window elapsed") — the real calendar result
+    // never reached the user. The success must win: the later/duplicate
+    // expired handler must NOT write a contradictory failure note.
+    replayConfirmedMcpCall.mockResolvedValueOnce({
+      status: 'ok',
+      content: [{ type: 'text', text: 'CALENDAR-RESULT' }],
+      isError: false,
+    });
+    const qid1 = await seedConfirmCardWithGroup();
+    await handleApprovalsResponse(click(qid1, 'confirm', ACTOR));
+
+    replayConfirmedMcpCall.mockResolvedValueOnce({ status: 'expired' });
+    const qid2 = await seedConfirmCardWithGroup();
+    await handleApprovalsResponse(click(qid2, 'confirm', ACTOR));
+
+    const injected = writeSessionMessage.mock.calls
+      .map((c) => JSON.parse((c[2] as { content: string }).content).text)
+      .join('\n');
+    expect(injected).toMatch(/CALENDAR-RESULT/);
+    expect(injected).not.toMatch(/confirmation window elapsed/);
+    expect(injected).not.toMatch(/could not be auto-completed/);
+  });
+
+  it('Fix-B ordering: a SUCCESS then a stale ERROR for the same call suppresses the failure note', async () => {
+    replayConfirmedMcpCall.mockResolvedValueOnce({
+      status: 'ok',
+      content: [{ type: 'text', text: 'CALENDAR-RESULT' }],
+      isError: false,
+    });
+    const qa = await seedConfirmCardWithGroup();
+    await handleApprovalsResponse(click(qa, 'confirm', ACTOR));
+
+    replayConfirmedMcpCall.mockResolvedValueOnce({
+      status: 'error',
+      message: 'dashboard unreachable',
+    });
+    const qb = await seedConfirmCardWithGroup();
+    await handleApprovalsResponse(click(qb, 'confirm', ACTOR));
+
+    const injected = writeSessionMessage.mock.calls
+      .map((c) => JSON.parse((c[2] as { content: string }).content).text)
+      .join('\n');
+    expect(injected).toMatch(/CALENDAR-RESULT/);
+    expect(injected).not.toMatch(/dashboard unreachable/);
+    expect(injected).not.toMatch(/auto-running .* failed/);
+  });
+
+  it('Fix-B ordering: `already_done` never emits a failure note (call ran elsewhere)', async () => {
+    replayConfirmedMcpCall.mockResolvedValueOnce({ status: 'already_done' });
+    const qid = await seedConfirmCardWithGroup();
+    await handleApprovalsResponse(click(qid, 'confirm', ACTOR));
+    const injected = writeSessionMessage.mock.calls
+      .map((c) => JSON.parse((c[2] as { content: string }).content).text)
+      .join('\n');
+    expect(injected).not.toMatch(/could not be auto-completed/);
+    expect(injected).not.toMatch(/failed/);
   });
 
   it('bystander Cancel does NOT consume the row (cannot deny the actor)', async () => {
