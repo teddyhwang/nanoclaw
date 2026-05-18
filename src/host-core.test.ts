@@ -28,7 +28,8 @@ import {
   readOutboxFiles,
   clearOutbox,
 } from './session-manager.js';
-import { getSession, findSession } from './db/sessions.js';
+import { markDelivered } from './db/session-db.js';
+import { getSession, findSession, findSessionByAgentGroup } from './db/sessions.js';
 import type { InboundEvent } from './channels/adapter.js';
 
 // Mock container runner to prevent actual Docker spawning
@@ -612,6 +613,59 @@ describe('router', () => {
     db.close();
     expect(rows).toHaveLength(1);
     expect(rows[0].trigger).toBe(0);
+  });
+
+  it('reply-to-bot wakes an agent-shared active session even though session.messaging_group_id is null', async () => {
+    // Merged/multi-chat agents use one agent-shared session with
+    // messaging_group_id=NULL. Reply-to-bot detection must still inspect
+    // that active session's delivered table; otherwise a user replying to
+    // an agent message in WhatsApp is stored as trigger=0 ambient context
+    // and the agent never sees it until a later @mention.
+    const { routeInbound } = await import('./router.js');
+    const { wakeContainer } = await import('./container-runner.js');
+    const { updateMessagingGroupAgent } = await import('./db/messaging-groups.js');
+    const wakeMock = wakeContainer as ReturnType<typeof vi.fn>;
+    wakeMock.mockClear();
+
+    updateMessagingGroupAgent('mga-1', {
+      engage_mode: 'mention',
+      ignored_message_policy: 'accumulate',
+      session_mode: 'agent-shared',
+    });
+
+    const { session } = resolveSession('ag-1', null, null, 'agent-shared');
+    const db = new Database(inboundDbPath('ag-1', session.id));
+    markDelivered(db, 'msg-out-1', 'wa-bot-platform-id');
+    db.close();
+
+    await routeInbound({
+      channelType: 'discord',
+      platformId: 'chan-123',
+      threadId: null,
+      message: {
+        id: 'msg-reply-to-bot',
+        kind: 'chat',
+        content: JSON.stringify({
+          sender: 'User',
+          text: 'keep this updated moving forward',
+          replyTo: { messageId: 'wa-bot-platform-id', text: 'Page is up to date.', sender: 'Bot' },
+        }),
+        timestamp: now(),
+      },
+    });
+
+    expect(wakeMock).toHaveBeenCalled();
+    const routedSession = findSessionByAgentGroup('ag-1');
+    expect(routedSession).toBeDefined();
+    const inDb = new Database(inboundDbPath('ag-1', routedSession!.id));
+    const row = inDb.prepare('SELECT trigger, content FROM messages_in WHERE id = ?').get('msg-reply-to-bot:ag-1') as
+      | { trigger: number; content: string }
+      | undefined;
+    inDb.close();
+
+    expect(row).toBeDefined();
+    expect(row!.trigger).toBe(1);
+    expect(JSON.parse(row!.content).replyTo.toBot).toBe(true);
   });
 
   it('skips auto-create when an unwired channel sees only backfill', async () => {

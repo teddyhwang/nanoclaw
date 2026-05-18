@@ -27,7 +27,7 @@ import {
   getMessagingGroupAgents,
   getMessagingGroupWithAgentCount,
 } from './db/messaging-groups.js';
-import { findMostRecentClosedSessionForAgent, findSessionForAgent } from './db/sessions.js';
+import { findMostRecentClosedSessionForAgent, findSessionByAgentGroup, findSessionForAgent } from './db/sessions.js';
 import { wasDeliveredByBot } from './db/session-db.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
@@ -495,6 +495,10 @@ function isReplyToOurBot(
   const sessions: Array<{ id: string }> = [];
   const active = findSessionForAgent(agentGroupId, messagingGroupId, threadId);
   if (active) sessions.push(active);
+  const activeAgentShared = findSessionByAgentGroup(agentGroupId);
+  if (activeAgentShared && !sessions.some((session) => session.id === activeAgentShared.id)) {
+    sessions.push(activeAgentShared);
+  }
   const closed = findMostRecentClosedSessionForAgent(agentGroupId, messagingGroupId, threadId);
   if (closed) sessions.push(closed);
   for (const session of sessions) {
