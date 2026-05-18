@@ -11,10 +11,13 @@ import {
   ABSOLUTE_CEILING_MS,
   CLAIM_STUCK_MS,
   MCP_TOOL_CEILING_MS,
+  _MAX_CONSECUTIVE_CLAIM_STUCK_KILLS_FOR_TESTING,
   _MAX_RECURRENCE_DEFERS_FOR_TESTING,
+  _claimStuckHelpersForTesting,
   _recurrenceDeferHelpersForTesting,
   _resetStuckProcessingRowsForTesting,
   _reviveStrandedRecurringTasksForTesting,
+  _shouldForceFailClaimStuckForTesting,
   _shouldRunRecurrenceForTesting,
   decideStuckAction,
   parseSqliteUtc,
@@ -406,6 +409,122 @@ describe('resetStuckProcessingRows — orphan claim cleanup', () => {
     expect(getProcessingClaims(outDb)).toEqual([]);
     const row = inDb.prepare('SELECT tries FROM messages_in WHERE id = ?').get('m-2') as { tries: number };
     expect(row.tries).toBe(1); // not bumped, the skip path held
+  });
+});
+
+describe('claim-stuck circuit-breaker (2026-05-17 Degenerates infinite loop)', () => {
+  it('shouldForceFail is false below the cap, true at/after it', () => {
+    expect(_shouldForceFailClaimStuckForTesting(0)).toBe(false);
+    expect(_shouldForceFailClaimStuckForTesting(_MAX_CONSECUTIVE_CLAIM_STUCK_KILLS_FOR_TESTING - 1)).toBe(false);
+    expect(_shouldForceFailClaimStuckForTesting(_MAX_CONSECUTIVE_CLAIM_STUCK_KILLS_FOR_TESTING)).toBe(true);
+    expect(_shouldForceFailClaimStuckForTesting(_MAX_CONSECUTIVE_CLAIM_STUCK_KILLS_FOR_TESTING + 9)).toBe(true);
+  });
+
+  it('kill counter bumps per call and clears in one shot, keyed per session', () => {
+    const h = _claimStuckHelpersForTesting();
+    h.reset();
+    expect(h.count('sess-A')).toBe(0);
+    expect(h.bump('sess-A')).toBe(1);
+    expect(h.bump('sess-A')).toBe(2);
+    expect(h.count('sess-A')).toBe(2);
+    // Independent per session.
+    expect(h.count('sess-B')).toBe(0);
+    // A clean idle stop (or a tripped breaker) clears it in one shot.
+    h.clear('sess-A');
+    expect(h.count('sess-A')).toBe(0);
+  });
+
+  it('a clean idle stop resets progress so transient slowness never trips the breaker', () => {
+    // The realistic non-bug path: a session stalls a few times, then a
+    // container drains and idle-stops (clear), then stalls again. It must
+    // NEVER reach the cap because each clean idle resets the count — only
+    // an UNINTERRUPTED run of claim-stuck kills is a real loop.
+    const h = _claimStuckHelpersForTesting();
+    h.reset();
+    for (let cycle = 0; cycle < 20; cycle++) {
+      // a couple of stalls...
+      h.bump('s');
+      h.bump('s');
+      expect(_shouldForceFailClaimStuckForTesting(h.count('s'))).toBe(false);
+      // ...then the container recovers and idle-stops.
+      h.clear('s');
+    }
+    expect(h.count('s')).toBe(0);
+  });
+
+  it('an uninterrupted run of claim-stuck kills trips the breaker at the cap', () => {
+    const h = _claimStuckHelpersForTesting();
+    h.reset();
+    let tripped = false;
+    for (let kill = 1; kill <= _MAX_CONSECUTIVE_CLAIM_STUCK_KILLS_FOR_TESTING; kill++) {
+      const n = h.bump('s');
+      if (_shouldForceFailClaimStuckForTesting(n)) tripped = true;
+    }
+    expect(tripped).toBe(true);
+    expect(h.count('s')).toBe(_MAX_CONSECUTIVE_CLAIM_STUCK_KILLS_FOR_TESTING);
+  });
+
+  it('force-fail drains the poison batch regardless of tries OR pending backoff', () => {
+    // The crux of the 2026-05-17 bug: the normal path skips in-backoff
+    // rows (process_after in the future) WITHOUT bumping tries, so a
+    // busy chat's tries=0 rows never reach MAX_TRIES and the loop never
+    // ends. Force-fail must ignore both gates and fail every claimed row.
+    const { inDb, outDb } = makeSessionDbs();
+    const claimedAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const future = new Date(Date.now() + 60_000).toISOString();
+
+    // Row A: fresh (tries=0), no backoff — normal path would reset+backoff.
+    inDb
+      .prepare(
+        "INSERT INTO messages_in (id, seq, kind, timestamp, status, tries, content) VALUES ('m-fresh', 1, 'chat', ?, 'pending', 0, '{}')",
+      )
+      .run(claimedAt);
+    // Row B: tries=0 but mid-backoff — normal path SKIPS it (never fails).
+    //         This is the exact row class that made the loop immortal.
+    inDb
+      .prepare(
+        "INSERT INTO messages_in (id, seq, kind, timestamp, status, process_after, tries, content) VALUES ('m-backoff', 2, 'chat', ?, 'pending', ?, 0, '{}')",
+      )
+      .run(claimedAt, future);
+    outDb.prepare("INSERT INTO processing_ack VALUES ('m-fresh', 'processing', ?)").run(claimedAt);
+    outDb.prepare("INSERT INTO processing_ack VALUES ('m-backoff', 'processing', ?)").run(claimedAt);
+
+    _resetStuckProcessingRowsForTesting(inDb, outDb, fakeSession(), 'claim-stuck', /* forceFail */ true);
+
+    // Both rows failed — including the in-backoff one the normal path
+    // would have skipped forever — and orphan claims cleared.
+    const rows = inDb
+      .prepare("SELECT id, status FROM messages_in WHERE id IN ('m-fresh', 'm-backoff') ORDER BY id")
+      .all() as Array<{ id: string; status: string }>;
+    expect(rows).toEqual([
+      { id: 'm-backoff', status: 'failed' },
+      { id: 'm-fresh', status: 'failed' },
+    ]);
+    expect(getProcessingClaims(outDb)).toEqual([]);
+  });
+
+  it('without force-fail the in-backoff row still survives (proves the bug, and that the fix is opt-in)', () => {
+    // Same setup, forceFail=false: the in-backoff row is skipped and
+    // stays pending (the immortal-loop row). This pins WHY the
+    // circuit-breaker is necessary — the normal path cannot drain it.
+    const { inDb, outDb } = makeSessionDbs();
+    const claimedAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const future = new Date(Date.now() + 60_000).toISOString();
+    inDb
+      .prepare(
+        "INSERT INTO messages_in (id, seq, kind, timestamp, status, process_after, tries, content) VALUES ('m-immortal', 1, 'chat', ?, 'pending', ?, 0, '{}')",
+      )
+      .run(claimedAt, future);
+    outDb.prepare("INSERT INTO processing_ack VALUES ('m-immortal', 'processing', ?)").run(claimedAt);
+
+    _resetStuckProcessingRowsForTesting(inDb, outDb, fakeSession(), 'claim-stuck' /* forceFail defaults false */);
+
+    const row = inDb.prepare("SELECT status, tries FROM messages_in WHERE id = 'm-immortal'").get() as {
+      status: string;
+      tries: number;
+    };
+    expect(row.status).toBe('pending'); // survived — would re-stall the next container
+    expect(row.tries).toBe(0); // never bumped — MAX_TRIES unreachable
   });
 });
 

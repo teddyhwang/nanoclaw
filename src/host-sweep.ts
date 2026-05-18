@@ -504,6 +504,61 @@ export function _recurrenceDeferHelpersForTesting() {
   };
 }
 
+// Session-level claim-stuck circuit-breaker. The per-message MAX_TRIES
+// poison-pill cap in resetStuckProcessingRows is structurally unable to
+// break a *session-level* stall: a warm session whose container can't
+// drain its backlog within the claim tolerance gets killed
+// (reason='claim-stuck'), its rows reset to pending, respawns, re-claims,
+// re-stalls — and a busy group chat keeps refilling the backlog with
+// fresh tries=0 messages, so no single row ever climbs to MAX_TRIES
+// before being superseded. Observed 2026-05-17 in the merged Degenerates
+// session: ~45 min / 20+ consecutive claim-stuck kills, zero
+// 'marked as failed', only a human session-restart broke it.
+//
+// Mirrors the MAX_RECURRENCE_DEFERS lever above: an in-memory per-session
+// consecutive-count, bumped on each claim-stuck kill, CLEARED the moment
+// the session shows progress (a clean idle stop — the container drained
+// and went quiet). At the cap we stop resetting the stuck batch back to
+// pending and instead fail it outright (regardless of per-message tries),
+// which drains the poison backlog so the session can accept fresh work
+// instead of looping forever. 5 × ~2min claim tolerance ≈ ~10 min
+// worst-case loop before the breaker trips — bounded, and unambiguous
+// (5 consecutive claim-stuck kills with no intervening idle = a stuck
+// loop, not transient slowness).
+const MAX_CONSECUTIVE_CLAIM_STUCK_KILLS = 5;
+const claimStuckKills = new Map<string, number>();
+
+function claimStuckKillCount(sessionId: string): number {
+  return claimStuckKills.get(sessionId) ?? 0;
+}
+function bumpClaimStuckKill(sessionId: string): number {
+  const n = (claimStuckKills.get(sessionId) ?? 0) + 1;
+  claimStuckKills.set(sessionId, n);
+  return n;
+}
+function clearClaimStuckKill(sessionId: string): void {
+  claimStuckKills.delete(sessionId);
+}
+
+/**
+ * Test seam: pure decision for the claim-stuck circuit-breaker. Given the
+ * consecutive claim-stuck-kill count for a session, should this kill
+ * force-fail the stuck batch (true) instead of the normal reset-with-
+ * backoff (false)? Mirrors _shouldRunRecurrenceForTesting.
+ */
+export function _shouldForceFailClaimStuckForTesting(consecutiveKills: number): boolean {
+  return consecutiveKills >= MAX_CONSECUTIVE_CLAIM_STUCK_KILLS;
+}
+export const _MAX_CONSECUTIVE_CLAIM_STUCK_KILLS_FOR_TESTING = MAX_CONSECUTIVE_CLAIM_STUCK_KILLS;
+export function _claimStuckHelpersForTesting() {
+  return {
+    count: claimStuckKillCount,
+    bump: bumpClaimStuckKill,
+    clear: clearClaimStuckKill,
+    reset: () => claimStuckKills.clear(),
+  };
+}
+
 function heartbeatMtimeMs(agentGroupId: string, sessionId: string): number {
   const hbPath = heartbeatPath(agentGroupId, sessionId);
   try {
@@ -541,6 +596,11 @@ function enforceRunningContainerSla(
       idleAgeMs: decision.idleAgeMs,
       idleTimeoutMs: decision.idleTimeoutMs,
     });
+    // Progress signal: a container that idled out cleanly drained its
+    // work and went quiet, so any prior claim-stuck loop is broken.
+    // Reset the circuit-breaker so a later, unrelated transient stall
+    // starts counting fresh rather than inheriting stale strikes.
+    clearClaimStuckKill(session.id);
     killContainer(session.id, 'idle-timeout');
     return;
   }
@@ -557,15 +617,35 @@ function enforceRunningContainerSla(
     return;
   }
 
+  const consecutiveClaimStuckKills = bumpClaimStuckKill(session.id);
+  const forceFail = consecutiveClaimStuckKills >= MAX_CONSECUTIVE_CLAIM_STUCK_KILLS;
   log.warn('Killing container — message claimed then silent', {
     sessionId: session.id,
     messageId: decision.messageId,
     claimAgeMs: decision.claimAgeMs,
     toleranceMs: decision.toleranceMs,
+    consecutiveClaimStuckKills,
+    ...(forceFail ? { circuitBreaker: 'tripped — force-failing stuck batch to break the claim-stuck loop' } : {}),
   });
   killContainer(session.id, 'claim-stuck');
   emitEngineEvent('container.stuck', { sessionId: session.id, agentGroupId: session.agent_group_id });
-  resetStuckProcessingRows(inDb, outDb, session, 'claim-stuck');
+  // Normal path: reset the stuck rows with backoff and let a fresh
+  // container retry. Circuit-breaker tripped (MAX consecutive
+  // claim-stuck kills with no intervening clean idle): the per-message
+  // MAX_TRIES cap can't end this loop (a busy chat keeps refilling the
+  // backlog with tries=0 rows), so force-fail the currently-claimed
+  // batch regardless of tries — that drains the poison backlog so the
+  // session can take fresh work instead of looping forever. Clear the
+  // counter so the now-unstuck session starts from a clean slate.
+  resetStuckProcessingRows(inDb, outDb, session, 'claim-stuck', undefined, forceFail);
+  if (forceFail) {
+    log.warn('Claim-stuck circuit-breaker tripped — force-failed stuck batch', {
+      sessionId: session.id,
+      agentGroupId: session.agent_group_id,
+      consecutiveClaimStuckKills,
+    });
+    clearClaimStuckKill(session.id);
+  }
 }
 
 export function _resetStuckProcessingRowsForTesting(
@@ -573,8 +653,9 @@ export function _resetStuckProcessingRowsForTesting(
   outDb: Database.Database,
   session: Session,
   reason: string,
+  forceFail = false,
 ): void {
-  resetStuckProcessingRows(inDb, outDb, session, reason, outDb);
+  resetStuckProcessingRows(inDb, outDb, session, reason, outDb, forceFail);
 }
 
 function resetStuckProcessingRows(
@@ -583,12 +664,35 @@ function resetStuckProcessingRows(
   session: Session,
   reason: string,
   writableOutDbForTesting?: Database.Database,
+  // Circuit-breaker tripped: fail every currently-claimed row outright,
+  // ignoring per-message tries AND the in-backoff skip below. This is
+  // the ONLY way to drain a session-level claim-stuck loop — the normal
+  // per-message path can't, because the in-backoff skip never bumps
+  // tries (so MAX_TRIES is never reached) and a busy chat keeps adding
+  // fresh tries=0 rows. Caller (enforceRunningContainerSla) gates this
+  // on MAX_CONSECUTIVE_CLAIM_STUCK_KILLS.
+  forceFail = false,
 ): void {
   const claims = getProcessingClaims(outDb);
   const now = Date.now();
   for (const { message_id } of claims) {
     const msg = getMessageForRetry(inDb, message_id, 'pending');
     if (!msg) continue;
+
+    if (forceFail) {
+      // Drop the poison row regardless of tries or pending backoff.
+      // Skipping in-backoff rows here (as the normal path does) would
+      // leave them to re-stall the next container — exactly the loop
+      // the circuit-breaker exists to end.
+      markMessageFailed(inDb, msg.id);
+      log.warn('Message force-failed by claim-stuck circuit-breaker', {
+        messageId: msg.id,
+        sessionId: session.id,
+        tries: msg.tries,
+        reason,
+      });
+      continue;
+    }
 
     // Already rescheduled for a future retry — don't bump tries again. The
     // wake path (sweep step 2) will fire when process_after elapses and a
