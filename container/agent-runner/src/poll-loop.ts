@@ -1291,6 +1291,43 @@ export interface DispatchedMessage {
   destination: string;
   body: string;
 }
+/**
+ * True when a zero-output addressed turn ended because the agent hit
+ * the sensitive-action gate and is correctly WAITING for the user's
+ * in-chat Confirm tap — NOT because a tool failed.
+ *
+ * Why this matters (2026-05-18, the confidence-killer): when the gate
+ * fires, the model receives the gate's pending result ("…is awaiting
+ * the user's confirmation … End your turn now without commentary") and
+ * dutifully ends the turn with only `<internal>Waiting for <X>
+ * confirmation.</internal>` — zero `<message>` output. On an addressed
+ * turn that fell through to the alarming "[degraded — addressed turn
+ * produced no output (likely tool failure)] … This is a bug, try
+ * again" safety-net, EVERY gated request, BEFORE the user even taps
+ * Confirm. The real answer then arrives ~20s later via the engine
+ * replay → appr-note path, but the user has already been told it's
+ * broken. This is an expected pause, not a failure: stay silent, the
+ * result will follow.
+ *
+ * Pure + conservative: matches only the gate's own pause signature
+ * (an `<internal>`/scratchpad note about waiting for confirmation, or
+ * the gate's verbatim pending-result language). A genuine tool failure
+ * does NOT produce this coherent "waiting for confirmation" text, so
+ * the real degraded-fallback path is preserved.
+ */
+export function isAwaitingSensitiveConfirmation(text: string): boolean {
+  const t = text.toLowerCase();
+  // The gate's pending-result verbatim language (mcp-sensitive-gate-
+  // wrap.ts pendingResult) reflected by the model, OR the model's own
+  // standard "waiting for <provider> confirmation" internal note.
+  return (
+    /awaiting the user'?s confirmation/.test(t) ||
+    /a (confirm|approval) prompt (is|has been) (shown|posted)/.test(t) ||
+    /\bwaiting for\b[^.]*\bconfirm(ation)?\b/.test(t) ||
+    /\bconfirm(ation)? (prompt|card)\b[^.]*\b(pending|posted|shown|in chat)\b/.test(t)
+  );
+}
+
 export function dispatchResultText(
   text: string,
   routing: RoutingContext,
@@ -1381,6 +1418,26 @@ export function dispatchResultText(
   // (e.g. agent emitted only `<internal>...</internal>`, or returned an
   // empty result).
   if (sent === 0) {
+    if (addressed && isAwaitingSensitiveConfirmation(text)) {
+      // EXPECTED pause, NOT a failure: the agent hit the sensitive-action
+      // gate and is waiting for the user's in-chat Confirm tap. The gate
+      // told it to "end your turn now without commentary", so it
+      // correctly produced zero <message> output. Emitting the scary
+      // "[degraded — likely tool failure] this is a bug" safety-net here
+      // (which is what happened on EVERY gated request before this guard,
+      // 2026-05-18) is wrong and was the single biggest confidence-killer:
+      // the user sees "broken" first, then the real answer arrives ~20s
+      // later via the engine replay → appr-note path. Stay silent; the
+      // result will follow once they confirm. Tell the host the turn is
+      // over so typing stops.
+      log(
+        'addressed turn produced no output but is AWAITING SENSITIVE-GATE ' +
+          'CONFIRMATION — suppressing degraded fallback (result will arrive ' +
+          'via the post-confirm replay)',
+      );
+      emitSilentTurnComplete();
+      return { sent, hasUnwrapped, dispatched };
+    }
     if (addressed) {
       // A human @mentioned this agent or replied to it, and the agent
       // produced nothing to send back. Staying silent here is always

@@ -5,7 +5,7 @@ import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
 import { MockProvider } from './providers/mock.js';
-import { shouldSendErrorResponseForBatch, dispatchResultText } from './poll-loop.js';
+import { shouldSendErrorResponseForBatch, dispatchResultText, isAwaitingSensitiveConfirmation } from './poll-loop.js';
 import type { RoutingContext } from './formatter.js';
 import type { ProviderEvent } from './providers/types.js';
 
@@ -538,6 +538,52 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(JSON.parse(out[0].content)).toEqual({ action: 'silent_turn_complete' });
   });
 
+  it('SUPPRESSES the scary degraded fallback on an addressed turn that is awaiting sensitive-gate confirmation', () => {
+    // 2026-05-18 confidence-killer: a gated request makes the model end
+    // its turn with only `<internal>Waiting for X confirmation.</internal>`
+    // (zero <message>) — an addressed, zero-output turn. Pre-fix this hit
+    // the "[degraded — likely tool failure] this is a bug, try again"
+    // safety-net BEFORE the user even tapped Confirm; the real answer
+    // arrived ~20s later. It is an EXPECTED pause, not a failure: must
+    // emit a quiet silent_turn_complete, NOT a chat message.
+    insertChannelDestination('boys-night');
+
+    dispatchResultText(
+      '<internal>Waiting for Google Calendar confirmation.</internal>',
+      ROUTING,
+      true, // addressed
+    );
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].kind).toBe('system');
+    expect(JSON.parse(out[0].content)).toEqual({
+      action: 'silent_turn_complete',
+    });
+    // Crucially: NO scary "this is a bug / tool failure" chat message.
+    const anyChat = out.find((m) => m.channel_type !== null);
+    expect(anyChat).toBeUndefined();
+  });
+
+  it('REGRESSION GUARD: a genuine no-output addressed turn (not confirm) STILL emits the degraded fallback', () => {
+    // The real tool-failure case (2026-05-17 AI Friends) must keep
+    // surfacing the visible-degraded message — the confirm-suppression
+    // must be precise, not a blanket silencer of addressed-silent turns.
+    insertChannelDestination('boys-night');
+
+    dispatchResultText(
+      '<internal>search_conversations returned nothing and I have no answer.</internal>',
+      ROUTING,
+      true, // addressed
+    );
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    const text = JSON.parse(out[0].content).text;
+    expect(text).toContain("couldn't produce a reply this turn");
+    expect(out[0].channel_type).toBe(ROUTING.channelType);
+  });
+
   it('emits silent_turn_complete (not safety-net chat) for <internal>-only output (private maintenance turn)', () => {
     insertChannelDestination('boys-night');
 
@@ -728,5 +774,34 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     // was addressed so we deliberately do NOT fall back to the control
     // row, but we also cannot invent a destination).
     expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+});
+
+describe('isAwaitingSensitiveConfirmation (false-degraded suppression detector)', () => {
+  it('matches the model\'s standard "waiting for <provider> confirmation" internal note', () => {
+    expect(isAwaitingSensitiveConfirmation('<internal>Waiting for Google Calendar confirmation.</internal>')).toBe(
+      true,
+    );
+    expect(isAwaitingSensitiveConfirmation('Waiting for iXACT confirmation')).toBe(true);
+  });
+
+  it("matches the gate's verbatim pending-result language", () => {
+    expect(
+      isAwaitingSensitiveConfirmation("`google_call` is awaiting the user's confirmation (a prompt is shown in chat)."),
+    ).toBe(true);
+    expect(isAwaitingSensitiveConfirmation('A confirm prompt has been posted in the chat.')).toBe(true);
+  });
+
+  it('does NOT match a genuine tool failure / no-answer turn (the real degraded case must survive)', () => {
+    expect(
+      isAwaitingSensitiveConfirmation(
+        '<internal>search_conversations returned nothing and I have no answer.</internal>',
+      ),
+    ).toBe(false);
+    expect(isAwaitingSensitiveConfirmation('the calendar API returned a 500 error')).toBe(false);
+    expect(isAwaitingSensitiveConfirmation('')).toBe(false);
+    // Mentions "confirm" but not as a pending-gate pause — must not
+    // over-match and silence a real reply.
+    expect(isAwaitingSensitiveConfirmation('I booked it. Can you confirm the date works for you?')).toBe(false);
   });
 });
