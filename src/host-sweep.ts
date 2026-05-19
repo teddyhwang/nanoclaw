@@ -70,6 +70,52 @@ export function parseSqliteUtc(s: string): number {
 }
 
 const SWEEP_INTERVAL_MS = 60_000;
+/**
+ * Per-session sweep timeout. `sweepSession` opens/writes a session's
+ * inbound.db; for a continuously-alive container holding that DB under
+ * VirtioFS, the host-side better-sqlite3 op can block indefinitely (the
+ * S405 hazard). The sweep loop awaits sessions sequentially, so one
+ * hung session strands the whole tick and `setTimeout(sweep)` never
+ * re-arms — every recurring task + due-wake group-wide then freezes
+ * until a manual restart (observed 2026-05-19, 3h45m outage). Racing
+ * each session against this bound lets the loop abandon a hung session
+ * and continue. The abandoned op is NOT cancelled (better-sqlite3 is
+ * synchronous; nothing can interrupt it) — its promise just settles
+ * later, ignored. Generous vs the ~1s healthy sweepSession so a slow-
+ * but-progressing session is never falsely skipped.
+ */
+const SWEEP_SESSION_TIMEOUT_MS = 20_000;
+/**
+ * If no sweep tick has COMPLETED in this long, the loop is presumed
+ * wedged (every plausible single-session stall is bounded by
+ * SWEEP_SESSION_TIMEOUT_MS × #sessions, far under this) and the
+ * independent watchdog re-arms a fresh sweep. Defense-in-depth analogous
+ * to the dev-agent queue-poll watchdog (super-repo 5339ada6).
+ */
+const SWEEP_STALL_THRESHOLD_MS = 5 * 60 * 1000;
+
+class SweepTimeoutError extends Error {
+  constructor(sessionId: string, ms: number) {
+    super(`sweepSession(${sessionId}) exceeded ${ms}ms — abandoned this tick`);
+    this.name = 'SweepTimeoutError';
+  }
+}
+
+/**
+ * Resolve `p`, or reject with SweepTimeoutError after `ms`. The timer is
+ * always cleared so a fast resolve never leaks a pending handle.
+ */
+function withTimeout<T>(p: Promise<T>, ms: number, sessionId: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new SweepTimeoutError(sessionId, ms)), ms);
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(timer)) as Promise<T>;
+}
+
+/** Test seam for the per-session sweep-isolation primitive (Task #3). */
+export const _withTimeoutForTesting = withTimeout;
+export { SweepTimeoutError as _SweepTimeoutErrorForTesting };
 // Absolute idle ceiling for a running container. If the heartbeat file hasn't
 // been touched in this long, the container is either stuck or doing genuinely
 // nothing — kill and restart on the next inbound.
@@ -202,19 +248,65 @@ export function decideStuckAction(args: {
 }
 
 let running = false;
+/**
+ * Wall-clock of the last sweep tick that ran to completion (reached the
+ * `setTimeout(sweep)` re-arm). The watchdog compares against this; the
+ * normal chain bumps it every tick.
+ */
+let lastSweepCompletedAt = Date.now();
+/** Generation token so a watchdog re-arm retires any stale chain link. */
+let sweepGeneration = 0;
+let sweepWatchdogStarted = false;
+
+export function _getLastSweepCompletedAtForTests(): number {
+  return lastSweepCompletedAt;
+}
 
 export function startHostSweep(): void {
   if (running) return;
   running = true;
-  sweep();
+  lastSweepCompletedAt = Date.now();
+  startSweepWatchdog();
+  sweep(sweepGeneration);
 }
 
 export function stopHostSweep(): void {
   running = false;
 }
 
-async function sweep(): Promise<void> {
+/**
+ * Independent liveness watchdog for the sweep loop. The chain re-arms
+ * via setTimeout outside per-session error handling, so it "can't"
+ * break — but a hung sequential `await sweepSession` did exactly that
+ * (2026-05-19, group-wide 3h45m freeze). SWEEP_SESSION_TIMEOUT_MS now
+ * bounds each session, but this is the structural backstop: if no tick
+ * has completed in SWEEP_STALL_THRESHOLD_MS, log loudly and re-arm a
+ * fresh generation (the old chain's next link sees a generation
+ * mismatch and dies, so there is never a double chain). `unref()`'d so
+ * it never holds the process open by itself.
+ */
+function startSweepWatchdog(): void {
+  if (sweepWatchdogStarted) return;
+  sweepWatchdogStarted = true;
+  const iv = setInterval(() => {
+    if (!running) return;
+    const since = Date.now() - lastSweepCompletedAt;
+    if (since > SWEEP_STALL_THRESHOLD_MS) {
+      log.error('Host sweep stalled — re-arming a fresh sweep chain', {
+        sinceLastCompletedMs: since,
+        thresholdMs: SWEEP_STALL_THRESHOLD_MS,
+      });
+      sweepGeneration += 1;
+      lastSweepCompletedAt = Date.now(); // avoid immediate re-fire if the re-arm is also slow
+      sweep(sweepGeneration);
+    }
+  }, SWEEP_STALL_THRESHOLD_MS);
+  iv.unref?.();
+}
+
+async function sweep(generation: number): Promise<void> {
   if (!running) return;
+  if (generation !== sweepGeneration) return; // superseded by a watchdog re-arm
 
   try {
     const sessions = getActiveSessions();
@@ -230,7 +322,25 @@ async function sweep(): Promise<void> {
       }
     }
     for (const session of sessions) {
-      await sweepSession(session);
+      // Per-session isolation + timeout: a session whose inbound.db is
+      // wedged under VirtioFS must not strand the whole tick (the
+      // 2026-05-19 group-wide freeze). A timeout or throw on one
+      // session is logged and skipped; the loop continues.
+      try {
+        await withTimeout(sweepSession(session), SWEEP_SESSION_TIMEOUT_MS, session.id);
+      } catch (err) {
+        if (err instanceof SweepTimeoutError) {
+          log.error('Sweep skipped a session (timed out) — continuing tick', {
+            sessionId: session.id,
+            timeoutMs: SWEEP_SESSION_TIMEOUT_MS,
+          });
+        } else {
+          log.error('sweepSession threw — continuing tick', {
+            sessionId: session.id,
+            err,
+          });
+        }
+      }
     }
   } catch (err) {
     log.error('Host sweep error', { err });
@@ -239,14 +349,28 @@ async function sweep(): Promise<void> {
   // Independent of the active-session loop: revive recurring tasks
   // stranded in closed sessions of agents that have no active session
   // (and thus no inbound to trigger the carry-forward plugins). Own
-  // try/catch so a failure here never aborts the main sweep.
+  // try/catch so a failure here never aborts the main sweep. Bounded by
+  // the same per-session timeout discipline: it opens closed sessions'
+  // inbound.dbs read-only, which can hit the same VirtioFS stall.
   try {
-    await reviveStrandedRecurringTasks();
+    await withTimeout(reviveStrandedRecurringTasks(), SWEEP_SESSION_TIMEOUT_MS, 'revive-stranded');
   } catch (err) {
-    log.error('Stranded-task revival error', { err });
+    if (err instanceof SweepTimeoutError) {
+      log.error('Stranded-task revival timed out — continuing', {
+        timeoutMs: SWEEP_SESSION_TIMEOUT_MS,
+      });
+    } else {
+      log.error('Stranded-task revival error', { err });
+    }
   }
 
-  setTimeout(sweep, SWEEP_INTERVAL_MS);
+  // Tick completed — the loop is alive. Bump the watchdog heartbeat and
+  // re-arm under our generation (a watchdog re-arm would have bumped the
+  // generation, retiring this link).
+  lastSweepCompletedAt = Date.now();
+  if (generation === sweepGeneration) {
+    setTimeout(() => sweep(generation), SWEEP_INTERVAL_MS);
+  }
 }
 
 /**

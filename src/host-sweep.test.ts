@@ -20,6 +20,8 @@ import {
   _reviveStrandedRecurringTasksForTesting,
   _shouldForceFailClaimStuckForTesting,
   _shouldRunRecurrenceForTesting,
+  _withTimeoutForTesting,
+  _SweepTimeoutErrorForTesting,
   decideStuckAction,
   pickIdleTimeoutMs,
   parseSqliteUtc,
@@ -1000,5 +1002,73 @@ describe('getLatestHumanInboundMs — only chat-sdk counts as "human"', () => {
       )
       .run();
     expect(getLatestHumanInboundMs(inDb)).toBe(Date.parse('2026-05-19T00:05:00.000Z'));
+  });
+});
+
+describe('withTimeout — per-session sweep isolation (2026-05-19 group-wide freeze)', () => {
+  // Root cause of the AI Friends RSS escalation: the sweep loop awaits
+  // sessions sequentially, so one sweepSession() blocked on a wedged
+  // inbound.db under VirtioFS stranded the entire tick and
+  // setTimeout(sweep) never re-armed — every recurring task + due-wake
+  // group-wide froze 3h45m. withTimeout bounds each session so the loop
+  // abandons a hung one and continues.
+
+  it('resolves with the value when the wrapped promise wins the race', async () => {
+    const fast = Promise.resolve('swept');
+    await expect(_withTimeoutForTesting(fast, 1000, 'sess-fast')).resolves.toBe('swept');
+  });
+
+  it('propagates the wrapped promise rejection unchanged (not masked as a timeout)', async () => {
+    const boom = Promise.reject(new Error('sweepSession real failure'));
+    await expect(_withTimeoutForTesting(boom, 1000, 'sess-err')).rejects.toThrow('sweepSession real failure');
+  });
+
+  it('rejects with SweepTimeoutError when the wrapped promise hangs past ms', async () => {
+    vi.useFakeTimers();
+    try {
+      // A promise that never settles models the wedged-inbound.db
+      // sweepSession that caused the outage.
+      const hang = new Promise<void>(() => {});
+      const raced = _withTimeoutForTesting(hang, 20_000, 'sess-wedged');
+      const assertion = expect(raced).rejects.toBeInstanceOf(_SweepTimeoutErrorForTesting);
+      await vi.advanceTimersByTimeAsync(20_001);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('SweepTimeoutError message names the session and the bound', async () => {
+    vi.useFakeTimers();
+    try {
+      const hang = new Promise<void>(() => {});
+      const raced = _withTimeoutForTesting(hang, 20_000, 'sess-xyz');
+      const caught: Promise<Error> = raced.then(
+        () => {
+          throw new Error('expected timeout, got resolve');
+        },
+        (e: unknown) => e as Error,
+      );
+      await vi.advanceTimersByTimeAsync(20_001);
+      const err = await caught;
+      expect(err).toBeInstanceOf(_SweepTimeoutErrorForTesting);
+      expect(err.message).toContain('sess-xyz');
+      expect(err.message).toContain('20000ms');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('clears the timeout timer on fast resolve (no leaked pending handle)', async () => {
+    vi.useFakeTimers();
+    try {
+      const clearSpy = vi.spyOn(globalThis, 'clearTimeout');
+      await _withTimeoutForTesting(Promise.resolve(1), 50_000, 'sess-clean');
+      // .finally(clearTimeout) ran — a leaked timer would otherwise keep
+      // the event loop armed for 50s after the sweep moved on.
+      expect(clearSpy).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
