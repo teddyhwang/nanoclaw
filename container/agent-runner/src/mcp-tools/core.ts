@@ -14,7 +14,12 @@ import { getCurrentInReplyTo } from '../current-batch.js';
 import { getCurrentBatchReplyTarget } from '../db/session-state.js';
 import { getInboundDb, getOutboundDb } from '../db/connection.js';
 import { findByName, getAllDestinations } from '../destinations.js';
-import { getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
+import {
+  getMessageIdBySeq,
+  getReplyTargetMessageIdBySeq,
+  getRoutingBySeq,
+  writeMessageOut,
+} from '../db/messages-out.js';
 import { getSessionRouting } from '../db/session-routing.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
@@ -144,6 +149,37 @@ function destinationList(): string {
   return all.map((d) => d.name).join(', ');
 }
 
+function parseMessageSeq(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isInteger(value) && value > 0) return value;
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim().replace(/^#/, '');
+  if (!/^\d+$/.test(trimmed)) return null;
+  const seq = Number(trimmed);
+  return Number.isSafeInteger(seq) && seq > 0 ? seq : null;
+}
+
+function resolveExplicitReplyTarget(
+  rawSeq: unknown,
+  routing: { channel_type: string; platform_id: string },
+): { inReplyTo: string | null } | { error: string } {
+  if (rawSeq == null || rawSeq === '') return { inReplyTo: null };
+
+  const seq = parseMessageSeq(rawSeq);
+  if (seq == null) return { error: 'reply_to_message_id must be a positive message id like 7 or "#7".' };
+
+  const targetRouting = getRoutingBySeq(seq);
+  if (!targetRouting) return { error: `Message #${seq} not found.` };
+  if (targetRouting.channel_type !== routing.channel_type || targetRouting.platform_id !== routing.platform_id) {
+    return { error: `Message #${seq} is not in the selected destination.` };
+  }
+
+  const platformMessageId = getReplyTargetMessageIdBySeq(seq);
+  if (!platformMessageId) {
+    return { error: `Message #${seq} has not been delivered yet, so it cannot be used as a reply target.` };
+  }
+  return { inReplyTo: platformMessageId };
+}
+
 /**
  * Resolve a destination name to routing fields.
  *
@@ -210,6 +246,11 @@ export const sendMessage: McpToolDefinition = {
           description: 'Destination name (e.g., "family", "worker-1"). Optional if you have only one destination.',
         },
         text: { type: 'string', description: 'Message content' },
+        reply_to_message_id: {
+          anyOf: [{ type: 'integer' }, { type: 'string' }],
+          description:
+            'Optional message id to reply-pill under, using the visible #N/N id from the transcript. Must be in the same destination and already delivered.',
+        },
       },
       required: ['text'],
     },
@@ -221,10 +262,13 @@ export const sendMessage: McpToolDefinition = {
     const routing = resolveRouting(args.to as string | undefined);
     if ('error' in routing) return err(routing.error);
 
+    const explicitReply = resolveExplicitReplyTarget(args.reply_to_message_id, routing);
+    if ('error' in explicitReply) return err(explicitReply.error);
+
     const id = generateId();
     const seq = writeMessageOut({
       id,
-      in_reply_to: resolveInReplyTo(routing.channel_type, routing.platform_id),
+      in_reply_to: explicitReply.inReplyTo ?? resolveInReplyTo(routing.channel_type, routing.platform_id),
       kind: 'chat',
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,

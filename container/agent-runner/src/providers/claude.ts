@@ -21,7 +21,7 @@ function log(msg: string): void {
   console.error(`[claude-provider] ${msg}`);
 }
 
-const MESSAGE_BLOCK_RE = /<message\s+to="[^"]+"\s*>[\s\S]*?<\/message>/;
+const MESSAGE_BLOCK_RE = /<message\s+[^>]*\bto="[^"]+"[^>]*>[\s\S]*?<\/message>/;
 const INTERNAL_BLOCK_RE = /<internal>[\s\S]*?<\/internal>/g;
 
 export function extractAssistantText(message: unknown): string | null {

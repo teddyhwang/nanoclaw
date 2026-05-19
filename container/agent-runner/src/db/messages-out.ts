@@ -91,9 +91,7 @@ export function getMessageIdBySeq(seq: number): string | null {
   const inbound = getInboundDb();
 
   // Inbound messages: ID is already the platform message ID
-  const inRow = inbound.prepare('SELECT id FROM messages_in WHERE seq = ?').get(seq) as
-    | { id: string }
-    | undefined;
+  const inRow = inbound.prepare('SELECT id FROM messages_in WHERE seq = ?').get(seq) as { id: string } | undefined;
   if (inRow) return inRow.id;
 
   // Outbound messages: look up platform message ID from delivered table
@@ -110,6 +108,30 @@ export function getMessageIdBySeq(seq: number): string | null {
 
   // Fallback to internal ID (edits/reactions on undelivered messages won't work)
   return outRow.id;
+}
+
+/**
+ * Resolve a seq to a platform message id suitable for `in_reply_to`.
+ *
+ * Unlike getMessageIdBySeq(), this never falls back to the container's
+ * internal outbound id. A reply pill must target a real platform message;
+ * using an internal `msg-*` id makes adapters post a broken/no-op reply.
+ */
+export function getReplyTargetMessageIdBySeq(seq: number): string | null {
+  const inbound = getInboundDb();
+
+  const inRow = inbound.prepare('SELECT id FROM messages_in WHERE seq = ?').get(seq) as { id: string } | undefined;
+  if (inRow) return inRow.id;
+
+  const outRow = getOutboundDb().prepare('SELECT id FROM messages_out WHERE seq = ?').get(seq) as
+    | { id: string }
+    | undefined;
+  if (!outRow) return null;
+
+  const deliveredRow = inbound
+    .prepare("SELECT platform_message_id FROM delivered WHERE message_out_id = ? AND status = 'delivered'")
+    .get(outRow.id) as { platform_message_id: string | null } | undefined;
+  return deliveredRow?.platform_message_id ?? null;
 }
 
 /**

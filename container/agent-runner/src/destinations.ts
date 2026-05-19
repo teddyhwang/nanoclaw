@@ -190,13 +190,16 @@ function buildDestinationsSection(): string {
   lines.push(
     'Wrap each delivered message in a `<message to="name">…</message>` block; include several blocks in one response to address several destinations. `<internal>…</internal>` marks thinking you don\'t want sent.',
   );
+  lines.push(
+    'To visibly chain a new outbound message under an earlier delivered message, add `reply_to_message_id="#N"` to the `<message>` tag (for example `<message to="name" reply_to_message_id="#7">Resolved.</message>`). Use only a message id from the same destination.',
+  );
   lines.push('');
   lines.push(
     'When replying to an incoming message, default to addressing the destination it came `from` (every inbound `<message>` tag carries a `from="name"` attribute). Pick a different destination when the request asks for it (e.g., "tell Laura that…").',
   );
   lines.push('');
   lines.push(
-    'The `send_message` MCP tool is the same delivery, available mid-turn — handy for a quick acknowledgment ("on it") before a slow tool call. Each `send_message` call and each final-response `<message>` block lands as its own message in the conversation, so they read as a sequence rather than as one combined reply.',
+    'The `send_message` MCP tool is the same delivery, available mid-turn — handy for a quick acknowledgment ("on it") before a slow tool call. It also accepts `reply_to_message_id` for the same reply-pill behavior. Each `send_message` call and each final-response `<message>` block lands as its own message in the conversation, so they read as a sequence rather than as one combined reply.',
   );
   return lines.join('\n');
 }

@@ -1,6 +1,6 @@
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
-import { writeMessageOut } from './db/messages-out.js';
+import { getReplyTargetMessageIdBySeq, getRoutingBySeq, writeMessageOut } from './db/messages-out.js';
 import { writeTaskFire, type TaskFireDispatch } from './db/task-fires.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import {
@@ -1306,6 +1306,13 @@ export interface DispatchedMessage {
   destination: string;
   body: string;
 }
+
+interface MessageBlock {
+  to: string;
+  replyToSeq: number | null;
+  body: string;
+}
+
 /**
  * True when a zero-output addressed turn ended because the agent hit
  * the sensitive-action gate and is correctly WAITING for the user's
@@ -1356,7 +1363,7 @@ export function dispatchResultText(
   // prior silent-turn behavior unchanged.
   addressed = false,
 ): { sent: number; hasUnwrapped: boolean; dispatched: DispatchedMessage[] } {
-  const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
+  const MESSAGE_RE = /<message\s+([^>]*)>([\s\S]*?)<\/message>/g;
 
   let match: RegExpExecArray | null;
   let sent = 0;
@@ -1377,9 +1384,14 @@ export function dispatchResultText(
     if (match.index > lastIndex) {
       scratchpadParts.push(text.slice(lastIndex, match.index));
     }
-    const toName = match[1];
-    const body = match[2].trim();
+    const block = parseMessageBlock(match[1], match[2]);
     lastIndex = MESSAGE_RE.lastIndex;
+    if (!block) {
+      scratchpadParts.push(`[dropped: malformed <message> block] ${match[2].trim()}`);
+      continue;
+    }
+    const toName = block.to;
+    const body = block.body;
 
     const dest = findByName(toName);
     if (!dest) {
@@ -1393,7 +1405,11 @@ export function dispatchResultText(
       continue;
     }
     seen.add(dedupKey);
-    sendToDestination(dest, body, routing);
+    const sentOk = sendToDestination(dest, body, routing, block.replyToSeq);
+    if (!sentOk) {
+      scratchpadParts.push(`[dropped: invalid reply target for "${toName}"] ${body}`);
+      continue;
+    }
     dispatched.push({ destination: toName, body });
     sent++;
   }
@@ -1585,12 +1601,23 @@ function deliverSafetyNet(
 function resolveDispatchReplyTarget(
   routing: RoutingContext,
   destRouting: { threadId: string | null; inReplyTo: string | null } | null,
+  explicitReplyToSeq: number | null = null,
+  explicitRouting?: { channel_type: string; platform_id: string },
 ): string | null {
+  if (explicitReplyToSeq != null && explicitRouting) {
+    const explicit = resolveExplicitReplyTarget(explicitReplyToSeq, explicitRouting);
+    if (explicit) return explicit;
+  }
   if (routing.inReplyTo == null) return null; // task / accumulate turn — never pill
   return destRouting?.inReplyTo ?? routing.inReplyTo;
 }
 
-function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): void {
+function sendToDestination(
+  dest: DestinationEntry,
+  body: string,
+  routing: RoutingContext,
+  explicitReplyToSeq: number | null = null,
+): boolean {
   const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
   const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
   // Resolve thread_id per-destination from the most recent inbound message
@@ -1598,15 +1625,58 @@ function sendToDestination(dest: DestinationEntry, body: string, routing: Routin
   // different destinations have different thread contexts — using a single
   // routing.threadId would stamp one channel's thread onto another.
   const destRouting = resolveDestinationThread(channelType, platformId);
+  const inReplyTo = resolveDispatchReplyTarget(routing, destRouting, explicitReplyToSeq, {
+    channel_type: channelType,
+    platform_id: platformId,
+  });
+  if (explicitReplyToSeq != null && inReplyTo == null) {
+    log(`Invalid reply_to_message_id #${explicitReplyToSeq} for <message to="${dest.name}">, dropping block`);
+    return false;
+  }
   writeMessageOut({
     id: generateId(),
-    in_reply_to: resolveDispatchReplyTarget(routing, destRouting),
+    in_reply_to: inReplyTo,
     kind: 'chat',
     platform_id: platformId,
     channel_type: channelType,
     thread_id: destRouting?.threadId ?? null,
     content: JSON.stringify({ text: body }),
   });
+  return true;
+}
+
+function parseMessageBlock(attrs: string, rawBody: string): MessageBlock | null {
+  const parsed: Record<string, string> = {};
+  const attrRe = /([A-Za-z_][\w:-]*)="([^"]*)"/g;
+  let match: RegExpExecArray | null;
+  while ((match = attrRe.exec(attrs)) !== null) {
+    parsed[match[1]] = match[2];
+  }
+  const to = parsed.to?.trim();
+  if (!to) return null;
+  const replyToSeq = parseMessageSeq(parsed.reply_to_message_id);
+  if (parsed.reply_to_message_id != null && replyToSeq == null) return null;
+  return { to, replyToSeq, body: rawBody.trim() };
+}
+
+function parseMessageSeq(value: string | null | undefined): number | null {
+  if (value == null || value === '') return null;
+  const trimmed = value.trim().replace(/^#/, '');
+  if (!/^\d+$/.test(trimmed)) return null;
+  const seq = Number(trimmed);
+  return Number.isSafeInteger(seq) && seq > 0 ? seq : null;
+}
+
+function resolveExplicitReplyTarget(
+  seq: number,
+  routing: { channel_type: string; platform_id: string },
+): string | null {
+  const targetRouting = getRoutingBySeq(seq);
+  if (!targetRouting) return null;
+  if (targetRouting.channel_type !== routing.channel_type || targetRouting.platform_id !== routing.platform_id) {
+    return null;
+  }
+  return getReplyTargetMessageIdBySeq(seq);
 }
 
 /**

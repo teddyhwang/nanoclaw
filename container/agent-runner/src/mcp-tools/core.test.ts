@@ -194,6 +194,61 @@ describe('send_message MCP tool — in_reply_to plumbing', () => {
     expect(out).toHaveLength(1);
     expect(out[0].in_reply_to).toBe('plat-msg-42');
   });
+
+  it('honors explicit reply_to_message_id on a task/status turn', async () => {
+    const db = getInboundDb();
+    db.prepare(
+      `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+       VALUES ('chan', 'Chan', 'channel', 'discord', 'discord:gid:cid', NULL)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO messages_in (seq, id, channel_type, platform_id, thread_id, kind, trigger, status, timestamp, content)
+       VALUES (2, 'incident-start-platform-id', 'discord', 'discord:gid:cid', NULL, 'chat-sdk', 1, 'completed', '2026-05-19T12:00:00Z', '{}')`,
+    ).run();
+    setCurrentBatchReplyTarget(null);
+
+    await sendMessage.handler({ to: 'chan', text: '✅ AI status resolved', reply_to_message_id: '#2' });
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].in_reply_to).toBe('incident-start-platform-id');
+  });
+
+  it('rejects explicit reply_to_message_id from a different destination', async () => {
+    const db = getInboundDb();
+    db.prepare(
+      `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+       VALUES ('chan', 'Chan', 'channel', 'discord', 'discord:gid:cid', NULL)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO messages_in (seq, id, channel_type, platform_id, thread_id, kind, trigger, status, timestamp, content)
+       VALUES (2, 'other-platform-id', 'discord', 'discord:other:channel', NULL, 'chat-sdk', 1, 'completed', '2026-05-19T12:00:00Z', '{}')`,
+    ).run();
+
+    const res = await sendMessage.handler({ to: 'chan', text: 'resolved', reply_to_message_id: 2 });
+
+    expect(res.isError).toBe(true);
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+
+  it('rejects an undelivered outbound message as an explicit reply target', async () => {
+    const db = getInboundDb();
+    db.prepare(
+      `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+       VALUES ('chan', 'Chan', 'channel', 'discord', 'discord:gid:cid', NULL)`,
+    ).run();
+    getOutboundDb()
+      .prepare(
+        `INSERT INTO messages_out (id, seq, in_reply_to, timestamp, kind, platform_id, channel_type, thread_id, content)
+         VALUES ('out-undelivered', 3, NULL, datetime('now'), 'chat', 'discord:gid:cid', 'discord', NULL, '{}')`,
+      )
+      .run();
+
+    const res = await sendMessage.handler({ to: 'chan', text: 'resolved', reply_to_message_id: 3 });
+
+    expect(res.isError).toBe(true);
+    expect(getUndeliveredMessages()).toHaveLength(1);
+  });
 });
 
 /**

@@ -525,6 +525,42 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(text).not.toContain('[degraded');
   });
 
+  it('allows an explicit reply_to_message_id on a task-style <message> block', () => {
+    insertChannelDestination('boys-night');
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (seq, id, channel_type, platform_id, thread_id, kind, trigger, status, timestamp, content)
+         VALUES (2, 'incident-start-platform-id', ?, ?, NULL, 'chat-sdk', 1, 'completed', '2026-05-19T12:00:00Z', '{}')`,
+      )
+      .run(ROUTING.channelType, ROUTING.platformId);
+
+    dispatchResultText('<message to="boys-night" reply_to_message_id="#2">✅ AI status resolved</message>', {
+      ...ROUTING,
+      inReplyTo: null,
+    });
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).text).toContain('AI status resolved');
+    expect(out[0].in_reply_to).toBe('incident-start-platform-id');
+  });
+
+  it('keeps task-style <message> blocks standalone when no explicit reply target is supplied', () => {
+    insertChannelDestination('boys-night');
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (seq, id, channel_type, platform_id, thread_id, kind, trigger, status, timestamp, content)
+         VALUES (2, 'stale-human-platform-id', ?, ?, NULL, 'chat-sdk', 1, 'completed', '2026-05-19T12:00:00Z', '{}')`,
+      )
+      .run(ROUTING.channelType, ROUTING.platformId);
+
+    dispatchResultText('<message to="boys-night">🔥 AI status update</message>', { ...ROUTING, inReplyTo: null });
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].in_reply_to).toBeNull();
+  });
+
   it('emits silent_turn_complete control row (no chat) for empty/whitespace-only result text', () => {
     insertChannelDestination('boys-night');
 

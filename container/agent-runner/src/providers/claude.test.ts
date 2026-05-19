@@ -36,6 +36,15 @@ describe('ClaudeProvider result delivery helpers', () => {
     expect(text).toBe('<message to="chat">Final answer.</message>');
   });
 
+  it('treats message blocks with extra attributes as wrapped final results', () => {
+    const text = selectResultTextForDelivery(
+      '<message to="chat" reply_to_message_id="#7">Resolved.</message>',
+      '<message to="chat">Working on it.</message>',
+    );
+
+    expect(text).toBe('<message to="chat" reply_to_message_id="#7">Resolved.</message>');
+  });
+
   it('keeps unwrapped public final text so the poll-loop safety net can label it', () => {
     const text = selectResultTextForDelivery('Done but forgot the wrapper.', '<message to="chat">Working.</message>');
 
