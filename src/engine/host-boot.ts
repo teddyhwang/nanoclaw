@@ -181,7 +181,21 @@ export async function _bootForHost(opts: { managedSignals: boolean }): Promise<v
   startSweepDeliveryPoll();
   log.info('Delivery polls started');
 
-  // 6. Start host sweep
+  // 6. One-time legacy-series migration, then start host sweep.
+  //
+  // Migrate any recurring task series still stranded in per-session
+  // inbound.dbs (or the .recurring-carryover.json sidecar) into the new
+  // agent-group-scoped schedule.db BEFORE the sweep runs, so the first
+  // sweep already materializes from the converged schedule and nothing
+  // skips a fire across the cutover. Idempotent + never throws — a
+  // converged deployment no-ops, a failure logs and boot continues.
+  try {
+    const { migrateLegacySeries } = await import('../modules/scheduling/migrate-legacy-series.js');
+    migrateLegacySeries();
+  } catch (err) {
+    log.error('Legacy-series migration threw — continuing boot', { err });
+  }
+
   startHostSweep();
   log.info('Host sweep started');
 

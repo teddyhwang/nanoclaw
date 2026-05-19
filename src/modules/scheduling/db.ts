@@ -1,18 +1,128 @@
 /**
- * Task DB helpers used by the scheduling module.
+ * Session-inbound.db helpers for the scheduling module.
  *
- * Tasks are `messages_in` rows with `kind='task'`. This module doesn't own
- * its own table — it piggybacks on the core schema. That's why there's no
- * `module-scheduling-*.ts` migration file.
+ * The task *series* now lives in the host-only agent-group schedule.db
+ * (schedule-store.ts) — that is the source of truth and the S405 fix.
+ * This file owns only the two things that still legitimately touch a
+ * session's inbound.db:
  *
- * cancel/pause/resume match any live row in the series, not just the exact id.
- * Recurring tasks get a new row per occurrence (see handleRecurrence), all
- * sharing series_id. Matching by id alone would only hit the completed row
- * the agent remembers, missing the live next occurrence.
+ *   1. `materializeOccurrence` — the single fire-time INSERT of one due
+ *      occurrence (the host sweep's only inbound.db scheduling write).
+ *   2. `projectSeriesSnapshot` — a read-only `task_series` snapshot the
+ *      host writes into inbound.db in the same bounded sweep write window
+ *      so the container's `list_tasks` can read its task list locally
+ *      without ever touching schedule.db.
+ *
+ * The legacy `messages_in`-as-series helpers (insertTask / cancelTask /
+ * getCompletedRecurring / …) are retained ONLY for the one-time boot
+ * migration that imports pre-schedule.db live series out of old session
+ * inbound.dbs (see migrate-legacy-series.ts). They are no longer on any
+ * live scheduling path.
  */
 import type Database from 'better-sqlite3';
 
 import { nextEvenSeq } from '../../db/session-db.js';
+import type { TaskSeriesRow } from './schedule-store.js';
+
+/**
+ * Materialize ONE due occurrence of a series into a session's inbound.db.
+ *
+ * This is the only scheduling write the host makes to inbound.db. It is a
+ * fresh pending `kind='task'`, `trigger=1` row the container picks up
+ * exactly like a wake message (countDueMessages / getDueTaskRows /
+ * getPendingMessages). `process_after` and `recurrence` are NULL: the
+ * occurrence is due *now* (it's only materialized because schedule.db said
+ * the series was due), and recurrence bookkeeping belongs to schedule.db,
+ * not this transient row. `series_id` carries the stable series handle so
+ * task.fired plugins and downstream identity stamping keep working
+ * unchanged. ON CONFLICT(id) DO NOTHING — the occurrence id is unique per
+ * fire, so this only no-ops on a re-delivered id (defensive).
+ */
+export function materializeOccurrence(
+  db: Database.Database,
+  occ: {
+    id: string;
+    seriesId: string;
+    kind: string;
+    content: string;
+    platformId: string | null;
+    channelType: string | null;
+    threadId: string | null;
+  },
+): void {
+  db.prepare(
+    `INSERT INTO messages_in (id, seq, timestamp, status, tries, process_after, recurrence, kind, platform_id, channel_type, thread_id, content, series_id, trigger)
+     VALUES (@id, @seq, datetime('now'), 'pending', 0, NULL, NULL, @kind, @platformId, @channelType, @threadId, @content, @seriesId, 1)
+     ON CONFLICT(id) DO NOTHING`,
+  ).run({
+    id: occ.id,
+    seriesId: occ.seriesId,
+    kind: occ.kind,
+    content: occ.content,
+    platformId: occ.platformId,
+    channelType: occ.channelType,
+    threadId: occ.threadId,
+    seq: nextEvenSeq(db),
+  });
+}
+
+/**
+ * True iff this session's inbound.db still holds an UNCONSUMED occurrence
+ * for the series (pending or processing). Used by the materializer to
+ * avoid stacking a second occurrence on top of a fire the container hasn't
+ * picked up yet (slow/cold container) — the schedule still advances so the
+ * cron clock doesn't drift, but the inbound.db isn't double-fed.
+ */
+export function sessionHasLiveSeriesRow(db: Database.Database, seriesId: string): boolean {
+  return (
+    db
+      .prepare(
+        `SELECT 1 FROM messages_in
+          WHERE series_id = ? AND kind = 'task'
+            AND status IN ('pending', 'processing') LIMIT 1`,
+      )
+      .get(seriesId) !== undefined
+  );
+}
+
+/**
+ * Read-only `task_series` projection table. The container's list_tasks
+ * runs inside the sandbox and can only see /workspace/inbound.db — it
+ * cannot open the host-only schedule.db. So the host REPLACEs this
+ * snapshot of the agent group's live series into the session's inbound.db
+ * during the same single-writer sweep window as the fire INSERT (bounded,
+ * not a separate per-tick churn path). list_tasks reads it locally; the
+ * container never writes it (host-owned, like the rest of inbound.db).
+ */
+const TASK_SERIES_SNAPSHOT_SCHEMA = `
+CREATE TABLE IF NOT EXISTS task_series (
+  series_id     TEXT PRIMARY KEY,
+  status        TEXT NOT NULL,
+  recurrence    TEXT,
+  process_after TEXT,
+  content       TEXT NOT NULL
+);`;
+
+export function projectSeriesSnapshot(db: Database.Database, series: TaskSeriesRow[]): void {
+  db.exec(TASK_SERIES_SNAPSHOT_SCHEMA);
+  const tx = db.transaction((rows: TaskSeriesRow[]) => {
+    db.prepare('DELETE FROM task_series').run();
+    const stmt = db.prepare(
+      `INSERT INTO task_series (series_id, status, recurrence, process_after, content)
+       VALUES (@series_id, @status, @recurrence, @process_after, @content)`,
+    );
+    for (const r of rows) {
+      stmt.run({
+        series_id: r.series_id,
+        status: r.status,
+        recurrence: r.recurrence,
+        process_after: r.process_after,
+        content: r.content,
+      });
+    }
+  });
+  tx(series);
+}
 
 export function insertTask(
   db: Database.Database,

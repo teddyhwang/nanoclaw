@@ -1,34 +1,61 @@
 /**
- * Tests for `handleRecurrence` — specifically the timezone-aware cron
- * interpretation ported from v1 (src/v1/task-scheduler.ts).
+ * Tests for `handleRecurrence` — the fire-time materializer.
  *
- * Core invariant: cron expressions are interpreted in the user's TIMEZONE,
- * not UTC. Without this, `"0 9 * * *"` fires at 09:00 UTC instead of 09:00
- * user-local — a recurring scheduling bug users can't diagnose.
+ * Post-S405-fix model: the series lives in the host-only agent-group
+ * schedule.db. handleRecurrence reads due series from schedule.db, writes
+ * ONE pending occurrence into the session inbound.db, and advances the
+ * series in schedule.db (next cron occurrence, or cancel a one-shot).
+ *
+ * Invariants under test:
+ *  - a due recurring series materializes exactly one inbound.db occurrence
+ *    and the series advances to a FUTURE process_after (still pending);
+ *  - cron is interpreted in TIMEZONE, not UTC (ported from v1) — the
+ *    advanced process_after is a real future instant;
+ *  - a one-shot fires once then the series is cancelled (never fires
+ *    twice);
+ *  - a not-yet-due series materializes nothing;
+ *  - idempotency: a second tick while the prior occurrence is still
+ *    unconsumed does NOT stack a duplicate inbound.db row (but the
+ *    schedule still advances so the cron clock doesn't drift).
+ *
+ * schedule.db is opened via the base-dir-explicit seam (openScheduleDbAt
+ * + the injectable opener arg on handleRecurrence) so the test is
+ * hermetic and not bound to config.ts's import-time DATA_DIR snapshot.
  */
 import fs from 'fs';
 import path from 'path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { ensureSchema, openInboundDb } from '../../db/session-db.js';
-import { insertTask } from './db.js';
 import { handleRecurrence } from './recurrence.js';
+import { openScheduleDbAt, upsertSeries } from './schedule-store.js';
 import type { Session } from '../../types.js';
 
-const TEST_DIR = '/tmp/nanoclaw-recurrence-test';
-const DB_PATH = path.join(TEST_DIR, 'inbound.db');
+const TEST_ROOT = '/tmp/nanoclaw-recurrence-test';
+const AG = 'ag-test';
+const SESS = 'sess-test';
+const BASE = path.join(TEST_ROOT, 'data', 'v2-sessions');
+const SESS_DIR = path.join(BASE, AG, SESS);
+const IN_DB = path.join(SESS_DIR, 'inbound.db');
 
-function freshDb() {
-  if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
-  fs.mkdirSync(TEST_DIR, { recursive: true });
-  ensureSchema(DB_PATH, 'inbound');
-  return openInboundDb(DB_PATH);
-}
+// Base-dir-explicit opener injected into handleRecurrence so it reads the
+// same tmp schedule.db the test seeds.
+const openSched = (ag: string) => openScheduleDbAt(BASE, ag);
+
+beforeEach(() => {
+  if (fs.existsSync(TEST_ROOT)) fs.rmSync(TEST_ROOT, { recursive: true });
+  fs.mkdirSync(SESS_DIR, { recursive: true });
+  ensureSchema(IN_DB, 'inbound');
+});
+
+afterEach(() => {
+  if (fs.existsSync(TEST_ROOT)) fs.rmSync(TEST_ROOT, { recursive: true });
+});
 
 function fakeSession(): Session {
   return {
-    id: 'sess-test',
-    agent_group_id: 'ag-test',
+    id: SESS,
+    agent_group_id: AG,
     messaging_group_id: 'mg-test',
     thread_id: null,
     status: 'active',
@@ -38,61 +65,139 @@ function fakeSession(): Session {
   } as Session;
 }
 
-afterEach(() => {
-  if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
-});
-
-describe('handleRecurrence', () => {
-  it('clones a completed recurring task with a next-run in the future', async () => {
-    const db = freshDb();
-    insertTask(db, {
-      id: 'task-1',
-      processAfter: '2020-01-01T00:00:00.000Z',
-      recurrence: '0 9 * * *', // every day at 09:00 (user TZ)
+function seedSeries(seriesId: string, recurrence: string | null, processAfter: string | null) {
+  const sched = openScheduleDbAt(BASE, AG);
+  try {
+    upsertSeries(sched, {
+      seriesId,
+      agentGroupId: AG,
+      recurrence,
+      processAfter,
+      content: JSON.stringify({ prompt: 'do it', script: null, createdByUserId: null }),
       platformId: null,
       channelType: null,
       threadId: null,
-      content: JSON.stringify({ prompt: 'daily digest' }),
     });
-    db.prepare(`UPDATE messages_in SET status='completed' WHERE id='task-1'`).run();
+  } finally {
+    sched.close();
+  }
+}
 
-    await handleRecurrence(db, fakeSession());
-
-    const rows = db
-      .prepare(`SELECT id, status, process_after, recurrence, series_id FROM messages_in ORDER BY seq`)
+function inboundTaskRows() {
+  const db = openInboundDb(IN_DB);
+  try {
+    return db
+      .prepare(
+        `SELECT id, status, process_after, recurrence, series_id, kind, trigger
+           FROM messages_in WHERE kind='task' ORDER BY seq`,
+      )
       .all() as Array<{
       id: string;
       status: string;
-      process_after: string;
+      process_after: string | null;
       recurrence: string | null;
       series_id: string;
+      kind: string;
+      trigger: number;
     }>;
-    expect(rows).toHaveLength(2);
-    const original = rows.find((r) => r.id === 'task-1')!;
-    const follow = rows.find((r) => r.id !== 'task-1')!;
-    expect(original.recurrence).toBeNull();
-    expect(follow.status).toBe('pending');
-    expect(follow.recurrence).toBe('0 9 * * *');
-    expect(follow.series_id).toBe('task-1');
-    expect(new Date(follow.process_after).getTime()).toBeGreaterThan(Date.now());
+  } finally {
+    db.close();
+  }
+}
+
+function seriesRow(seriesId: string) {
+  const sched = openScheduleDbAt(BASE, AG);
+  try {
+    return sched
+      .prepare(`SELECT status, process_after, last_fired_at FROM task_series WHERE series_id=?`)
+      .get(seriesId) as { status: string; process_after: string | null; last_fired_at: string | null };
+  } finally {
+    sched.close();
+  }
+}
+
+describe('handleRecurrence — fire-time materialization', () => {
+  it('materializes one due occurrence and advances the recurring series into the future', async () => {
+    seedSeries('task-1', '0 9 * * *', '2020-01-01T00:00:00.000Z'); // long overdue
+    const inDb = openInboundDb(IN_DB);
+    try {
+      await handleRecurrence(inDb, fakeSession(), openSched);
+    } finally {
+      inDb.close();
+    }
+
+    const rows = inboundTaskRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].series_id).toBe('task-1');
+    expect(rows[0].status).toBe('pending');
+    expect(rows[0].trigger).toBe(1);
+    // The occurrence is a fire-now row: recurrence + process_after live in
+    // schedule.db, not on the transient inbound row.
+    expect(rows[0].recurrence).toBeNull();
+    expect(rows[0].process_after).toBeNull();
+    expect(rows[0].id).not.toBe('task-1'); // fresh occurrence id, not the series id
+
+    const series = seriesRow('task-1');
+    expect(series.status).toBe('pending'); // still live (recurring)
+    expect(new Date(series.process_after!).getTime()).toBeGreaterThan(Date.now()); // advanced
+    expect(series.last_fired_at).toBeTruthy();
   });
 
-  it('does not clone rows whose recurrence is already cleared', async () => {
-    const db = freshDb();
-    insertTask(db, {
-      id: 'task-1',
-      processAfter: '2020-01-01T00:00:00.000Z',
-      recurrence: null,
-      platformId: null,
-      channelType: null,
-      threadId: null,
-      content: JSON.stringify({ prompt: 'one-off' }),
-    });
-    db.prepare(`UPDATE messages_in SET status='completed' WHERE id='task-1'`).run();
+  it('fires a one-shot exactly once then cancels the series', async () => {
+    seedSeries('task-oneshot', null, '2020-01-01T00:00:00.000Z');
+    const inDb = openInboundDb(IN_DB);
+    try {
+      await handleRecurrence(inDb, fakeSession(), openSched);
+    } finally {
+      inDb.close();
+    }
 
-    await handleRecurrence(db, fakeSession());
+    expect(inboundTaskRows()).toHaveLength(1);
+    const series = seriesRow('task-oneshot');
+    expect(series.status).toBe('cancelled');
+    expect(series.process_after).toBeNull();
+  });
 
-    const count = (db.prepare(`SELECT COUNT(*) AS c FROM messages_in`).get() as { c: number }).c;
-    expect(count).toBe(1);
+  it('materializes nothing for a not-yet-due series', async () => {
+    seedSeries('task-future', '0 9 * * *', new Date(Date.now() + 3600_000).toISOString());
+    const inDb = openInboundDb(IN_DB);
+    try {
+      await handleRecurrence(inDb, fakeSession(), openSched);
+    } finally {
+      inDb.close();
+    }
+    expect(inboundTaskRows()).toHaveLength(0);
+    expect(seriesRow('task-future').status).toBe('pending'); // untouched
+  });
+
+  it('is idempotent: a second tick with the prior occurrence still live does not stack a duplicate', async () => {
+    seedSeries('task-rec', '*/5 * * * *', '2020-01-01T00:00:00.000Z');
+
+    const run = async () => {
+      const inDb = openInboundDb(IN_DB);
+      try {
+        await handleRecurrence(inDb, fakeSession(), openSched);
+      } finally {
+        inDb.close();
+      }
+    };
+
+    await run();
+    expect(inboundTaskRows()).toHaveLength(1);
+    const firstFiredAt = seriesRow('task-rec').last_fired_at;
+
+    // Force the series due again (simulate the next cron tick arriving)
+    // while the first occurrence is STILL pending (container hasn't
+    // consumed it). The materializer must not add a second inbound row,
+    // but must still process the series (advance + restamp last_fired_at)
+    // so the cron clock keeps tracking. (process_after can legitimately
+    // resolve to the same wall-clock slot for a fixed */5 cron — the
+    // advance is observable via last_fired_at, which always restamps.)
+    await new Promise((r) => setTimeout(r, 5));
+    seedSeries('task-rec', '*/5 * * * *', '2020-01-01T00:00:00.000Z');
+    await run();
+
+    expect(inboundTaskRows()).toHaveLength(1); // NO duplicate
+    expect(seriesRow('task-rec').last_fired_at).not.toBe(firstFiredAt); // re-processed
   });
 });

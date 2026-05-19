@@ -29,15 +29,8 @@
 import Database from 'better-sqlite3';
 import fs from 'fs';
 
-import {
-  getActiveSessions,
-  getAgentGroupIdsWithClosedNoActiveSessions,
-  getSessionsByAgentGroup,
-  findSessionByAgentGroup,
-} from './db/sessions.js';
+import { getActiveSessions } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
-import { hasDueStrandedRecurringTask } from './modules/scheduling/strand-detect.js';
-import { resolveSession } from './session-manager.js';
 import {
   countDueMessages,
   deleteOrphanProcessingClaims,
@@ -310,17 +303,6 @@ async function sweep(generation: number): Promise<void> {
 
   try {
     const sessions = getActiveSessions();
-    // Prune S405 defer tracker for sessions that left the active set
-    // (closed/deleted between sweeps) so the Map can't grow unbounded
-    // over a long-lived host process. Active sessions self-clear via
-    // clearRecurrenceDefer on their next idle sweep; this only catches
-    // the active→gone transition that never gets that sweep.
-    if (recurrenceDefers.size > 0) {
-      const activeIds = new Set(sessions.map((s) => s.id));
-      for (const id of recurrenceDefers.keys()) {
-        if (!activeIds.has(id)) recurrenceDefers.delete(id);
-      }
-    }
     for (const session of sessions) {
       // Per-session isolation + timeout: a session whose inbound.db is
       // wedged under VirtioFS must not strand the whole tick (the
@@ -346,23 +328,17 @@ async function sweep(generation: number): Promise<void> {
     log.error('Host sweep error', { err });
   }
 
-  // Independent of the active-session loop: revive recurring tasks
-  // stranded in closed sessions of agents that have no active session
-  // (and thus no inbound to trigger the carry-forward plugins). Own
-  // try/catch so a failure here never aborts the main sweep. Bounded by
-  // the same per-session timeout discipline: it opens closed sessions'
-  // inbound.dbs read-only, which can hit the same VirtioFS stall.
-  try {
-    await withTimeout(reviveStrandedRecurringTasks(), SWEEP_SESSION_TIMEOUT_MS, 'revive-stranded');
-  } catch (err) {
-    if (err instanceof SweepTimeoutError) {
-      log.error('Stranded-task revival timed out — continuing', {
-        timeoutMs: SWEEP_SESSION_TIMEOUT_MS,
-      });
-    } else {
-      log.error('Stranded-task revival error', { err });
-    }
-  }
+  // (Stranded-recurring-task revival removed.) That band-aid existed
+  // because a series LIVED in a session's inbound.db: when the session
+  // closed with no active successor, the sweep — which only iterates
+  // active sessions — never saw the row and the series stranded forever.
+  // The schedule is now the agent-group-scoped, host-only schedule.db,
+  // independent of any session's lifecycle. A closed session no longer
+  // strands its series: the next sweep of ANY active session in the
+  // agent group materializes the due occurrence from schedule.db, and
+  // the one-time boot migration (migrate-legacy-series.ts) imports any
+  // pre-existing series out of old inbound.dbs. The whole stranded class
+  // is gone with the storage move — there is nothing left to revive.
 
   // Tick completed — the loop is alive. Bump the watchdog heartbeat and
   // re-arm under our generation (a watchdog re-arm would have bumped the
@@ -371,122 +347,6 @@ async function sweep(generation: number): Promise<void> {
   if (generation === sweepGeneration) {
     setTimeout(() => sweep(generation), SWEEP_INTERVAL_MS);
   }
-}
-
-/**
- * Revive recurring tasks stranded in closed sessions.
- *
- * The bug this closes: a scheduled-only agent whose session was closed
- * (operator clear-session, restart-induced close, v1-migration legacy) and
- * which receives no further inbound has no path to ever emit
- * `session.created`. The host sweep only iterates ACTIVE sessions, so a due
- * recurring task in the closed session's inbound.db never wakes a container;
- * the carry-forward (apps/optimus task-carry-forward.ts) and maintenance
- * (maintenance-task.ts) re-seed plugins only fire on `session.created`, so
- * the series strands forever. Real instance: the daily `dream-<agId>` task
- * silently stopped firing for days once its session was cleared.
- *
- * Fix: each sweep tick, for every agent group that has a closed session and
- * NO active session, probe each closed session's inbound.db READ-ONLY for a
- * due recurring task. If one exists, create a fresh session via the canonical
- * `resolveSession` path and emit `session.created` — exactly the contract
- * (`router.ts` inbound + `backfill-on-register.ts`) the re-seed plugins
- * already key off. The plugins then carry the series into the fresh session
- * with a freshly-computed `process_after`, the next sweep sees it due in an
- * active session, and the normal wake path fires it.
- *
- * Invariants preserved:
- *  - S405: detection is read-only; the only host write is the plugins'
- *    insert into the BRAND-NEW session's inbound.db, which no container has
- *    ever polled — the torn-page hazard requires a container mid-poll of the
- *    same file and there is none.
- *  - No double-create: `getAgentGroupIdsWithClosedNoActiveSessions` excludes
- *    groups with an active session, the in-loop `findSessionByAgentGroup`
- *    recheck closes the inbound-arrived-mid-tick race, and `resolveSession`
- *    returning `created:false` short-circuits before emit.
- *  - No double-fire: the re-seed plugins are idempotent (match by
- *    id/series_id) and seed exactly one future occurrence from the cron, not
- *    the overdue stranded row. The stranded row stays in the still-closed old
- *    session's inbound.db, which is never swept again, so it cannot fire.
- */
-interface ReviveStrandedDeps {
-  getAgentGroupIdsWithClosedNoActiveSessions: typeof getAgentGroupIdsWithClosedNoActiveSessions;
-  getAgentGroup: typeof getAgentGroup;
-  findSessionByAgentGroup: typeof findSessionByAgentGroup;
-  getSessionsByAgentGroup: typeof getSessionsByAgentGroup;
-  inboundDbPath: typeof inboundDbPath;
-  existsSync: (p: string) => boolean;
-  openInboundReadonly: (p: string) => Database.Database;
-  hasDueStrandedRecurringTask: typeof hasDueStrandedRecurringTask;
-  resolveSession: typeof resolveSession;
-  emitEngineEvent: typeof emitEngineEvent;
-  now: () => string;
-}
-
-const defaultReviveStrandedDeps: ReviveStrandedDeps = {
-  getAgentGroupIdsWithClosedNoActiveSessions,
-  getAgentGroup,
-  findSessionByAgentGroup,
-  getSessionsByAgentGroup,
-  inboundDbPath,
-  existsSync: fs.existsSync,
-  openInboundReadonly: (p) => new Database(p, { readonly: true, fileMustExist: true }),
-  hasDueStrandedRecurringTask,
-  resolveSession,
-  emitEngineEvent,
-  now: () => new Date().toISOString(),
-};
-
-async function reviveStrandedRecurringTasks(deps: ReviveStrandedDeps = defaultReviveStrandedDeps): Promise<void> {
-  const now = deps.now();
-
-  for (const agentGroupId of deps.getAgentGroupIdsWithClosedNoActiveSessions()) {
-    const agentGroup = deps.getAgentGroup(agentGroupId);
-    if (!agentGroup) continue;
-
-    // Race guard: an inbound message could have created an active session
-    // between the v2.db candidate query and now. If so, the normal
-    // active-sweep path owns this group — skip.
-    if (deps.findSessionByAgentGroup(agentGroupId)) continue;
-
-    let needRevive = false;
-    let strandedSessionId: string | undefined;
-    for (const session of deps.getSessionsByAgentGroup(agentGroupId)) {
-      if (session.status !== 'closed') continue;
-      const inPath = deps.inboundDbPath(agentGroupId, session.id);
-      if (!deps.existsSync(inPath)) continue;
-      // READ-ONLY — the host never writes a closed session's inbound.db.
-      const db = deps.openInboundReadonly(inPath);
-      try {
-        if (deps.hasDueStrandedRecurringTask(db, now)) {
-          needRevive = true;
-          strandedSessionId = session.id;
-          break;
-        }
-      } finally {
-        db.close();
-      }
-    }
-    if (!needRevive) continue;
-
-    // Channel-less, agent-scoped session — matches how maintenance-task.ts
-    // seeds the dream series (null messaging group / thread). The
-    // carry-forward plugin permits a null-messaging-group session for
-    // series re-seed.
-    const { session, created } = deps.resolveSession(agentGroupId, null, null, 'agent-shared');
-    if (!created) continue; // an active session appeared concurrently — let the normal path own it
-    deps.emitEngineEvent('session.created', { session, created });
-    log.info('Revived stranded recurring task: created session for closed-only agent group', {
-      agentGroupId,
-      newSessionId: session.id,
-      strandedSessionId,
-    });
-  }
-}
-
-/** Test seam: inject fakes for the engine deps; no DB / filesystem mocking. */
-export function _reviveStrandedRecurringTasksForTesting(deps: Partial<ReviveStrandedDeps>): Promise<void> {
-  return reviveStrandedRecurringTasks({ ...defaultReviveStrandedDeps, ...deps });
 }
 
 async function sweepSession(session: Session): Promise<void> {
@@ -560,125 +420,53 @@ async function sweepSession(session: Session): Promise<void> {
       resetStuckProcessingRows(inDb, outDb, session, 'container not running');
     }
 
-    // 5. Recurrence fanout for completed recurring tasks.
+    // 5. Fire-time materialization of due scheduled series.
     //
-    // S405 lever 2 — host write quiescing. handleRecurrence INSERTs the
-    // next occurrence into inbound.db. inbound.db is journal_mode=DELETE
-    // read by the container over VirtioFS; a host write that lands while
-    // the container is mid-poll can be observed as a torn page →
-    // SQLITE_CORRUPT in the runner (the proven S405 crash-loop on the
-    // merged Degenerates session: an every-5-min recurrence written into
-    // a continuously-polled agent-shared inbound.db). The recurrence row
-    // stays status='completed' with recurrence intact until processed
-    // (getCompletedRecurring + clearRecurrence), so deferring one sweep
-    // loses nothing — the next occurrence just inserts ~60s later, after
-    // the (typically task-only, ~2-min) container has idle-killed and
-    // the DB has exactly one accessor again. Container retry-on-corrupt
-    // (lever 1) is the inner safety net; this removes the collision at
-    // the source for the common case.
+    // The schedule (series, recurrence, next-fire, status) lives in the
+    // host-only agent-group schedule.db (schedule-store.ts), NOT in this
+    // session's inbound.db. handleRecurrence reads the due series from
+    // schedule.db (host owns it alone — no VirtioFS reader, so the
+    // torn-page class is structurally impossible there), INSERTs ONE
+    // pending occurrence into inbound.db per due series, then advances
+    // each series in schedule.db.
     //
-    // Bounded so a continuously-alive session can't defer forever: after
-    // MAX_RECURRENCE_DEFERS consecutive alive-sweeps we let the write
-    // through and rely on lever 1's retry. A session that never idles is
-    // already pathological for a recurring task; unbounded deferral
-    // would silently stop its schedule, which is worse than a
-    // retried-corrupt read.
+    // This is the S405 structural fix: the every-sweep-tick recurrence
+    // churn against a container-polled inbound.db is gone. The only
+    // inbound.db scheduling write is the single fire-time occurrence
+    // INSERT — the same one unavoidable write the wake path already
+    // performs, container-side lever-1 (withInboundDb retry) still covers
+    // it, and the materializer is idempotent (skips if a prior
+    // unconsumed occurrence is still live + ON CONFLICT(id) DO NOTHING).
+    // The S405 lever-2 recurrence-defer machinery + stranded-task
+    // revival are retired with this change — both fought the race this
+    // removes at the source.
+    //
+    // Also project a read-only task_series snapshot of the agent group's
+    // live series into inbound.db in this same bounded write window so
+    // the container's list_tasks can read its task list locally without
+    // ever opening the host-only schedule.db.
     // MODULE-HOOK:scheduling-recurrence:start
-    const { handleRecurrence, getDueRecurringSeriesIds } = await import('./modules/scheduling/recurrence.js');
-    const dueSeries = getDueRecurringSeriesIds(inDb);
-    if (dueSeries.length > 0) {
-      // Force the (per-session, corruption-safe) write if the container
-      // is dead OR ANY due series has independently hit its cap. Keying
-      // the cap per series — not per session — is the 2026-05-16 fix:
-      // the old per-session counter was reset to 0 every time the write
-      // went through for ANY reason, so a high-frequency recurring task
-      // (5-min poller) sharing the inbound.db perpetually reset a
-      // co-resident low-frequency task's (dream, 04:00) progress toward
-      // the cap. The dream series sat completed-with-recurrence for
-      // 8 min (vs the ~5-min design bound) because the shared counter
-      // never reached 5: it climbed 1→4, an unrelated gate-open reset
-      // it, repeat (29 consecutive defer log lines, observed). Per
-      // series, each independently reaches the cap within
-      // MAX_RECURRENCE_DEFERS sweeps regardless of co-resident traffic,
-      // so the orphan window is bounded to ~5 min for EVERY series.
-      const capped = dueSeries.some((s) => recurrenceDeferCount(session.id, s) >= MAX_RECURRENCE_DEFERS);
-      if (!alive || capped) {
-        // The write services every due series at once (one inbound.db
-        // write window — preserves S405 per-session quiescing); clear
-        // each serviced series' counter.
-        for (const s of dueSeries) clearRecurrenceDefer(session.id, s);
-        await handleRecurrence(inDb, session);
-      } else {
-        // Defer: every due series accrues pressure independently. No
-        // cross-series reset — that was the starvation bug.
-        for (const s of dueSeries) {
-          const n = bumpRecurrenceDefer(session.id, s);
-          log.debug('Deferred recurrence: container mid-poll (S405 quiescing)', {
-            sessionId: session.id,
-            seriesId: s,
-            consecutiveDefers: n,
-            maxDefers: MAX_RECURRENCE_DEFERS,
-          });
-        }
+    const { handleRecurrence } = await import('./modules/scheduling/recurrence.js');
+    await handleRecurrence(inDb, session);
+    try {
+      const { openScheduleDb, listLiveSeries } = await import('./modules/scheduling/schedule-store.js');
+      const { projectSeriesSnapshot } = await import('./modules/scheduling/db.js');
+      const sched = openScheduleDb(session.agent_group_id);
+      try {
+        projectSeriesSnapshot(inDb, listLiveSeries(sched));
+      } finally {
+        sched.close();
       }
+    } catch (err) {
+      // A snapshot failure only degrades list_tasks freshness for one
+      // tick; it must never abort the sweep or block materialization.
+      log.error('Failed to project task_series snapshot', { sessionId: session.id, err });
     }
     // MODULE-HOOK:scheduling-recurrence:end
   } finally {
     inDb.close();
     outDb?.close();
   }
-}
-
-// S405 lever 2 — bounded recurrence-deferral tracker. Keyed by
-// (sessionId, seriesId): counts consecutive sweeps where a given
-// series' recurrence fanout was skipped because a container was
-// actively polling that session's inbound.db. Per-series (not
-// per-session) so a high-frequency recurring task can't reset a
-// co-resident low-frequency one's progress toward the cap (the
-// 2026-05-16 degenerate dream-task 8-min orphan). Cleared the moment
-// that series' write goes through (container idle, or its cap reached).
-// 60s sweep × MAX_RECURRENCE_DEFERS=5 caps worst-case schedule slip at
-// ~5 min PER SERIES — acceptable vs. the corrupt crash-loop it
-// prevents; lever 1 still covers the post-cap write.
-const MAX_RECURRENCE_DEFERS = 5;
-const recurrenceDefers = new Map<string, number>();
-
-function deferKey(sessionId: string, seriesId: string): string {
-  // \x1f (unit separator) can't appear in a session or series id, so
-  // it's a collision-free composite key.
-  return `${sessionId}\x1f${seriesId}`;
-}
-function recurrenceDeferCount(sessionId: string, seriesId: string): number {
-  return recurrenceDefers.get(deferKey(sessionId, seriesId)) ?? 0;
-}
-function bumpRecurrenceDefer(sessionId: string, seriesId: string): number {
-  const k = deferKey(sessionId, seriesId);
-  const n = (recurrenceDefers.get(k) ?? 0) + 1;
-  recurrenceDefers.set(k, n);
-  return n;
-}
-function clearRecurrenceDefer(sessionId: string, seriesId: string): void {
-  recurrenceDefers.delete(deferKey(sessionId, seriesId));
-}
-
-/**
- * Test seam for the S405 lever-2 defer gate. Pure decision: given
- * whether a container is alive and the current consecutive-defer
- * count, should the recurrence write run this sweep? Mirrors the
- * inline condition in sweepSession so the bounded-defer invariant is
- * unit-tested without mocking the container runner / filesystem.
- */
-export function _shouldRunRecurrenceForTesting(alive: boolean, consecutiveDefers: number): boolean {
-  return !alive || consecutiveDefers >= MAX_RECURRENCE_DEFERS;
-}
-export const _MAX_RECURRENCE_DEFERS_FOR_TESTING = MAX_RECURRENCE_DEFERS;
-export function _recurrenceDeferHelpersForTesting() {
-  return {
-    count: recurrenceDeferCount,
-    bump: bumpRecurrenceDefer,
-    clear: clearRecurrenceDefer,
-    reset: () => recurrenceDefers.clear(),
-  };
 }
 
 // Session-level claim-stuck circuit-breaker. The per-message MAX_TRIES

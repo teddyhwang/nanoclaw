@@ -155,6 +155,25 @@ export {
   updateTask,
   type TaskUpdate,
 } from '../modules/scheduling/db.js';
+// Agent-group-scoped schedule store (the S405 structural fix — task
+// series now live in a host-only schedule.db, not a session inbound.db).
+// Plugins that seed/own a recurring series (Optimus maintenance/dream
+// task) drive it through this surface instead of insertTask.
+export {
+  openScheduleDb,
+  scheduleDbPath,
+  upsertSeries,
+  hasSeries,
+  cancelSeries,
+  pauseSeries,
+  resumeSeries,
+  updateSeries,
+  listLiveSeries,
+  getDueSeries,
+  type TaskSeriesRow,
+  type SeriesUpdate,
+  type SeriesStatus,
+} from '../modules/scheduling/schedule-store.js';
 
 // Messaging group queries for plugins that need to enumerate which
 // platforms the host owns (e.g. channel-bots driving startup-time

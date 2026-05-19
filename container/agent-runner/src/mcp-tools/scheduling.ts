@@ -143,32 +143,39 @@ export const listTasks: McpToolDefinition = {
   async handler(args) {
     const status = args.status as string | undefined;
     const db = getInboundDb();
-    // One row per series — the live (pending or paused) occurrence. Recurring
-    // tasks accumulate one completed row per firing plus one live follow-up;
-    // exposing the whole pile to the agent is noisy and confuses task identity
-    // ("which id do I cancel?"). The series_id is the stable handle.
-    //
-    // SQLite quirk: when MAX(seq) appears in the SELECT list of a GROUP BY
-    // query, the bare columns take values from the row that contains that max
-    // — that's how we pick "the latest live row per series" in one pass.
+    // Task series now live in the host-only agent-group schedule.db (the
+    // S405 structural fix — the container can't open it). The host
+    // projects a read-only `task_series` snapshot of the agent group's
+    // live series into this session's inbound.db every sweep tick
+    // (src/modules/scheduling/db.ts:projectSeriesSnapshot), so we read
+    // that local snapshot instead of scanning messages_in (which now
+    // only holds transient fired occurrences, not the series).
+    const hasSnapshot =
+      db
+        .prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_series' LIMIT 1`)
+        .get() !== undefined;
+    if (!hasSnapshot) {
+      // No sweep has projected yet (brand-new session, or pre-cutover
+      // inbound.db). Not an error — there are simply no visible series.
+      return ok('No tasks found.');
+    }
+
     let rows;
     if (status) {
       rows = db
         .prepare(
-          `SELECT series_id AS id, status, process_after, recurrence, content, MAX(seq) AS _seq
-             FROM messages_in
-            WHERE kind = 'task' AND status = ?
-            GROUP BY series_id
+          `SELECT series_id AS id, status, process_after, recurrence, content
+             FROM task_series
+            WHERE status = ?
             ORDER BY process_after ASC`,
         )
         .all(status);
     } else {
       rows = db
         .prepare(
-          `SELECT series_id AS id, status, process_after, recurrence, content, MAX(seq) AS _seq
-             FROM messages_in
-            WHERE kind = 'task' AND status IN ('pending', 'paused')
-            GROUP BY series_id
+          `SELECT series_id AS id, status, process_after, recurrence, content
+             FROM task_series
+            WHERE status IN ('pending', 'paused')
             ORDER BY process_after ASC`,
         )
         .all();
