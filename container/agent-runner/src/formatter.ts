@@ -195,11 +195,21 @@ export function extractRouting(messages: MessageInRow[]): RoutingContext {
  * `silent_turn_complete` on an addressed-but-empty turn.
  *
  * Signal priority (each independently sufficient):
- *   1. `content.isMention === true` — the channel adapter's authoritative
- *      "this message @mentions me" flag. Reliable across platforms; the
- *      one signal that was correct on every addressed row in the incident
- *      session (`replyTo.toBot` was observed NULL/inverted in that data,
- *      so we do NOT trust it alone).
+ *   1. `content.isMention === true` AND the mention targets THIS bot.
+ *      The SDK/adapter `isMention` boolean is NOT "mentions me" — for
+ *      chat-sdk Discord it is "a mention exists", true for `<@anyone>`.
+ *      A message @mentioning a *different* bot in the same channel
+ *      therefore looked like this bot was addressed; the bot correctly
+ *      stayed silent and the `sent===0 && addressed` safety-net fired a
+ *      spurious "[degraded — addressed turn produced no output]" with no
+ *      prompt behind it (AI Friends, 2026-05-19). When the row carries
+ *      `content.botUserId` (Discord, stamped by the chat-sdk bridge),
+ *      `isMention` only counts if the text contains an explicit
+ *      `<@thisBotId>` / `<@!thisBotId>` token. When `botUserId` is
+ *      absent (non-Discord, or unconfigured) we keep the old permissive
+ *      behavior — `isMention === true` alone is sufficient — because
+ *      those platforms' `isMention` is already self-specific and we have
+ *      no token to attribute.
  *   2. A reply whose parent is one of THIS agent's messages —
  *      `content.replyTo` present AND (`replyTo.toBot === true` OR
  *      `replyTo.sender` equals this agent's `assistantName`). The sender
@@ -217,13 +227,33 @@ export function isAddressedTurn(messages: MessageInRow[], assistantName: string)
   for (const m of messages) {
     if (m.kind !== 'chat' && m.kind !== 'chat-sdk') continue;
     if (m.trigger !== 1) continue;
-    let parsed: { isMention?: unknown; replyTo?: { toBot?: unknown; sender?: unknown } };
+    let parsed: {
+      isMention?: unknown;
+      botUserId?: unknown;
+      text?: unknown;
+      replyTo?: { toBot?: unknown; sender?: unknown };
+    };
     try {
       parsed = JSON.parse(m.content) as typeof parsed;
     } catch {
       continue;
     }
-    if (parsed.isMention === true) return true;
+    if (parsed.isMention === true) {
+      const botUserId = typeof parsed.botUserId === 'string' ? parsed.botUserId : '';
+      if (botUserId.length === 0) {
+        // No bot id to attribute the mention to (non-Discord platform, or
+        // unconfigured). Keep the historical permissive behavior — these
+        // platforms' isMention is already self-specific.
+        return true;
+      }
+      // Discord: trust isMention only if the text explicitly mentions
+      // THIS bot. `<@id>` and `<@!id>` are both valid Discord user-mention
+      // forms. A mention of a different participant (the AI-Friends
+      // multi-bot case) has isMention=true but no `<@thisBotId>` token,
+      // so it correctly does NOT count as addressed.
+      const text = typeof parsed.text === 'string' ? parsed.text : '';
+      if (text.includes(`<@${botUserId}>`) || text.includes(`<@!${botUserId}>`)) return true;
+    }
     const replyTo = parsed.replyTo;
     if (replyTo) {
       if (replyTo.toBot === true) return true;

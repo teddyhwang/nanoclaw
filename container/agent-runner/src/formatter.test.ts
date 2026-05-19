@@ -886,4 +886,92 @@ describe('isAddressedTurn', () => {
   it('false on empty batch', () => {
     expect(isAddressedTurn([], 'Optimus')).toBe(false);
   });
+
+  // --- botUserId mention-target discrimination (Discord) -----------------
+  // Regression for the spurious "[degraded — addressed turn produced no
+  // output]" in AI Friends (2026-05-19). chat-sdk Discord sets
+  // isMention=true for `<@anyone>`; a message @mentioning a DIFFERENT bot
+  // made Optimus look addressed → silent turn → safety-net false alarm.
+  // The bridge now stamps content.botUserId; isMention only counts when
+  // the text explicitly mentions THIS bot.
+  const OPTIMUS_ID = '1485390229526413444';
+  const OTHER_BOT_ID = '1505612898188398835';
+
+  it('true when an isMention row explicitly mentions THIS bot id', () => {
+    expect(
+      isAddressedTurn(
+        [row({ text: `<@${OPTIMUS_ID}> hellooooo?`, isMention: true, botUserId: OPTIMUS_ID })],
+        'Optimus',
+      ),
+    ).toBe(true);
+  });
+
+  it('true for the `<@!id>` nickname-mention form', () => {
+    expect(
+      isAddressedTurn([row({ text: `<@!${OPTIMUS_ID}> ping`, isMention: true, botUserId: OPTIMUS_ID })], 'Optimus'),
+    ).toBe(true);
+  });
+
+  it('FALSE when isMention is true but the mention targets a DIFFERENT bot', () => {
+    // The exact incident row (seq 72): bigdee_ told degen_ai to look
+    // into something; isMention=true, but the only <@id> is degen_ai's.
+    // Pre-fix this returned true → silent turn → spurious [degraded].
+    expect(
+      isAddressedTurn(
+        [
+          row({
+            text: `<@${OTHER_BOT_ID}> look into this. send me a personal dm`,
+            isMention: true,
+            botUserId: OPTIMUS_ID,
+          }),
+        ],
+        'Optimus',
+      ),
+    ).toBe(false);
+  });
+
+  it('still addressed via reply-to-bot even when the mention is for someone else', () => {
+    // A message can @mention another bot AND be a reply to Optimus — the
+    // reply path must still mark it addressed (defense in depth).
+    expect(
+      isAddressedTurn(
+        [
+          row({
+            text: `<@${OTHER_BOT_ID}> fyi`,
+            isMention: true,
+            botUserId: OPTIMUS_ID,
+            replyTo: { toBot: true },
+          }),
+        ],
+        'Optimus',
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps permissive isMention behavior when botUserId is absent (non-Discord)', () => {
+    // Telegram/Slack etc. don't stamp botUserId; their SDK isMention is
+    // already self-specific, so the historical behavior is preserved.
+    expect(isAddressedTurn([row({ text: '@bot hey', isMention: true })], 'Optimus')).toBe(true);
+  });
+
+  it('mixed batch: addressed only if SOME row mentions this bot', () => {
+    expect(
+      isAddressedTurn(
+        [
+          row({ text: 'ambient' }),
+          row({ text: `<@${OTHER_BOT_ID}> not for us`, isMention: true, botUserId: OPTIMUS_ID }),
+        ],
+        'Optimus',
+      ),
+    ).toBe(false);
+    expect(
+      isAddressedTurn(
+        [
+          row({ text: `<@${OTHER_BOT_ID}> not for us`, isMention: true, botUserId: OPTIMUS_ID }),
+          row({ text: `<@${OPTIMUS_ID}> but this is`, isMention: true, botUserId: OPTIMUS_ID }),
+        ],
+        'Optimus',
+      ),
+    ).toBe(true);
+  });
 });

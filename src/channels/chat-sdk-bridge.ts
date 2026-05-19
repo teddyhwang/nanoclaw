@@ -78,6 +78,19 @@ export interface ChatSdkBridgeConfig {
   concurrency?: ConcurrencyStrategy;
   /** Bot token for authenticating forwarded Gateway events (required for interaction handling). */
   botToken?: string;
+  /**
+   * This bot's platform user id (Discord application/user id). When set,
+   * `messageToInbound` stamps it onto the inbound row as `botUserId` so
+   * the container-side `isAddressedTurn` can tell an @mention of THIS
+   * bot from an @mention of a different participant. Without it the
+   * SDK's `message.isMention` boolean is "a mention exists" (true for
+   * `<@anyone>`), which made a message @mentioning another bot look like
+   * Optimus was addressed → silent turn → spurious "[degraded — addressed
+   * turn produced no output]" (AI Friends, 2026-05-19). Discord sets
+   * this; platforms whose SDK `isMention` is already self-specific
+   * (Telegram) leave it undefined and keep the permissive behavior.
+   */
+  botUserId?: string;
   /** Platform-specific reply context extraction. */
   extractReplyContext?: ReplyContextExtractor;
   /**
@@ -505,6 +518,17 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     // gate drops it instead of self-triggering an empty "addressed" turn.
     // Full rationale + incident chain on isSelfAuthoredChatSdkMessage.
     const authoredBySelf = isSelfAuthoredChatSdkMessage(author);
+
+    // Stamp this bot's platform id into the row content so the
+    // container-side isAddressedTurn can distinguish an @mention of THIS
+    // bot from an @mention of a different participant. The SDK's
+    // top-level `isMention` is only "a mention exists" — true for
+    // `<@anyone>` — so on its own it made a message @mentioning another
+    // bot look like this bot was addressed (→ silent turn → spurious
+    // "[degraded]" in AI Friends 2026-05-19). Only set when known
+    // (Discord); absent on platforms that don't supply it, where
+    // isAddressedTurn keeps its permissive isMention behavior.
+    if (config.botUserId) serialized.botUserId = config.botUserId;
 
     // Drop raw to save DB space (can be very large)
     serialized.raw = undefined;
