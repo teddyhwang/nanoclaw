@@ -5,6 +5,7 @@ import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
 import {
   createChatSdkBridge,
   htmlToMarkdown,
+  isSelfAuthoredChatSdkMessage,
   RECOVERY_PER_PAGE_MAX,
   recoveryPageBudget,
   splitForLimit,
@@ -427,5 +428,37 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(calls).toHaveLength(1);
     const msg = calls[0].message as { markdown?: string };
     expect(msg.markdown).toBe('plain hello');
+  });
+});
+
+describe('isSelfAuthoredChatSdkMessage', () => {
+  // Regression for the spurious "[degraded — addressed turn produced no
+  // output]" with no prompt/trigger (AI Friends, 2026-05-18). Chat-sdk
+  // re-ingests the bot's own outbound as a chat-sdk inbound row; its
+  // author carried { isMe: true, isBot: true } but the bridge never
+  // surfaced isBotMessage, so the router's loopback gate missed it and a
+  // reply-shaped self-message self-triggered an empty addressed turn.
+  it('is true when the SDK marks the author as the connected client (isMe)', () => {
+    expect(isSelfAuthoredChatSdkMessage({ isMe: true })).toBe(true);
+  });
+
+  it('is true when the author is flagged as the bot identity (isBot)', () => {
+    expect(isSelfAuthoredChatSdkMessage({ isBot: true })).toBe(true);
+  });
+
+  it('is true for the exact live shape that caused the spurious degraded post', () => {
+    // Verbatim from the AI Friends inbound row (seq 12): the bot's own
+    // "My mistake — fixed…" reply bounced back through Discord chat-sdk.
+    expect(isSelfAuthoredChatSdkMessage({ isMe: true, isBot: true })).toBe(true);
+  });
+
+  it('is false for a normal human message (no self/bot marker)', () => {
+    expect(isSelfAuthoredChatSdkMessage({ isMe: false, isBot: false })).toBe(false);
+    expect(isSelfAuthoredChatSdkMessage({})).toBe(false);
+  });
+
+  it('is false (never silently drops) when the marker is absent', () => {
+    expect(isSelfAuthoredChatSdkMessage(undefined)).toBe(false);
+    expect(isSelfAuthoredChatSdkMessage(null)).toBe(false);
   });
 });

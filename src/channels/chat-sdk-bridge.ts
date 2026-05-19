@@ -319,6 +319,31 @@ export function recoveryPageBudget(limit: number): {
   return { pageSize, maxPages };
 }
 
+/**
+ * True when a chat-sdk message was authored by the bot itself.
+ *
+ * Chat-sdk re-ingests every message in a channel — including the bot's
+ * own outbound — as a fresh `chat-sdk` inbound row. The SDK flags
+ * self-authored messages on the nested author: `isMe` (this identity is
+ * the connected client) and, for the same identity, `isBot`. Surfacing
+ * this as the envelope's `isBotMessage` lets the router's loopback gate
+ * (`router.ts` isBotLoopback → the engage-skip) drop it. Without it, a
+ * reply-shaped self-message (the bot quoting a user it just answered)
+ * reaches `isReplyToOurBot` → trigger=1 → an "addressed" turn with
+ * nothing to answer → the `sent===0 && addressed` safety-net emits a
+ * spurious "[degraded — addressed turn produced no output]" with no
+ * prompt/trigger behind it (observed live in AI Friends 2026-05-18).
+ * `dbdcc476` fixed the sender-identity half of this bot-clobber bug and
+ * explicitly flagged `isBotMessage` as still unset on this path.
+ *
+ * Conservative: only `true` on an explicit self/bot marker. An absent or
+ * false marker (a normal human message, or an SDK that doesn't populate
+ * it) returns `false` so real messages are never silently dropped.
+ */
+export function isSelfAuthoredChatSdkMessage(author: { isMe?: boolean; isBot?: boolean } | undefined | null): boolean {
+  return author?.isMe === true || author?.isBot === true;
+}
+
 export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter {
   const { adapter } = config;
   const transformText = (t: string): string => (config.transformOutboundText ? config.transformOutboundText(t) : t);
@@ -466,13 +491,20 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     // Project chat-sdk's nested author into the flat sender fields the router
     // expects (see src/router.ts extractAndUpsertUser). Native adapters already
     // populate these directly; this brings chat-sdk adapters in line.
-    const author = serialized.author as { userId?: string; fullName?: string; userName?: string } | undefined;
+    const author = serialized.author as
+      | { userId?: string; fullName?: string; userName?: string; isMe?: boolean; isBot?: boolean }
+      | undefined;
     if (author) {
       const name = author.fullName ?? author.userName;
       serialized.senderId = author.userId;
       serialized.sender = name;
       serialized.senderName = name;
     }
+
+    // Detect the bot's own message bouncing back so the router's loopback
+    // gate drops it instead of self-triggering an empty "addressed" turn.
+    // Full rationale + incident chain on isSelfAuthoredChatSdkMessage.
+    const authoredBySelf = isSelfAuthoredChatSdkMessage(author);
 
     // Drop raw to save DB space (can be very large)
     serialized.raw = undefined;
@@ -484,6 +516,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       timestamp: message.metadata.dateSent.toISOString(),
       isMention,
       isGroup,
+      ...(authoredBySelf && { isBotMessage: true }),
     };
   }
 
