@@ -36,6 +36,21 @@ export const ONECLI_URL = process.env.ONECLI_URL || envConfig.ONECLI_URL;
 export const ONECLI_API_KEY = process.env.ONECLI_API_KEY || envConfig.ONECLI_API_KEY;
 export const MAX_MESSAGES_PER_PROMPT = Math.max(1, parseInt(process.env.MAX_MESSAGES_PER_PROMPT || '10', 10) || 10);
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '120000', 10); // 2min default — keep idle warm containers below short recurring-task cadence
+// Adaptive keep-warm (2026-05-19). The 2min IDLE_TIMEOUT kills the
+// container between turns of a live human conversation, so EVERY message
+// pays a full cold start: container boot + N MCP server handshakes +
+// (codex) app-server model warmup + base-instructions reprocess. The
+// Claude SDK path sidesteps this (in-process, SDK-managed session
+// persistence + prefix cache); the codex app-server path pays it in
+// full each spawn — that, not codex itself, is the "why is it so slow".
+// Fix: while a session has had a HUMAN (chat-sdk) message within
+// ACTIVE_CONVERSATION_WINDOW_MS, keep the container warm for
+// ACTIVE_IDLE_TIMEOUT instead of IDLE_TIMEOUT, so consecutive turns
+// reuse the warm process + already-handshaked MCP servers. A truly idle
+// session (no recent human turn) still falls back to the short
+// IDLE_TIMEOUT, so background/recurring-task sessions don't hoard RAM.
+export const ACTIVE_IDLE_TIMEOUT = parseInt(process.env.ACTIVE_IDLE_TIMEOUT || '900000', 10); // 15min while conversing
+export const ACTIVE_CONVERSATION_WINDOW_MS = parseInt(process.env.ACTIVE_CONVERSATION_WINDOW_MS || '900000', 10); // a human turn within 15min ⇒ "actively conversing"
 export const MAX_CONCURRENT_CONTAINERS = Math.max(1, parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5);
 
 function escapeRegex(str: string): string {

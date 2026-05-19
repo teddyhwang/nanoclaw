@@ -177,6 +177,28 @@ export function getDueTaskRows(db: Database.Database): { id: string; series_id: 
     .all() as { id: string; series_id: string | null; content: string }[];
 }
 
+/**
+ * Epoch-ms of the most recent HUMAN/channel inbound message for this
+ * session, or 0 if none. "Human" = kind='chat-sdk' (a real chat message
+ * from a person/channel) — deliberately EXCLUDES kind='task',
+ * 'reflection', 'appr-note' and other engine-internal rows, which fire
+ * on schedules/internally and must NOT make a background session look
+ * like a live conversation (that would keep idle task-only sessions warm
+ * forever, defeating the point). Used by the adaptive keep-warm idle
+ * decision: a recent chat-sdk turn ⇒ the operator is actively
+ * conversing ⇒ keep the container warm so the next turn reuses the warm
+ * (codex) app-server + already-handshaked MCP servers instead of paying
+ * a full cold start. messages_in.timestamp is an ISO-8601 string.
+ */
+export function getLatestHumanInboundMs(db: Database.Database): number {
+  const row = db.prepare(`SELECT MAX(timestamp) AS ts FROM messages_in WHERE kind = 'chat-sdk'`).get() as
+    | { ts: string | null }
+    | undefined;
+  if (!row?.ts) return 0;
+  const ms = Date.parse(row.ts);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
 export function markMessageFailed(db: Database.Database, messageId: string): void {
   db.prepare("UPDATE messages_in SET status = 'failed' WHERE id = ?").run(messageId);
 }

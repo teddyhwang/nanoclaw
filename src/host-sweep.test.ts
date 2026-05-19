@@ -21,8 +21,10 @@ import {
   _shouldForceFailClaimStuckForTesting,
   _shouldRunRecurrenceForTesting,
   decideStuckAction,
+  pickIdleTimeoutMs,
   parseSqliteUtc,
 } from './host-sweep.js';
+import { getLatestHumanInboundMs } from './db/session-db.js';
 import type { Session } from './types.js';
 
 const BASE = Date.parse('2026-04-20T12:00:00.000Z');
@@ -893,5 +895,110 @@ describe('reviveStrandedRecurringTasks — closed-session revival', () => {
       }),
     );
     expect(emit).not.toHaveBeenCalled();
+  });
+});
+
+describe('pickIdleTimeoutMs — adaptive keep-warm (2026-05-19, the "why is it so slow" fix)', () => {
+  const BASE_IDLE = 120_000; // 2 min
+  const ACTIVE_IDLE = 900_000; // 15 min
+  const WINDOW = 900_000; // 15 min
+  const NOW = 10_000_000;
+
+  it('no human message ever (lastHumanInboundMs=0) ⇒ short timeout (background session, no RAM hoard)', () => {
+    expect(
+      pickIdleTimeoutMs({
+        now: NOW,
+        lastHumanInboundMs: 0,
+        baseIdleMs: BASE_IDLE,
+        activeIdleMs: ACTIVE_IDLE,
+        activeWindowMs: WINDOW,
+      }),
+    ).toBe(BASE_IDLE);
+  });
+
+  it('human message just now ⇒ wide keep-warm (live conversation reuses warm app-server)', () => {
+    expect(
+      pickIdleTimeoutMs({
+        now: NOW,
+        lastHumanInboundMs: NOW - 30_000, // 30s ago
+        baseIdleMs: BASE_IDLE,
+        activeIdleMs: ACTIVE_IDLE,
+        activeWindowMs: WINDOW,
+      }),
+    ).toBe(ACTIVE_IDLE);
+  });
+
+  it('human message exactly at the window edge ⇒ still wide (inclusive)', () => {
+    expect(
+      pickIdleTimeoutMs({
+        now: NOW,
+        lastHumanInboundMs: NOW - WINDOW,
+        baseIdleMs: BASE_IDLE,
+        activeIdleMs: ACTIVE_IDLE,
+        activeWindowMs: WINDOW,
+      }),
+    ).toBe(ACTIVE_IDLE);
+  });
+
+  it('last human message older than the window ⇒ falls back to short timeout (conversation went idle)', () => {
+    expect(
+      pickIdleTimeoutMs({
+        now: NOW,
+        lastHumanInboundMs: NOW - (WINDOW + 1),
+        baseIdleMs: BASE_IDLE,
+        activeIdleMs: ACTIVE_IDLE,
+        activeWindowMs: WINDOW,
+      }),
+    ).toBe(BASE_IDLE);
+  });
+});
+
+describe('getLatestHumanInboundMs — only chat-sdk counts as "human"', () => {
+  it('returns 0 when there are no messages at all', () => {
+    const { inDb } = makeSessionDbs();
+    expect(getLatestHumanInboundMs(inDb)).toBe(0);
+  });
+
+  it('returns 0 when the only rows are engine-internal (task/reflection/appr-note) — NOT a live conversation', () => {
+    // The whole point: a background recurring-task session must NOT look
+    // active, or it would keep its container warm forever.
+    const { inDb } = makeSessionDbs();
+    inDb
+      .prepare(
+        "INSERT INTO messages_in (id, seq, kind, timestamp, status, content) VALUES ('t1', 1, 'task', '2026-05-19T00:00:00.000Z', 'pending', '{}')",
+      )
+      .run();
+    inDb
+      .prepare(
+        "INSERT INTO messages_in (id, seq, kind, timestamp, status, content) VALUES ('r1', 2, 'reflection', '2026-05-19T00:01:00.000Z', 'completed', '{}')",
+      )
+      .run();
+    inDb
+      .prepare(
+        "INSERT INTO messages_in (id, seq, kind, timestamp, status, content) VALUES ('a1', 3, 'appr-note', '2026-05-19T00:02:00.000Z', 'completed', '{}')",
+      )
+      .run();
+    expect(getLatestHumanInboundMs(inDb)).toBe(0);
+  });
+
+  it('returns the latest chat-sdk timestamp, ignoring later engine-internal rows', () => {
+    const { inDb } = makeSessionDbs();
+    inDb
+      .prepare(
+        "INSERT INTO messages_in (id, seq, kind, timestamp, status, content) VALUES ('c1', 1, 'chat-sdk', '2026-05-19T00:00:00.000Z', 'completed', '{}')",
+      )
+      .run();
+    inDb
+      .prepare(
+        "INSERT INTO messages_in (id, seq, kind, timestamp, status, content) VALUES ('c2', 2, 'chat-sdk', '2026-05-19T00:05:00.000Z', 'completed', '{}')",
+      )
+      .run();
+    // A LATER task row must not move the "last human" needle.
+    inDb
+      .prepare(
+        "INSERT INTO messages_in (id, seq, kind, timestamp, status, content) VALUES ('t9', 3, 'task', '2026-05-19T00:09:00.000Z', 'pending', '{}')",
+      )
+      .run();
+    expect(getLatestHumanInboundMs(inDb)).toBe(Date.parse('2026-05-19T00:05:00.000Z'));
   });
 });

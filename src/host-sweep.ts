@@ -43,6 +43,7 @@ import {
   deleteOrphanProcessingClaims,
   getContainerState,
   getDueTaskRows,
+  getLatestHumanInboundMs,
   getRecoverableMessage,
   getProcessingClaims,
   markMessageFailed,
@@ -50,7 +51,7 @@ import {
   syncProcessingAcks,
   type ContainerState,
 } from './db/session-db.js';
-import { IDLE_TIMEOUT } from './config.js';
+import { ACTIVE_CONVERSATION_WINDOW_MS, ACTIVE_IDLE_TIMEOUT, IDLE_TIMEOUT } from './config.js';
 import { emitEngineEvent } from './engine/events.js';
 import { log } from './log.js';
 import { openInboundDb, openOutboundDb, openOutboundDbRw, inboundDbPath, heartbeatPath } from './session-manager.js';
@@ -106,6 +107,30 @@ export type StuckDecision =
   | { action: 'stop-idle'; idleAgeMs: number; idleTimeoutMs: number }
   | { action: 'kill-ceiling'; heartbeatAgeMs: number; ceilingMs: number }
   | { action: 'kill-claim'; messageId: string; claimAgeMs: number; toleranceMs: number };
+
+/**
+ * Pure decision for the adaptive keep-warm idle timeout. While the
+ * session has had a HUMAN (chat-sdk) message within
+ * activeWindowMs, the operator is actively conversing — keep the
+ * container warm for activeIdleMs so the next turn reuses the warm
+ * (codex) app-server + already-handshaked MCP servers instead of a full
+ * cold start (the real "why is it so slow"). A session with no recent
+ * human turn (background/recurring-task only) falls back to the short
+ * baseIdleMs so idle sessions don't hoard RAM. lastHumanInboundMs=0
+ * (never a human msg) ⇒ always the short timeout.
+ */
+export function pickIdleTimeoutMs(args: {
+  now: number;
+  lastHumanInboundMs: number;
+  baseIdleMs: number;
+  activeIdleMs: number;
+  activeWindowMs: number;
+}): number {
+  const { now, lastHumanInboundMs, baseIdleMs, activeIdleMs, activeWindowMs } = args;
+  if (lastHumanInboundMs <= 0) return baseIdleMs;
+  const sinceHuman = now - lastHumanInboundMs;
+  return sinceHuman <= activeWindowMs ? activeIdleMs : baseIdleMs;
+}
 
 /**
  * Pure decision for whether a running container should be killed this sweep
@@ -608,12 +633,26 @@ function enforceRunningContainerSla(
   agentGroupId: string,
   dueCount: number,
 ): void {
+  const now = Date.now();
+  // Adaptive keep-warm: if the operator has sent a human (chat-sdk)
+  // message recently, this is a live conversation — keep the container
+  // warm so the next turn reuses the warm app-server + handshaked MCP
+  // servers instead of a full cold start. Falls back to the short
+  // timeout for background/recurring-task-only sessions.
+  const idleTimeoutMs = pickIdleTimeoutMs({
+    now,
+    lastHumanInboundMs: getLatestHumanInboundMs(inDb),
+    baseIdleMs: IDLE_TIMEOUT,
+    activeIdleMs: ACTIVE_IDLE_TIMEOUT,
+    activeWindowMs: ACTIVE_CONVERSATION_WINDOW_MS,
+  });
   const decision = decideStuckAction({
-    now: Date.now(),
+    now,
     heartbeatMtimeMs: heartbeatMtimeMs(agentGroupId, session.id),
     containerState: getContainerState(outDb),
     claims: getProcessingClaims(outDb),
     dueCount,
+    idleTimeoutMs,
   });
 
   if (decision.action === 'ok') return;
