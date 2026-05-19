@@ -758,6 +758,71 @@ describe('poll loop — task_fires recording', () => {
 
     await loopPromise.catch(() => {});
   });
+
+  it('a task-only follow-up that posts a message does NOT inherit a reply pill', async () => {
+    // The regret after the NUL-sentinel fix (999c201): a task-only turn
+    // (recurring RSS / daily recap) goes multi-batch — it pushes a
+    // task-only follow-up mid-stream (the recap waits on an async
+    // search_conversations, then continues and posts). The follow-up
+    // re-publish block only wrote setCurrentBatchReplyTarget when
+    // pickInReplyToMessage(keep) returned a truthy id. For an all-task
+    // `keep` the picker correctly returns null, so the block was SKIPPED
+    // and the authoritative "no reply pill" null was never republished.
+    // Combined with the per-iteration finally clearCurrentBatchReplyTarget,
+    // the session_state key was ABSENT when the follow-up's send_message
+    // ran → resolveInReplyTo fell to the racy legacy heuristic → the
+    // recap/status post reply-pilled onto a stale ~22h-old chat message
+    // (observed live in AI Friends 2026-05-18/19). The fix publishes the
+    // tri-state unconditionally (target?.id ?? null). Both the initial
+    // task post AND the task follow-up post must go out with NO pill.
+    insertMessage(
+      'm-stale-human',
+      { sender: 'Alice', text: 'a human message from way earlier' },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
+    // Let the stale human message be consumed/answered first so it is no
+    // longer the freshest pending row; the task turns below are what we
+    // assert on.
+    await sleep(50);
+    insertTask('t-recap-1', 'recap-series', { prompt: 'recap turn — post the daily recap' });
+
+    let followedUp = false;
+    const provider = new EndingProvider((p: string) => {
+      if (p.includes('recap turn') && !followedUp) {
+        followedUp = true;
+        // A task-only follow-up lands mid-stream (the async-continuation
+        // shape: search_conversations returns, the recap continues).
+        insertTask('t-recap-2', 'recap-series', {
+          prompt: 'recap follow-up — continue and post',
+        });
+        return '<message to="discord-test">## Recap — initial</message>';
+      }
+      if (p.includes('recap follow-up')) {
+        return '<message to="discord-test">## Recap — continued</message>';
+      }
+      return '<internal>noop</internal>';
+    });
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 3500);
+
+    await waitFor(
+      () => getUndeliveredMessages().filter((m) => JSON.parse(m.content).text?.includes('Recap')).length >= 2,
+      3000,
+    );
+    controller.abort();
+
+    const recapPosts = getUndeliveredMessages().filter((m) => JSON.parse(m.content).text?.includes('Recap'));
+    expect(recapPosts.length).toBeGreaterThanOrEqual(2);
+    // The invariant: NEITHER the initial task post nor the task follow-up
+    // post may carry a reply pill. A task fire answers no chat message.
+    // Pre-fix the follow-up ("Recap — continued") pilled onto the stale
+    // human row; the assertion below fails on that.
+    for (const post of recapPosts) {
+      expect(post.in_reply_to == null || post.in_reply_to === '').toBe(true);
+    }
+
+    await loopPromise.catch(() => {});
+  });
 });
 
 describe('poll loop — stale session recovery', () => {

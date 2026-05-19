@@ -1104,16 +1104,31 @@ async function processQuery(
         // pill. See pickInReplyToMessage for the contract; the accumulate
         // gate above guarantees `keep` has at least one trigger=1 row.
         const target = pickInReplyToMessage(keep);
-        if (target?.id) {
-          routing.inReplyTo = target.id;
-          // Re-publish on BOTH transports. The DB transport is what the
-          // stdio MCP subprocess actually reads; without this republish a
-          // long multi-batch turn would keep the subprocess pinned to the
-          // ORIGINAL batch's target (set at the top of the turn) and
-          // reply-pill follow-up sends onto the wrong message.
-          setCurrentInReplyTo(target.id);
-          setCurrentBatchReplyTarget(target.id);
-        }
+        // Mirror extractRouting's contract EXACTLY: the authoritative
+        // reply target is `target?.id ?? null`. Republishing only when
+        // `target?.id` was truthy was a bug — for a task-only follow-up
+        // (recurring RSS / daily recap, where `keep` is all kind='task'
+        // so the picker correctly returns null) the block was skipped,
+        // so the authoritative "NO reply pill" null was never written.
+        // Combined with the per-iteration `finally` clearCurrentBatch-
+        // ReplyTarget(), the session_state key was ABSENT exactly when
+        // the follow-up's send_message ran → getCurrentBatchReplyTarget()
+        // returned undefined → resolveInReplyTo fell to the racy legacy
+        // isTaskOnlyTurn() heuristic → the recap/status post reply-pilled
+        // onto a stale ~22h-old chat message (observed live 2026-05-18/19
+        // in AI Friends, the regret after the NUL-sentinel fix 999c201).
+        // Publish the tri-state unconditionally so a task-only follow-up
+        // authoritatively suppresses the pill instead of falling back.
+        const nextInReplyTo = target?.id ?? null;
+        routing.inReplyTo = nextInReplyTo;
+        // Re-publish on BOTH transports. The DB transport is what the
+        // stdio MCP subprocess actually reads; without this republish a
+        // long multi-batch turn would keep the subprocess pinned to the
+        // ORIGINAL batch's target (set at the top of the turn) and
+        // reply-pill follow-up sends onto the wrong message — and, for
+        // the task-only case, would leave the key absent entirely.
+        setCurrentInReplyTo(nextInReplyTo);
+        setCurrentBatchReplyTarget(nextInReplyTo);
       } catch (err) {
         // Without this catch the rejection escapes the void IIFE and Node
         // terminates the container on unhandled-rejection. The initial-batch
@@ -1530,13 +1545,49 @@ function deliverSafetyNet(
   const destRouting = resolveDestinationThread(routing.channelType, routing.platformId);
   writeMessageOut({
     id: generateId(),
-    in_reply_to: destRouting?.inReplyTo ?? routing.inReplyTo,
+    in_reply_to: resolveDispatchReplyTarget(routing, destRouting),
     kind: 'chat',
     platform_id: routing.platformId,
     channel_type: routing.channelType,
     thread_id: destRouting?.threadId ?? null,
     content: JSON.stringify({ text: labeled }),
   });
+}
+
+/**
+ * Decide the reply-pill target for a dispatched outbound post.
+ *
+ * `routing.inReplyTo` is the TURN-AUTHORITATIVE target: poll-loop set it
+ * once via `extractRouting → pickInReplyToMessage`, which is `null` for a
+ * task-only / accumulate-only turn (RSS status, daily recap, dream/
+ * maintenance) and the triggering message id for a real chat turn.
+ *
+ * `resolveDestinationThread().inReplyTo` is an independent, TURN-BLIND DB
+ * hunt for the channel's newest non-task trigger=1 row. It exists only
+ * to correct the reply target per-destination in agent-shared sessions
+ * (one session fans out to several chats; routing's single target may
+ * belong to a different chat than the one we're posting to). It must
+ * NEVER resurrect a pill on a turn poll-loop deliberately marked
+ * pill-free — doing so is exactly the recurring RSS/recap reply-pill
+ * regression: `destRouting.inReplyTo ?? routing.inReplyTo` let the stale
+ * DB hunt shadow the authoritative null, so every task fire pilled onto
+ * the newest human @mention ever sent in the channel (observed
+ * 2026-05-11/13/15/18/19 in AI Friends — a ~22h-old "Direct answers from
+ * the chat log…" message). All prior fixes patched the MCP-tool path
+ * (resolveInReplyTo / the session_state tri-state); the <message>-tag
+ * dispatch path always used this turn-blind resolver and kept regressing.
+ *
+ * Contract: when the turn is authoritatively pill-free (routing.inReplyTo
+ * is null) the post stays standalone, period. Only when routing has a
+ * real target do we let the per-destination hunt refine it (or fall back
+ * to routing's own target if the hunt found nothing).
+ */
+function resolveDispatchReplyTarget(
+  routing: RoutingContext,
+  destRouting: { threadId: string | null; inReplyTo: string | null } | null,
+): string | null {
+  if (routing.inReplyTo == null) return null; // task / accumulate turn — never pill
+  return destRouting?.inReplyTo ?? routing.inReplyTo;
 }
 
 function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): void {
@@ -1549,7 +1600,7 @@ function sendToDestination(dest: DestinationEntry, body: string, routing: Routin
   const destRouting = resolveDestinationThread(channelType, platformId);
   writeMessageOut({
     id: generateId(),
-    in_reply_to: destRouting?.inReplyTo ?? routing.inReplyTo,
+    in_reply_to: resolveDispatchReplyTarget(routing, destRouting),
     kind: 'chat',
     platform_id: platformId,
     channel_type: channelType,
