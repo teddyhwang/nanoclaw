@@ -181,6 +181,31 @@ describe('migrate-legacy-series', () => {
     expect(schedRows()).toEqual([{ series_id: `dream-${AG}`, status: 'pending', recurrence: '0 4 * * *' }]);
   });
 
+  it('rejects dream-<other-ag> rows from a merged-in session inbound.db', () => {
+    // Reproduces the discord_degenerates merge case: an old AI Friends
+    // inbound.db got physically relocated under the post-merge ag's
+    // session dir and its dream-<old-ag> series_id was migrated as an
+    // orphan duplicate alongside the legitimate dream-<AG>. The fix:
+    // only migrate the dream series whose suffix matches the current ag.
+    seedInboundSeries('sess-from-merged-in', {
+      id: 'dream-ag-1778154011329-2k7azn',
+      seriesId: 'dream-ag-1778154011329-2k7azn',
+      recurrence: '0 4 * * *',
+    });
+    seedInboundSeries('sess-from-merged-in', {
+      id: 'dream-ag-1778154011334-l0ddl1',
+      seriesId: 'dream-ag-1778154011334-l0ddl1',
+      recurrence: '0 4 * * *',
+    });
+    seedInboundSeries('sess-1', {
+      id: `dream-${AG}`,
+      seriesId: `dream-${AG}`,
+      recurrence: '0 4 * * *',
+    });
+    migrate();
+    expect(schedRows()).toEqual([{ series_id: `dream-${AG}`, status: 'pending', recurrence: '0 4 * * *' }]);
+  });
+
   it('ignores non-recurring and completed/cancelled rows', () => {
     seedInboundSeries('sess-1', { id: 'task-oneshot', seriesId: 'task-oneshot', recurrence: null });
     seedInboundSeries('sess-1', {

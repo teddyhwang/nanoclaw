@@ -41,10 +41,23 @@ const RESERVED_PREFIXES = ['rotate-', 'reflection-'];
  * re-seeds it into schedule.db going forward, but an existing one only
  * lives in an old inbound.db until then). `rotate-`/`reflection-` are
  * transient one-shots that should not be resurrected as series.
+ *
+ * `dream-<other-ag>` rows ARE rejected: a merge that absorbs another
+ * agent group's session dirs (e.g. discord_degenerates pulling in AI
+ * Friends + Boys Night) leaves inbound.dbs whose dream rows carry the
+ * pre-merge ag in the series_id. Migrating those into the post-merge
+ * schedule.db produced orphan duplicates that surfaced as multiple
+ * "agent-wide scheduled tasks" rows in the dashboard. The dream series
+ * for the post-merge ag is re-seeded by maintenance-task on host boot,
+ * so dropping the pre-merge ones here loses nothing.
  */
-function shouldMigrate(seriesId: string): boolean {
+function shouldMigrate(seriesId: string, agentGroupId: string): boolean {
   if (!seriesId) return false;
-  return !RESERVED_PREFIXES.some((p) => seriesId.startsWith(p));
+  if (RESERVED_PREFIXES.some((p) => seriesId.startsWith(p))) return false;
+  if (seriesId.startsWith('dream-') && seriesId !== `dream-${agentGroupId}`) {
+    return false;
+  }
+  return true;
 }
 
 interface LegacySeries {
@@ -125,7 +138,7 @@ export function migrateAgentGroup(agentGroupId: string, agentGroupDir: string, b
   const latest = new Map<string, LegacySeries>();
   const consider = (rows: LegacySeries[]) => {
     for (const r of rows) {
-      if (!shouldMigrate(r.series_id)) continue;
+      if (!shouldMigrate(r.series_id, agentGroupId)) continue;
       const prev = latest.get(r.series_id);
       if (!prev || r._ts > prev._ts) latest.set(r.series_id, r);
     }
