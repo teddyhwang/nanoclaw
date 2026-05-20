@@ -39,6 +39,42 @@ const ACTIVE_POLL_INTERVAL_MS = 500;
 // Host-side IDLE_TIMEOUT defaults to 120s; refresh well under that so
 // one slow tick still leaves multiple ticks of headroom.
 const QUERY_KEEPALIVE_MS = 30_000;
+// Maximum SDK-silent gap the keepalive will bridge. The keepalive exists
+// to cover legitimate LLM-only intervals (long text generation between
+// tool calls, SDK ramp between push() and the first new event). The
+// upper bound on a healthy LLM-only window is a few minutes; anything
+// past STREAM_INACTIVITY_MS without ANY SDK event is the stream stalled
+// half-open, not the model thinking. Past that threshold the keepalive
+// stops touching the heartbeat so host-sweep's adaptive idle timeout
+// (ACTIVE_IDLE_TIMEOUT=15min by default) can finally fire stop-idle.
+//
+// Incident 2026-05-20 (whatsapp_tico, telegram_dm_nicole): two Claude
+// chat containers ran 2–3h after their last `Result:` event because the
+// SDK iterator suspended post-result (legitimate keep-warm shape for
+// follow-up turns) but never resumed/closed. The keepalive kept touching
+// .heartbeat every 30s, the host saw a fresh heartbeat every sweep, and
+// stop-idle could not fire. The codex provider has its own mid-turn
+// inactivity watchdog (`9624e9ad`) for the pre-result variant of this
+// hang; this is the symmetric post-result fix at the keepalive layer so
+// every provider benefits without each implementing their own watchdog.
+// Tuned well above any realistic single LLM-only window so a slow
+// generation never trips it, well below ACTIVE_IDLE_TIMEOUT so the
+// host's stop-idle has time to fire after we stop bumping the
+// heartbeat.
+const STREAM_INACTIVITY_MS = 5 * 60_000;
+
+/**
+ * Pure decision for the keepalive's "should I refresh the heartbeat?"
+ * check. Returns true when the SDK stream has emitted an event within
+ * the inactivity window — i.e. the keepalive should keep bridging the
+ * legitimate LLM-only gap. Returns false once the gap has exceeded
+ * `inactivityMs`, at which point the keepalive stops refreshing
+ * heartbeat so host-sweep's stop-idle path can fire on a stalled
+ * half-open stream. Exported for tests.
+ */
+export function shouldKeepaliveBridge(args: { lastEventAt: number; now: number; inactivityMs: number }): boolean {
+  return args.now - args.lastEventAt <= args.inactivityMs;
+}
 
 function log(msg: string): void {
   console.error(`[poll-loop] ${msg}`);
@@ -715,19 +751,37 @@ async function processQuery(
   // will kill the container and messages get reset to pending.
   let pollInFlight = false;
   let endedForCommand = false;
-  // Keepalive: while the query stream is open, refresh heartbeat at a
-  // cadence well under IDLE_TIMEOUT (default 120s). The for-await loop
-  // below bumps heartbeat on every SDK event, and Pre/PostToolUse hooks
-  // bump on every tool boundary, but neither fires during LLM-only
-  // intervals — a long text generation after the last tool call, or
-  // SDK ramp-up between query.push() and the first new event, can
-  // exceed IDLE_TIMEOUT and trip the host's `stop-idle` kill mid-
-  // thought. The query being open is itself proof of liveness; the
-  // host already detects truly-dead containers via the absolute ceiling
-  // and claim-stuck paths, so a keepalive here only suppresses
-  // false-positive idle kills, not real wedges.
+  // Wall-clock of the last SDK event consumed on the events for-await
+  // below. Initialized at stream open (a half-open stream that never
+  // emits anything would otherwise leave this at 0 and let the
+  // STREAM_INACTIVITY_MS gate fire immediately). Updated on every SDK
+  // event in the events for-await loop. Read by the keepalive interval
+  // to decide whether to refresh the heartbeat — see STREAM_INACTIVITY_MS.
+  let lastEventAt = Date.now();
+  // Keepalive: while the query stream is open AND has shown SDK
+  // activity within STREAM_INACTIVITY_MS, refresh heartbeat at a cadence
+  // well under IDLE_TIMEOUT (default 120s). The for-await loop below
+  // bumps heartbeat on every SDK event, and Pre/PostToolUse hooks bump
+  // on every tool boundary, but neither fires during LLM-only intervals
+  // — a long text generation after the last tool call, or SDK ramp-up
+  // between query.push() and the first new event, can exceed
+  // IDLE_TIMEOUT and trip the host's `stop-idle` kill mid-thought. The
+  // keepalive bridges those windows.
+  //
+  // BUT: an unconditional keepalive structurally suppresses host-side
+  // stop-idle whenever the SDK stream goes silent half-open (Claude
+  // SDK post-`result` keep-warm where the iterator suspends awaiting a
+  // follow-up that never arrives; observed 2026-05-20, two chat
+  // containers ran 2–3h after their last result event because the
+  // keepalive kept .heartbeat fresh forever). Gate on lastEventAt:
+  // once the SDK has gone silent past STREAM_INACTIVITY_MS, stop
+  // touching the heartbeat so host-sweep's adaptive idle timeout can
+  // do its job. A legitimately slow LLM-only interval emits SOME
+  // SDK message (token delta, tool boundary, sub-agent status) inside
+  // this window; only a genuinely stalled stream goes this quiet.
   const keepaliveHandle = setInterval(() => {
     if (done) return;
+    if (!shouldKeepaliveBridge({ lastEventAt, now: Date.now(), inactivityMs: STREAM_INACTIVITY_MS })) return;
     touchHeartbeat();
   }, QUERY_KEEPALIVE_MS);
   const pollHandle = setInterval(() => {
@@ -1087,6 +1141,7 @@ async function processQuery(
         // and fire `stop-idle` mid-stream. Signal "we just gave the agent
         // more work" so the idle clock restarts from now.
         touchHeartbeat();
+        lastEventAt = Date.now();
         query.push(prompt, followupImageBlocks.length > 0 ? followupImageBlocks : undefined);
         markCompleted(keptIds);
         // Refresh routing.inReplyTo so subsequent outbound rows reply to the
@@ -1152,6 +1207,7 @@ async function processQuery(
       for await (const event of query.events) {
         handleEvent(event, routing);
         touchHeartbeat();
+        lastEventAt = Date.now();
 
         if (event.type === 'init') {
           queryContinuation = event.continuation;

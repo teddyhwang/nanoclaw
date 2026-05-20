@@ -5,7 +5,12 @@ import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
 import { MockProvider } from './providers/mock.js';
-import { shouldSendErrorResponseForBatch, dispatchResultText, isAwaitingSensitiveConfirmation } from './poll-loop.js';
+import {
+  shouldSendErrorResponseForBatch,
+  dispatchResultText,
+  isAwaitingSensitiveConfirmation,
+  shouldKeepaliveBridge,
+} from './poll-loop.js';
 import type { RoutingContext } from './formatter.js';
 import type { ProviderEvent } from './providers/types.js';
 
@@ -839,5 +844,34 @@ describe('isAwaitingSensitiveConfirmation (false-degraded suppression detector)'
     // Mentions "confirm" but not as a pending-gate pause — must not
     // over-match and silence a real reply.
     expect(isAwaitingSensitiveConfirmation('I booked it. Can you confirm the date works for you?')).toBe(false);
+  });
+});
+
+describe('shouldKeepaliveBridge', () => {
+  // Guards the post-result keep-warm wedge fix (2026-05-20). The
+  // keepalive's only job is bridging legitimate LLM-only gaps; past the
+  // inactivity window it MUST step aside so host-sweep's stop-idle path
+  // can fire on a stalled half-open stream. See STREAM_INACTIVITY_MS in
+  // poll-loop.ts for the full incident context.
+  const INACTIVITY = 5 * 60_000;
+
+  it('bridges while the stream is freshly active', () => {
+    const now = 1_000_000_000;
+    expect(shouldKeepaliveBridge({ lastEventAt: now, now, inactivityMs: INACTIVITY })).toBe(true);
+    expect(shouldKeepaliveBridge({ lastEventAt: now - 1_000, now, inactivityMs: INACTIVITY })).toBe(true);
+  });
+
+  it('bridges up to and including the inactivity boundary (slow LLM-only window stays alive)', () => {
+    const now = 1_000_000_000;
+    // Exactly at the boundary still counts as "recent enough" — a
+    // healthy slow generation must not be killed by an off-by-one.
+    expect(shouldKeepaliveBridge({ lastEventAt: now - INACTIVITY, now, inactivityMs: INACTIVITY })).toBe(true);
+  });
+
+  it('stops bridging once the inactivity window is exceeded (stalled half-open stream)', () => {
+    const now = 1_000_000_000;
+    expect(shouldKeepaliveBridge({ lastEventAt: now - INACTIVITY - 1, now, inactivityMs: INACTIVITY })).toBe(false);
+    // Two-hour stall — the exact 2026-05-20 incident shape.
+    expect(shouldKeepaliveBridge({ lastEventAt: now - 2 * 60 * 60_000, now, inactivityMs: INACTIVITY })).toBe(false);
   });
 });
