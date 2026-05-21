@@ -171,6 +171,15 @@ export const CLASSIFICATION_REGISTRY: Record<string, Record<string, ToolClass>> 
     opentable_cancel: { classification: 'destructive' },
     opentable_workspace_members: { classification: 'read', pii: true },
   },
+  resy: {
+    resy_search: { classification: 'read' }, // public restaurant data
+    resy_availability: { classification: 'read' },
+    resy_venue: { classification: 'read' },
+    resy_reservations: { classification: 'read', pii: true }, // personal reservations
+    resy_book: { classification: 'write' }, // commits a real reservation
+    resy_cancel: { classification: 'destructive' }, // cancels a real reservation
+    resy_workspace_members: { classification: 'read', pii: true },
+  },
   housesigma: {
     housesigma_search_map: { classification: 'read' }, // public listings
     housesigma_listing_preview: { classification: 'read' },

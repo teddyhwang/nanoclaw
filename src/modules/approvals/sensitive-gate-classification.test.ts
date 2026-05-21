@@ -151,6 +151,26 @@ describe('opentable integration policy', () => {
   });
 });
 
+describe('resy integration policy', () => {
+  it('public restaurant reads → always allow', () => {
+    for (const t of ['resy_search', 'resy_availability', 'resy_venue']) {
+      expect(decide('resy', t, {}, true)).toBe(ALLOW);
+    }
+  });
+  it('resy_reservations = personal PII read (public-only)', () => {
+    expect(decide('resy', 'resy_reservations', {}, false)).toBe(ALLOW);
+    expect(decide('resy', 'resy_reservations', {}, true)).toBe(CONFIRM);
+  });
+  it('book = write (any), cancel = destructive (any)', () => {
+    expect(decide('resy', 'resy_book', {}, false)).toBe(CONFIRM);
+    expect(decide('resy', 'resy_cancel', {}, false)).toBe(CONFIRM);
+  });
+  it('resy_workspace_members = PII read, public only', () => {
+    expect(decide('resy', 'resy_workspace_members', {}, false)).toBe(ALLOW);
+    expect(decide('resy', 'resy_workspace_members', {}, true)).toBe(CONFIRM);
+  });
+});
+
 describe('housesigma + realtorca — all public reads → always allow (except members)', () => {
   it('housesigma listing reads allow even in public', () => {
     for (const t of [
