@@ -131,13 +131,26 @@ export interface RoutingContext {
  * smarter again", "Sorta", emoji, ack) and the older one is the
  * actual @mention the agent is answering. Caller passes messages in
  * `seq DESC` (newest first); we walk to find the newest `trigger=1`
- * row. If none exist (shouldn't happen for normal user-facing
- * batches; possible for pure accumulate-only batches that the
- * accumulate gate above this filter would have already rejected),
- * fall back to the newest message overall so callers always get a
- * non-null id when the batch is non-empty.
+ * row.
  *
- * Returns the picked message or null when the batch is empty.
+ * If no `trigger=1` non-task row exists, returns `null` — NOT a
+ * fallback to the newest `trigger=0` row. A `trigger=0` chat row is
+ * accumulate-only context the agent did not wake for and is not
+ * answering; pinning a reply pill to it is wrong. This is exactly the
+ * recurring AI-Friends RSS regression: a recurring task fires while a
+ * human's earlier `trigger=0` message sits accumulated in the same
+ * batch — the task row is correctly excluded, but the old
+ * `trigger ?? chatLike[0]` fallback then picked the human's
+ * non-trigger message, so the RSS/status post rendered as a reply pill
+ * to it (observed live 2026-05-21 in #ai: an OpenAI-status post pilled
+ * onto Teddy's "it wasn't an image it was this message"). `null` is the
+ * authoritative "no reply pill" signal `resolveDispatchReplyTarget`
+ * depends on — its contract ("`null` for a task-only / accumulate-only
+ * turn") was being violated here. Matches the `kind != 'task' AND
+ * trigger = 1` filter `resolveDestinationThread` already uses.
+ *
+ * Returns the triggering message, or null when the batch is empty or
+ * contains no `trigger=1` non-task row.
  */
 export function pickInReplyToMessage(messages: MessageInRow[]): MessageInRow | null {
   if (messages.length === 0) return null;
@@ -148,8 +161,9 @@ export function pickInReplyToMessage(messages: MessageInRow[]): MessageInRow | n
   // posts in ai-friends, 2026-05-11). Exclude them at the picker level.
   const chatLike = messages.filter((m) => m.kind !== 'task');
   if (chatLike.length === 0) return null;
-  const trigger = chatLike.find((m) => m.trigger === 1);
-  return trigger ?? chatLike[0];
+  // Only a triggering row is a valid reply target. No trigger=1 row →
+  // null (never a trigger=0 accumulate-only drive-by). See docstring.
+  return chatLike.find((m) => m.trigger === 1) ?? null;
 }
 
 /**

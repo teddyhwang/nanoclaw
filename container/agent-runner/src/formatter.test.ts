@@ -301,14 +301,14 @@ describe('pickInReplyToMessage', () => {
     expect(m?.id).toBe('question');
   });
 
-  it('falls back to the newest row when no trigger=1 is present', () => {
-    // Defensive: shouldn't normally happen because the accumulate gate
-    // upstream rejects all-trigger=0 batches. But if we ever get one,
-    // return *something* rather than null so callers writing
-    // `in_reply_to` always have an id.
+  it('returns null when no trigger=1 row is present', () => {
+    // A batch of only trigger=0 rows means the agent woke for some other
+    // reason (a task fire) and these rows are accumulate-only context.
+    // The reply pill must NOT point at any of them — null is the
+    // authoritative "no pill" signal. (Old behavior fell back to the
+    // newest row, which is the AI-Friends RSS reply-pill regression.)
     const messages = [row('latest', 0, 70), row('older', 0, 68)];
-    const m = pickInReplyToMessage(messages);
-    expect(m?.id).toBe('latest');
+    expect(pickInReplyToMessage(messages)).toBeNull();
   });
 
   it('handles a mix where multiple trigger=1 rows exist', () => {
@@ -319,19 +319,18 @@ describe('pickInReplyToMessage', () => {
     expect(m?.id).toBe('newer-mention');
   });
 
-  it('skips task rows when a chat row is also present', () => {
-    // Repro: ai-friends RSS recurring task fired and Discord rendered the
-    // reply pill pointing at the channel's last real message. The task
-    // row's id is a fresh UUID, not a platform message id — using it as
-    // a reply target is meaningless and visually wrong. Falls back to
-    // the chat row even when it's trigger=0 (in practice the poll-loop
-    // drops trigger=0 chat from task-only batches before this is called).
+  it('returns null for a task row + a trigger=0 accumulated chat row', () => {
+    // The live AI-Friends RSS regression (2026-05-21 in #ai): a recurring
+    // task fired while a human's earlier trigger=0 message sat accumulated
+    // in the same batch. The task row is correctly excluded — but the old
+    // `trigger ?? chatLike[0]` fallback then picked the human's
+    // non-trigger message, so the RSS/status post reply-pilled onto it.
+    // A trigger=0 chat row is NOT a valid reply target: null.
     const messages = [
       row('t-task', 1, 70, 'task'),
       row('m-chat-old', 0, 64), // accumulated chat, trigger=0
     ];
-    const m = pickInReplyToMessage(messages);
-    expect(m?.id).toBe('m-chat-old');
+    expect(pickInReplyToMessage(messages)).toBeNull();
   });
 
   it('returns null when batch has only task rows', () => {
