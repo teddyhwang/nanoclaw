@@ -1,6 +1,12 @@
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
-import { getReplyTargetMessageIdBySeq, getRoutingBySeq, writeMessageOut } from './db/messages-out.js';
+import {
+  countChatMessagesSince,
+  getReplyTargetMessageIdBySeq,
+  getRoutingBySeq,
+  outboundDbNow,
+  writeMessageOut,
+} from './db/messages-out.js';
 import { writeTaskFire, type TaskFireDispatch } from './db/task-fires.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import {
@@ -683,6 +689,12 @@ async function processQuery(
   // stream are follow-up-push continuations. Only the first is gated on
   // `addressed` (see the result-event handler for why).
   let firstResultSeen = false;
+  // SQLite-UTC stamp captured before the agent runs, so the addressed-
+  // silent safety net can tell whether the agent delivered a chat
+  // message via an MCP tool (send_file/send_message) during this turn —
+  // those write straight to outbound.db and never appear as <message>
+  // blocks. Captured once here, passed to every dispatchResultText call.
+  const turnStartedAt = outboundDbNow();
   // Attribution: result events fold into one provider stream and the SDK
   // does not tag which pushed prompt produced a given <message> block, so
   // per-task dispatch provenance across a task↔chat or task↔task boundary
@@ -1242,7 +1254,12 @@ async function processQuery(
             // context (best-effort — see processQuery's attribution note).
             const fireCtx = mostRecentTaskContext();
             if (fireCtx) fireCtx.assistantText = event.text;
-            const { hasUnwrapped, dispatched } = dispatchResultText(event.text, routing, isFirstResult && addressed);
+            const { hasUnwrapped, dispatched } = dispatchResultText(
+              event.text,
+              routing,
+              isFirstResult && addressed,
+              turnStartedAt,
+            );
             if (fireCtx && dispatched.length > 0) {
               fireCtx.dispatched.push(...dispatched);
             }
@@ -1418,6 +1435,17 @@ export function dispatchResultText(
   // false so non-chat callers (tasks, tests that don't care) keep the
   // prior silent-turn behavior unchanged.
   addressed = false,
+  // SQLite-UTC timestamp (`outboundDbNow()`) captured at the start of
+  // this turn. When set, the addressed-silent safety net checks whether
+  // a `kind='chat'` outbound row was written since — i.e. the agent
+  // already replied via an MCP tool (`send_file`, `send_message`,
+  // `generate_image` → send_file) rather than a `<message>` block.
+  // Without it, a turn whose only deliverable was a tool-sent file
+  // produces zero parsed `<message>` blocks and mis-fires the scary
+  // degraded fallback (2026-05-21: an image-gen reply in the Discord
+  // Teddy DM landed fine, then got a bogus "produced no output" note).
+  // Undefined for callers that don't track it — they keep prior behavior.
+  turnStartedAt?: string,
 ): { sent: number; hasUnwrapped: boolean; dispatched: DispatchedMessage[] } {
   const MESSAGE_RE = /<message\s+([^>]*)>([\s\S]*?)<\/message>/g;
 
@@ -1526,6 +1554,25 @@ export function dispatchResultText(
       return { sent, hasUnwrapped, dispatched };
     }
     if (addressed) {
+      // Before declaring this an empty turn: did the agent already
+      // deliver something via an MCP tool? `send_file`, `send_message`,
+      // and `generate_image`→send_file all write `kind='chat'` rows
+      // straight to outbound.db — they never appear as `<message>`
+      // blocks in the result text, so `sent` stays 0 even though the
+      // user got a real reply. Firing the degraded "produced no output"
+      // fallback here is a false alarm (2026-05-21: an image delivered
+      // fine in the Discord Teddy DM, then got a bogus failure note).
+      // If a chat row exists since turn start, the turn DID deliver —
+      // end it cleanly with silent_turn_complete instead.
+      if (turnStartedAt && countChatMessagesSince(turnStartedAt) > 0) {
+        log(
+          'addressed turn emitted no <message> blocks but delivered a ' +
+            'chat message via a tool (send_file/send_message) — ending ' +
+            'cleanly, suppressing degraded fallback',
+        );
+        emitSilentTurnComplete();
+        return { sent, hasUnwrapped, dispatched };
+      }
       // A human @mentioned this agent or replied to it, and the agent
       // produced nothing to send back. Staying silent here is always
       // wrong — it reads as the bot being broken (2026-05-17 AI Friends:

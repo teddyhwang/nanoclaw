@@ -750,6 +750,38 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(text).not.toContain('silent_turn_complete');
   });
 
+  it('addressed + zero <message> blocks but a tool DID deliver a chat row: silent_turn_complete, NO degraded fallback', async () => {
+    // The image-generation shape (2026-05-21 Discord Teddy DM): the
+    // agent called generate_image then send_file. send_file writes a
+    // kind='chat' row straight to outbound.db — no <message> block — so
+    // dispatchResultText sees sent===0 on an addressed turn. With a
+    // turnStartedAt anchor it must see the tool-delivered chat row and
+    // end the turn cleanly instead of firing the scary fallback.
+    insertChannelDestination('boys-night');
+    const { writeMessageOut } = await import('./db/messages-out.js');
+    const turnStartedAt = '2026-05-21T00:00:00';
+    // Simulate send_file's outbound row, written DURING the turn.
+    writeMessageOut({
+      id: 'img-out-1',
+      kind: 'chat',
+      channel_type: ROUTING.channelType,
+      platform_id: ROUTING.platformId,
+      content: JSON.stringify({ text: 'Ready to assist.', files: ['x.webp'] }),
+    });
+
+    // Agent's result text has no <message> block (it delivered via the
+    // tool) — addressed turn, but turnStartedAt is supplied.
+    dispatchResultText('   \n\n   ', ROUTING, /* addressed */ true, turnStartedAt);
+
+    const out = getUndeliveredMessages();
+    // The send_file row, plus a silent_turn_complete control row — and
+    // crucially NO degraded-fallback chat row.
+    const degraded = out.filter((m) => JSON.parse(m.content).text?.includes?.('addressed turn produced no output'));
+    expect(degraded).toHaveLength(0);
+    const control = out.filter((m) => JSON.parse(m.content).action === 'silent_turn_complete');
+    expect(control).toHaveLength(1);
+  });
+
   it('addressed + <internal>-only output: still delivers explicit fallback (not silent)', () => {
     insertChannelDestination('boys-night');
 

@@ -163,3 +163,38 @@ export function getUndeliveredMessages(): MessageOutRow[] {
     )
     .all() as MessageOutRow[];
 }
+
+/**
+ * Count `kind='chat'` outbound rows written at or after `sinceIso`.
+ *
+ * Used by the poll-loop's addressed-turn safety net: a turn whose only
+ * deliverable was sent via an MCP tool (`send_file`, `send_message`) —
+ * not a `<message>` block in the result text — produces zero parsed
+ * `<message>` blocks, so the safety net would otherwise mis-fire the
+ * scary "addressed turn produced no output" degraded fallback even
+ * though the agent DID reply. A non-zero count here means the turn
+ * already delivered something; suppress the fallback.
+ *
+ * `sinceIso` must be SQLite-comparable against `timestamp`, which is
+ * written by `datetime('now')` (`'YYYY-MM-DD HH:MM:SS'`, UTC). Callers
+ * pass a turn-start stamp from `outboundDbNow()` so the formats match.
+ */
+export function countChatMessagesSince(sinceIso: string): number {
+  const row = getOutboundDb()
+    .prepare(
+      `SELECT COUNT(*) AS n FROM messages_out
+       WHERE kind = 'chat' AND timestamp >= ?`,
+    )
+    .get(sinceIso) as { n: number };
+  return row.n;
+}
+
+/**
+ * Current SQLite UTC timestamp string — matches `messages_out.timestamp`
+ * formatting (`datetime('now')`) so `countChatMessagesSince` comparisons
+ * are exact. Capture this at turn start.
+ */
+export function outboundDbNow(): string {
+  const row = getOutboundDb().prepare("SELECT datetime('now') AS ts").get() as { ts: string };
+  return row.ts;
+}
