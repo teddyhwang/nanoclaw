@@ -31,13 +31,19 @@ let _config: RunnerConfig | null = null;
  * Load config from container.json. Called once at startup.
  * Falls back to sensible defaults for any missing field.
  *
- * `NANOCLAW_DREAM_HARNESS` override: container.json `provider` is the
- * agent group's standing harness. When a spawn is a Dream / maintenance
- * pass, the host injects `NANOCLAW_DREAM_HARNESS` (a provider name —
- * `claude`, `codex`, …) so the dream runs on the operator-selected
- * harness regardless of the group's normal provider. The env var is
- * dream-scoped by name; it is only ever set on dream spawns, so there is
- * no risk of it leaking into a normal turn.
+ * `NANOCLAW_DREAM_HARNESS` / `NANOCLAW_AGENT_MODEL` overrides:
+ * container.json `provider` and `model` are the agent group's standing
+ * harness + model. When a spawn is a Dream / maintenance pass, the host
+ * injects `NANOCLAW_DREAM_HARNESS` (a provider name — `claude`, `codex`,
+ * …) AND `NANOCLAW_AGENT_MODEL` (the model for that harness's provider
+ * family) so the dream runs on the operator-selected harness+model
+ * regardless of the group's normal config. Both env vars must override
+ * here: a dream that switched provider to codex but kept the group's
+ * standing claude `container.json` model would run codex on the wrong
+ * model (observed 2026-05-22 — the codex provider's `options.model`
+ * comes from this config and wins over its own env fallback). The vars
+ * are dream-scoped by injection — the host only sets them on dream
+ * spawns — so there is no risk of leaking into a normal turn.
  */
 export function loadConfig(): RunnerConfig {
   if (_config) return _config;
@@ -55,6 +61,16 @@ export function loadConfig(): RunnerConfig {
     console.error(`[config] NANOCLAW_DREAM_HARNESS set — Dream pass overriding provider to "${dreamHarness}"`);
   }
 
+  // `NANOCLAW_AGENT_MODEL` overrides container.json `model` symmetrically
+  // with the provider override above. The host injects it on dream
+  // spawns alongside NANOCLAW_DREAM_HARNESS; it must win over the
+  // group's standing model or the dream runs on the wrong model.
+  const dreamModel = process.env.NANOCLAW_AGENT_MODEL?.trim();
+  const model = dreamModel || (raw.model as string) || undefined;
+  if (dreamModel) {
+    console.error(`[config] NANOCLAW_AGENT_MODEL set — overriding model to "${dreamModel}"`);
+  }
+
   _config = {
     provider,
     assistantName: (raw.assistantName as string) || '',
@@ -62,7 +78,7 @@ export function loadConfig(): RunnerConfig {
     agentGroupId: (raw.agentGroupId as string) || '',
     maxMessagesPerPrompt: (raw.maxMessagesPerPrompt as number) || DEFAULT_MAX_MESSAGES,
     mcpServers: (raw.mcpServers as RunnerConfig['mcpServers']) || {},
-    model: (raw.model as string) || undefined,
+    model,
     effort: (raw.effort as string) || undefined,
   };
 
