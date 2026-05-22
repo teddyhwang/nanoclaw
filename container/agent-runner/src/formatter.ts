@@ -169,21 +169,23 @@ export function pickInReplyToMessage(messages: MessageInRow[]): MessageInRow | n
 /**
  * Extract routing context from a batch of messages.
  *
- * `platformId`, `channelType`, and `threadId` come from the first row
- * (any row in the batch shares the same destination — the host scopes
- * each session to a single messaging group). `inReplyTo` picks the
- * newest *triggering* message via `pickInReplyToMessage` so the
- * outbound reply pill points at the @mention/reply-to-bot the agent
- * is actually answering, not at a non-trigger message that happened
- * to arrive in the same batch.
+ * `platformId`, `channelType`, and `threadId` come from the newest
+ * triggering row when there is one. Mixed agent-shared batches can carry
+ * accumulated context from other wired channels before the actual
+ * trigger row; using the first row would route degraded fallbacks and
+ * implicit replies to the wrong channel. `inReplyTo` uses the same
+ * triggering row so the reply pill points at the message the agent is
+ * actually answering, not at non-trigger context that happened to ride
+ * along in the batch.
  */
 export function extractRouting(messages: MessageInRow[]): RoutingContext {
   const first = messages[0];
   const replyTarget = pickInReplyToMessage(messages);
+  const routeSource = replyTarget ?? first;
   return {
-    platformId: first?.platform_id ?? null,
-    channelType: first?.channel_type ?? null,
-    threadId: first?.thread_id ?? null,
+    platformId: routeSource?.platform_id ?? null,
+    channelType: routeSource?.channel_type ?? null,
+    threadId: routeSource?.thread_id ?? null,
     inReplyTo: replyTarget?.id ?? null,
   };
 }

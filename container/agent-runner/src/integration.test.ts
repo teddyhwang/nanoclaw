@@ -137,14 +137,9 @@ describe('poll loop integration', () => {
     await loopPromise.catch(() => {});
   });
 
-  it('bare text triggers the local-fork safety-net delivery (degraded)', async () => {
-    // Local-fork divergence from upstream: bare text outside <message> /
-    // <internal> wrapping must NOT be silently dropped. The runner emits
-    // it to the origin channel with a [degraded] label so (a) the user
-    // gets *something* and (b) the agent's wrap miss is visible instead
-    // of invisible. See deliverSafetyNet in poll-loop.ts; rationale in
-    // memory feedback_silent_fallback_regression. Upstream's test
-    // asserts the opposite (length 0) — kept the fork patch here.
+  it('bare text is suppressed and retried, never delivered as degraded chat', async () => {
+    // Bare text outside <message>/<internal> is ambiguous scratchpad. The
+    // runner should nudge a retry, but must not leak it to the channel.
     insertMessage('m1', { sender: 'Alice', text: 'hello' }, { platformId: 'chan-1', channelType: 'discord' });
 
     const provider = new MockProvider({}, () => 'I am thinking about this...');
@@ -155,17 +150,13 @@ describe('poll loop integration', () => {
     controller.abort();
 
     const out = getUndeliveredMessages();
-    // At least one degraded delivery — the upstream nudge re-prompt
-    // also pushes the agent to re-wrap, which with this mock provider
-    // produces the same bare-text result and triggers safety-net again.
-    // Either way, every safety-net send must carry the [degraded] label
-    // and originate from chan-1.
     expect(out.length).toBeGreaterThanOrEqual(1);
     for (const row of out) {
-      const body = JSON.parse(row.content).text;
-      expect(body).toContain('[degraded');
-      expect(body).toContain('I am thinking about this...');
-      expect(row.platform_id).toBe('chan-1');
+      expect(row.kind).toBe('system');
+      expect(JSON.parse(row.content)).toEqual({
+        action: 'silent_turn_complete',
+      });
+      expect(row.platform_id).toBeNull();
     }
 
     await loopPromise.catch(() => {});

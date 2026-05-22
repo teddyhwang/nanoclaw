@@ -504,18 +504,17 @@ describe('dispatchResultText safety net (local fork patch)', () => {
       .run(name, name, ROUTING.channelType!, ROUTING.platformId!);
   }
 
-  it('emits bare result text to the originating channel with a degraded label when no <message> block is present', () => {
+  it('suppresses bare result text and emits only a silent control row when no <message> block is present', () => {
     insertChannelDestination('boys-night');
 
     dispatchResultText('Calendar event created and the knowledge base updated.', ROUTING);
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    const text = JSON.parse(out[0].content).text;
-    expect(text).toContain('[degraded — agent did not wrap reply in <message> block]');
-    expect(text).toContain('Calendar event created and the knowledge base updated.');
-    expect(out[0].channel_type).toBe(ROUTING.channelType);
-    expect(out[0].platform_id).toBe(ROUTING.platformId);
+    expect(out[0].kind).toBe('system');
+    expect(JSON.parse(out[0].content)).toEqual({ action: 'silent_turn_complete' });
+    expect(out[0].channel_type).toBeNull();
+    expect(out[0].platform_id).toBeNull();
   });
 
   it('does not invoke safety net when at least one <message> block is dispatched (mixed turn)', () => {
@@ -606,10 +605,10 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(anyChat).toBeUndefined();
   });
 
-  it('REGRESSION GUARD: a genuine no-output addressed turn (not confirm) STILL emits the degraded fallback', () => {
-    // The real tool-failure case (2026-05-17 AI Friends) must keep
-    // surfacing the visible-degraded message — the confirm-suppression
-    // must be precise, not a blanket silencer of addressed-silent turns.
+  it('REGRESSION GUARD: a genuine no-output addressed turn (not confirm) is suppressed, not visibly degraded', () => {
+    // The real tool-failure case (2026-05-17 AI Friends) should stay
+    // visible to operators in logs/task_fires, but must not synthesize an
+    // alarming [degraded] channel post.
     insertChannelDestination('boys-night');
 
     dispatchResultText(
@@ -620,9 +619,11 @@ describe('dispatchResultText safety net (local fork patch)', () => {
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    const text = JSON.parse(out[0].content).text;
-    expect(text).toContain("couldn't produce a reply this turn");
-    expect(out[0].channel_type).toBe(ROUTING.channelType);
+    expect(out[0].kind).toBe('system');
+    expect(JSON.parse(out[0].content)).toEqual({
+      action: 'silent_turn_complete',
+    });
+    expect(out[0].channel_type).toBeNull();
   });
 
   it('emits silent_turn_complete (not safety-net chat) for <internal>-only output (private maintenance turn)', () => {
@@ -666,15 +667,17 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(JSON.parse(out[0].content).text).toBe('Done.');
   });
 
-  it('does NOT emit silent_turn_complete when the safety-net fires (chat reply IS being sent)', () => {
+  it('emits silent_turn_complete when unwrapped text is suppressed', () => {
     insertChannelDestination('boys-night');
 
-    dispatchResultText('Bare unwrapped reply that should be safety-netted.', ROUTING);
+    dispatchResultText('Bare unwrapped reply that should be retried, not sent.', ROUTING);
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(out[0].kind).toBe('chat');
-    expect(JSON.parse(out[0].content).text).toContain('[degraded');
+    expect(out[0].kind).toBe('system');
+    expect(JSON.parse(out[0].content)).toEqual({
+      action: 'silent_turn_complete',
+    });
   });
 
   it('dedupes near-duplicate <message> blocks within one turn (whitespace-insensitive)', () => {
@@ -721,33 +724,29 @@ describe('dispatchResultText safety net (local fork patch)', () => {
 
     dispatchResultText('I did the thing.', blankRouting);
 
-    expect(getUndeliveredMessages()).toHaveLength(0);
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].kind).toBe('system');
+    expect(out[0].channel_type).toBeNull();
+    expect(out[0].platform_id).toBeNull();
+    expect(JSON.parse(out[0].content)).toEqual({
+      action: 'silent_turn_complete',
+    });
   });
 
-  // Regression: 2026-05-17 AI Friends. The merged Degenerates agent was
-  // @mentioned + replied-to, search_conversations failed (NULL
-  // messaging_group_id), the agent produced no output and emitted a bare
-  // silent_turn_complete. The user saw nothing and read it as the bot
-  // being broken. An addressed turn with zero deliverable output must
-  // deliver an explicit visible fallback, never a silent control row.
-  it('addressed + zero output: delivers explicit fallback chat, NOT silent_turn_complete', () => {
+  it('addressed + zero output: suppresses degraded fallback and emits silent_turn_complete', () => {
     insertChannelDestination('boys-night');
 
-    // Empty result (the incident shape: agent had nothing because its
-    // tool kept failing) on an addressed turn.
     dispatchResultText('   \n\n   ', ROUTING, /* addressed */ true);
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    // Visible chat to the origin channel, not a kind=system control row.
-    expect(out[0].kind).toBe('chat');
-    expect(out[0].channel_type).toBe(ROUTING.channelType);
-    expect(out[0].platform_id).toBe(ROUTING.platformId);
-    const text = JSON.parse(out[0].content).text;
-    expect(text).toContain('addressed turn produced no output');
-    expect(text).toContain("couldn't produce a reply");
-    // Must NOT be the silent control row.
-    expect(text).not.toContain('silent_turn_complete');
+    expect(out[0].kind).toBe('system');
+    expect(out[0].channel_type).toBeNull();
+    expect(out[0].platform_id).toBeNull();
+    expect(JSON.parse(out[0].content)).toEqual({
+      action: 'silent_turn_complete',
+    });
   });
 
   it('addressed + zero <message> blocks but a tool DID deliver a chat row: silent_turn_complete, NO degraded fallback', async () => {
@@ -782,18 +781,17 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(control).toHaveLength(1);
   });
 
-  it('addressed + <internal>-only output: still delivers explicit fallback (not silent)', () => {
+  it('addressed + <internal>-only output: suppresses degraded fallback', () => {
     insertChannelDestination('boys-night');
 
     dispatchResultText('<internal>I cannot answer this, search failed</internal>', ROUTING, true);
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(out[0].kind).toBe('chat');
-    const text = JSON.parse(out[0].content).text;
-    expect(text).toContain('addressed turn produced no output');
-    // The private <internal> content must NOT leak to the user.
-    expect(text).not.toContain('search failed');
+    expect(out[0].kind).toBe('system');
+    expect(JSON.parse(out[0].content)).toEqual({
+      action: 'silent_turn_complete',
+    });
   });
 
   it('NOT addressed + zero output: keeps silent_turn_complete (ambient/maintenance unchanged)', () => {
@@ -832,7 +830,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(text).not.toContain('addressed turn produced no output');
   });
 
-  it('addressed + zero output but no origin channel: drops (cannot fabricate a destination)', () => {
+  it('addressed + zero output but no origin channel: emits only silent control row', () => {
     const blankRouting: RoutingContext = {
       platformId: null,
       channelType: null,
@@ -842,11 +840,16 @@ describe('dispatchResultText safety net (local fork patch)', () => {
 
     dispatchResultText('   ', blankRouting, true);
 
-    // No channel to deliver the fallback to — same defensive drop as the
-    // unwrapped path. Nothing is emitted (no silent row either; the turn
-    // was addressed so we deliberately do NOT fall back to the control
-    // row, but we also cannot invent a destination).
-    expect(getUndeliveredMessages()).toHaveLength(0);
+    // No channel to deliver fallback text to, so the runner emits only an
+    // internal control row and does not fabricate a chat destination.
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].kind).toBe('system');
+    expect(out[0].channel_type).toBeNull();
+    expect(out[0].platform_id).toBeNull();
+    expect(JSON.parse(out[0].content)).toEqual({
+      action: 'silent_turn_complete',
+    });
   });
 });
 

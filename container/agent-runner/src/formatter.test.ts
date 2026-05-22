@@ -18,6 +18,7 @@ import {
   stripInternalTags,
   extractMessageSender,
   pickInReplyToMessage,
+  extractRouting,
   extractImageAttachments,
   formatAttachments,
   isAddressedTurn,
@@ -343,6 +344,28 @@ describe('pickInReplyToMessage', () => {
     const messages = [row('t-task', 1, 80, 'task'), row('m-mention', 1, 72), row('m-context', 0, 64)];
     const m = pickInReplyToMessage(messages);
     expect(m?.id).toBe('m-mention');
+  });
+
+  it('extractRouting uses the triggering row channel, not the first accumulated context row', () => {
+    const messages = [
+      {
+        ...row('ai-context', 0, 80),
+        platform_id: 'discord:guild:ai-friends',
+        thread_id: 'discord:guild:ai-friends',
+      },
+      {
+        ...row('general-trigger', 1, 78),
+        platform_id: 'discord:guild:general',
+        thread_id: 'discord:guild:general',
+      },
+    ];
+
+    expect(extractRouting(messages)).toEqual({
+      platformId: 'discord:guild:general',
+      channelType: 'discord',
+      threadId: 'discord:guild:general',
+      inReplyTo: 'general-trigger',
+    });
   });
 
   it('matches the boysnight repro: question + Sorta drive-by', () => {

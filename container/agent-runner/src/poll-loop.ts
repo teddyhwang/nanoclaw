@@ -1367,14 +1367,13 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
  * The agent must always wrap output in <message to="name">...</message>
  * blocks, even with a single destination. Bare text is scratchpad only.
  */
-// Exported for tests. Local-fork patch: the safety-net branch needs
-// focused coverage so the silent-drop class of bug stays caught.
+// Exported for tests. Local-fork patch: the unwrapped-output branch needs
+// focused coverage so the leak-to-channel class of bug stays caught.
 // Returns { sent, hasUnwrapped, dispatched } so callers can also kick off the
-// upstream nudge re-prompt — safety-net delivery is belt-and-suspenders
-// against silent drops, the nudge teaches the agent to wrap correctly
-// next turn. `dispatched` is the list of { destination, body } pairs
-// actually sent (post-dedup, post-safety-net) so the poll-loop's
-// task_fires writer can record what the agent emitted on a task fire.
+// upstream nudge re-prompt. `dispatched` is the list of
+// { destination, body } pairs actually sent (post-dedup) so the
+// poll-loop's task_fires writer can record what the agent emitted on a
+// task fire.
 export interface DispatchedMessage {
   destination: string;
   body: string;
@@ -1515,17 +1514,13 @@ export function dispatchResultText(
   // doesn't get force-emitted with a degraded label.
   const hasUnwrapped = sent === 0 && !!scratchpad;
   if (hasUnwrapped) {
-    log(`WARNING: agent output had no <message to="..."> blocks — emitting via safety-net to origin channel`);
-    deliverSafetyNet(scratchpad, routing);
-    // Caller may also push an upstream-style nudge re-prompt via the
-    // hasUnwrapped return value; the safety-net delivery is the "user
-    // gets something now" half, the nudge is the "agent learns to wrap
-    // next turn" half. Don't emit silent_turn_complete here — the
-    // safety-net just wrote a user-facing message.
-    // Surface the safety-net delivery in `dispatched` so task_fires
-    // records that *something* was sent (status='completed'), with a
-    // synthetic destination name marking the degraded path.
-    dispatched.push({ destination: '__safety_net__', body: scratchpad });
+    log(`WARNING: agent output had no <message to="..."> blocks — suppressing unwrapped text and nudging retry`);
+    emitSilentTurnComplete();
+    // Caller pushes an upstream-style nudge re-prompt via the
+    // hasUnwrapped return value. Do NOT show the unwrapped text to users:
+    // bare text is often scratchpad/meta narration, and the runner cannot
+    // know which destination the model intended. The retry prompt lets the
+    // agent re-send with an explicit <message to="..."> destination.
     return { sent, hasUnwrapped, dispatched };
   }
 
@@ -1574,28 +1569,13 @@ export function dispatchResultText(
         return { sent, hasUnwrapped, dispatched };
       }
       // A human @mentioned this agent or replied to it, and the agent
-      // produced nothing to send back. Staying silent here is always
-      // wrong — it reads as the bot being broken (2026-05-17 AI Friends:
-      // the agent went silent on a direct reply-to-bot follow-up because
-      // search_conversations kept failing, so it had no answer and chose
-      // silence over admitting it). The prompt already forbids this
-      // (destinations.ts: "A silent turn is NOT allowed when you were
-      // directly addressed") but the model violated it under tool-failure
-      // stress, so enforce it deterministically: deliver an explicit
-      // fallback to the origin channel via the same safety-net path used
-      // for unwrapped output, instead of a bare silent_turn_complete the
-      // user never sees. Visible-degraded beats invisible-silent.
-      log(
-        `WARNING: addressed turn produced no deliverable output — emitting explicit fallback instead of silent_turn_complete`,
-      );
-      deliverSafetyNet(
-        "I was addressed directly but couldn't produce a reply this turn — " +
-          'something I needed (a tool or lookup) likely failed. This is a bug, not me ignoring you; ' +
-          'please try again or rephrase, and it has been logged.',
-        routing,
-        'degraded — addressed turn produced no output (likely tool failure)',
-      );
-      dispatched.push({ destination: '__addressed_silent_fallback__', body: 'addressed-silent fallback' });
+      // produced nothing to send back. Do not synthesize a visible
+      // "[degraded]" channel post: those messages are alarming, can route
+      // incorrectly if the batch carries cross-channel context, and are not
+      // the agent's actual answer. End the turn quietly; the host logs and
+      // task_fires keep the failure visible to operators.
+      log(`WARNING: addressed turn produced no deliverable output — suppressing degraded fallback`);
+      emitSilentTurnComplete();
       return { sent, hasUnwrapped, dispatched };
     }
     // Genuinely nothing-to-say (ambient chatter / maintenance task).
@@ -1643,33 +1623,6 @@ function emitSilentTurnComplete(): void {
     channel_type: null,
     thread_id: null,
     content: JSON.stringify({ action: 'silent_turn_complete' }),
-  });
-}
-
-function deliverSafetyNet(
-  body: string,
-  routing: RoutingContext,
-  // Visible prefix marking why this is a degraded delivery. Defaults to
-  // the unwrapped-output reason (the original sole caller); the
-  // addressed-silent enforcement path passes its own accurate label so
-  // the user isn't told "agent didn't wrap" when the real cause was a
-  // tool failure that left the turn empty.
-  label = 'degraded — agent did not wrap reply in <message> block',
-): void {
-  if (!routing.platformId || !routing.channelType) {
-    log(`safety-net: no origin channel in routing context, dropping`);
-    return;
-  }
-  const labeled = `[${label}]\n\n${body}`;
-  const destRouting = resolveDestinationThread(routing.channelType, routing.platformId);
-  writeMessageOut({
-    id: generateId(),
-    in_reply_to: resolveDispatchReplyTarget(routing, destRouting),
-    kind: 'chat',
-    platform_id: routing.platformId,
-    channel_type: routing.channelType,
-    thread_id: destRouting?.threadId ?? null,
-    content: JSON.stringify({ text: labeled }),
   });
 }
 
