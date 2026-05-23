@@ -549,6 +549,34 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(out[0].in_reply_to).toBe('incident-start-platform-id');
   });
 
+  it('same-channel dispatch reply pill stays on the turn-authoritative target even when a NEWER trigger=1 inbound exists in the channel', () => {
+    // 2026-05-23 New York Crew WhatsApp regression: while Optimus was
+    // answering Jon's older hotel-name request, Nicole sent a new
+    // @optimus request. The destination-thread hunt picks "newest
+    // trigger=1 in channel" by seq DESC, so destRouting.inReplyTo
+    // resolved to Nicole's just-arrived row. The pre-fix fallback
+    // `destRouting.inReplyTo ?? routing.inReplyTo` let that shadow the
+    // authoritative routing target (Jon's row) and the reply pill
+    // attached to Nicole's message — the agent's text addressed Jon
+    // about hotels, but the platform reply chain pointed at Nicole's
+    // km-conversion request. On a same-channel dispatch routing.inReplyTo
+    // must win regardless of what the destination hunt finds.
+    insertChannelDestination('boys-night');
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (seq, id, channel_type, platform_id, thread_id, kind, trigger, status, timestamp, content)
+         VALUES (10, 'newer-different-user-msg', ?, ?, NULL, 'chat', 1, 'pending', '2026-05-23T11:01:00Z', '{}')`,
+      )
+      .run(ROUTING.channelType, ROUTING.platformId);
+
+    dispatchResultText('<message to="boys-night">Done.</message>', ROUTING);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].in_reply_to).toBe('m1');
+    expect(out[0].in_reply_to).not.toBe('newer-different-user-msg');
+  });
+
   it('keeps task-style <message> blocks standalone when no explicit reply target is supplied', () => {
     insertChannelDestination('boys-night');
     getInboundDb()

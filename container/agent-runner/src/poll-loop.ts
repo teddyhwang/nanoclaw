@@ -1665,7 +1665,25 @@ function resolveDispatchReplyTarget(
     if (explicit) return explicit;
   }
   if (routing.inReplyTo == null) return null; // task / accumulate turn — never pill
-  return destRouting?.inReplyTo ?? routing.inReplyTo;
+  // Same-channel dispatch: routing.inReplyTo IS the authoritative target
+  // (the message that triggered this turn). The per-destination DB hunt
+  // (`destRouting.inReplyTo`) was designed for cross-destination fan-out
+  // in agent-shared sessions — picking "newest trigger=1 in channel X"
+  // when X is NOT the channel that woke this turn. Letting it shadow
+  // routing.inReplyTo on a same-channel reply is the recurring "agent
+  // quote-replied to the wrong message" bug: later trigger=1 inbounds
+  // (a different user's @mention arriving while the agent was thinking)
+  // become "newer" by seq DESC, and the reply pill attaches to that
+  // stranger's message instead of the one we're actually answering
+  // (observed 2026-05-23 in New York Crew WhatsApp — Optimus's reply
+  // to Jon's earlier hotel-name request pilled onto Nicole's just-
+  // arrived km-conversion request because Nicole's row was newer).
+  const sameChannel =
+    explicitRouting != null &&
+    routing.channelType === explicitRouting.channel_type &&
+    routing.platformId === explicitRouting.platform_id;
+  if (sameChannel) return routing.inReplyTo;
+  return destRouting?.inReplyTo ?? null;
 }
 
 function sendToDestination(
