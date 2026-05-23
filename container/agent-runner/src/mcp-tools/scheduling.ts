@@ -55,26 +55,68 @@ function err(text: string) {
   return { content: [{ type: 'text' as const, text: `Error: ${text}` }], isError: true };
 }
 
+/**
+ * Pre-task script contract — replicated verbatim into `schedule_task` and
+ * `update_task`'s `script` field descriptions so the agent sees the rules
+ * at the exact moment it's about to author or rewrite one. The container
+ * runtime (scheduling/task-script.ts) JSON-parses ONLY the LAST LINE of
+ * stdout and requires a top-level boolean `wakeAgent` field. Anything
+ * else (raw data, multi-line pretty-printed JSON whose last line is `}`,
+ * plain text, empty output) gets silently treated as `wakeAgent=false`
+ * and the task is gated out. That gating is invisible to the operator —
+ * the dashboard records a `task_fires` row with `status='gated'`, but
+ * the symptom is just "scheduled task didn't run" (see daily-recap
+ * incident 2026-05-20 → 2026-05-22). The validator below blocks the
+ * obvious shape of that mistake at tool-call time.
+ */
+export const SCRIPT_FIELD_DESCRIPTION =
+  'Optional pre-agent script (bash). Runs before the agent turn; its stdout LAST LINE must be a single-line JSON object with a boolean `wakeAgent` field — e.g. `{"wakeAgent": true, "data": {...}}`. wakeAgent=false skips the task this tick (use it for cheap polls that should idle when there is no new signal). Any other output shape (raw data, multi-line pretty JSON, plain text) is gated out silently and the agent never runs. When wakeAgent=true the optional `data` field becomes available to the prompt as `scriptOutput`.';
+
+export interface ScriptValidationResult {
+  ok: boolean;
+  message: string;
+}
+
+/**
+ * Lightweight syntactic check that the script references the wakeAgent
+ * envelope at all. We can't statically prove a runtime-emitted JSON
+ * shape — but if the script body never mentions `wakeAgent`, it almost
+ * certainly forgot the contract and will be gated silently. False
+ * positives are tolerable (the agent can re-author); false negatives
+ * are the recurring footgun this is closing.
+ */
+export function validateScriptContract(script: string): ScriptValidationResult {
+  if (!/\bwakeAgent\b/.test(script)) {
+    return {
+      ok: false,
+      message:
+        'script does not reference `wakeAgent` — pre-task scripts MUST emit a final stdout line of the form `{"wakeAgent": true|false, "data"?: ...}` or the task will be silently gated out. Wrap your output: `process.stdout.write(JSON.stringify({ wakeAgent: true, data: output }) + "\\n")` (or shell equivalent). Pass wakeAgent=false to skip the agent turn this tick. If you really need to send a script with no wakeAgent emission, the task harness has no way to know whether to run the agent — there is no escape hatch.',
+    };
+  }
+  return { ok: true, message: '' };
+}
+
 export const scheduleTask: McpToolDefinition = {
   tool: {
     name: 'schedule_task',
-    description:
-      `Schedule a one-shot or recurring task. The user's timezone is declared in the <context timezone="..."/> header of your prompt — interpret the user's "9pm" etc. in that zone. Cron expressions are interpreted in the user's timezone too.`,
+    description: `Schedule a one-shot or recurring task. The user's timezone is declared in the <context timezone="..."/> header of your prompt — interpret the user's "9pm" etc. in that zone. Cron expressions are interpreted in the user's timezone too.`,
     inputSchema: {
       type: 'object' as const,
       properties: {
         prompt: { type: 'string', description: 'Task instructions/prompt' },
         processAfter: {
           type: 'string',
-          description:
-            `ISO 8601 timestamp for the first run. Accepts either UTC (ending in "Z" or "+00:00") or a naive local timestamp (no offset) which is interpreted in the user's timezone (e.g. "2026-01-15T21:00:00" = 9pm user-local). Prefer naive local.`,
+          description: `ISO 8601 timestamp for the first run. Accepts either UTC (ending in "Z" or "+00:00") or a naive local timestamp (no offset) which is interpreted in the user's timezone (e.g. "2026-01-15T21:00:00" = 9pm user-local). Prefer naive local.`,
         },
         recurrence: {
           type: 'string',
           description:
             'Cron expression for recurring tasks (e.g., "0 9 * * 1-5" = weekdays at 9am user-local). Evaluated in the user\'s timezone.',
         },
-        script: { type: 'string', description: 'Optional pre-agent script to run before processing' },
+        script: {
+          type: 'string',
+          description: SCRIPT_FIELD_DESCRIPTION,
+        },
       },
       required: ['prompt', 'processAfter'],
     },
@@ -83,6 +125,10 @@ export const scheduleTask: McpToolDefinition = {
     const prompt = args.prompt as string;
     const processAfterIn = args.processAfter as string;
     if (!prompt || !processAfterIn) return err('prompt and processAfter are required');
+    if (typeof args.script === 'string' && args.script.length > 0) {
+      const v = validateScriptContract(args.script);
+      if (!v.ok) return err(v.message);
+    }
 
     let processAfter: string;
     try {
@@ -151,9 +197,7 @@ export const listTasks: McpToolDefinition = {
     // that local snapshot instead of scanning messages_in (which now
     // only holds transient fired occurrences, not the series).
     const hasSnapshot =
-      db
-        .prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_series' LIMIT 1`)
-        .get() !== undefined;
+      db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_series' LIMIT 1`).get() !== undefined;
     if (!hasSnapshot) {
       // No sweep has projected yet (brand-new session, or pre-cutover
       // inbound.db). Not an error — there are simply no visible series.
@@ -183,9 +227,17 @@ export const listTasks: McpToolDefinition = {
 
     if ((rows as unknown[]).length === 0) return ok('No tasks found.');
 
-    const lines = (rows as Array<{ id: string; status: string; process_after: string | null; recurrence: string | null; content: string }>).map((r) => {
+    const lines = (
+      rows as Array<{
+        id: string;
+        status: string;
+        process_after: string | null;
+        recurrence: string | null;
+        content: string;
+      }>
+    ).map((r) => {
       const content = JSON.parse(r.content);
-      const prompt = (content.prompt as string || '').slice(0, 80);
+      const prompt = ((content.prompt as string) || '').slice(0, 80);
       return `- ${r.id} [${r.status}] at=${r.process_after || 'now'} ${r.recurrence ? `recur=${r.recurrence} ` : ''}→ ${prompt}`;
     });
 
@@ -291,12 +343,11 @@ export const updateTask: McpToolDefinition = {
         },
         processAfter: {
           type: 'string',
-          description:
-            `New ISO 8601 timestamp for the next run (optional). Accepts either UTC (ending in "Z" / "+00:00") or a naive local timestamp interpreted in the user's timezone.`,
+          description: `New ISO 8601 timestamp for the next run (optional). Accepts either UTC (ending in "Z" / "+00:00") or a naive local timestamp interpreted in the user's timezone.`,
         },
         script: {
           type: 'string',
-          description: 'New pre-agent script (optional). Pass empty string to clear.',
+          description: `New pre-agent script (optional). Pass empty string to clear. ${SCRIPT_FIELD_DESCRIPTION}`,
         },
       },
       required: ['taskId'],
@@ -305,6 +356,11 @@ export const updateTask: McpToolDefinition = {
   async handler(args) {
     const taskId = args.taskId as string;
     if (!taskId) return err('taskId is required');
+
+    if (typeof args.script === 'string' && args.script.length > 0) {
+      const v = validateScriptContract(args.script);
+      if (!v.ok) return err(v.message);
+    }
 
     const update: Record<string, unknown> = { taskId };
     if (typeof args.prompt === 'string') update.prompt = args.prompt;
