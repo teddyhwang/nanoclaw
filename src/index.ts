@@ -63,6 +63,7 @@ import { startCliServer, stopCliServer } from './cli/socket-server.js';
 
 import type { ChannelAdapter, ChannelSetup } from './channels/adapter.js';
 import { initChannelAdapters, teardownChannelAdapters, getChannelAdapter } from './channels/channel-registry.js';
+import { handleChatMigrated } from './channels/chat-migration.js';
 
 async function main(): Promise<void> {
   log.info('NanoClaw starting');
@@ -146,6 +147,7 @@ async function main(): Promise<void> {
           log.error('Failed to handle question response', { questionId, err });
         });
       },
+      onChatMigrated: handleChatMigrated,
     };
   });
 

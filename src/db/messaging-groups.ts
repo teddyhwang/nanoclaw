@@ -101,6 +101,28 @@ export function deleteMessagingGroup(id: string): void {
 }
 
 /**
+ * Rewrite a messaging group's platform_id. The `(channel_type, platform_id)`
+ * pair is normally treated as the immutable identity of a chat — never
+ * touched by `updateMessagingGroup`. The exception is platform-driven
+ * migrations where the same logical chat is reassigned a new platform id
+ * by the underlying messaging service. Today the only known case is
+ * Telegram basic-group → supergroup upgrades, which assign a brand-new
+ * `-100…` chat id and immediately stop accepting sends on the old id.
+ * The router keys off `(channel_type, platform_id)`, so without this
+ * rewrite future inbound updates under the new id silently drop (no
+ * messaging_group row matches) and outbound replies hit the dead old id.
+ *
+ * Idempotent: if the row already has `newPlatformId` we no-op. Returns
+ * true when a row was actually updated, false otherwise.
+ */
+export function setMessagingGroupPlatformId(id: string, newPlatformId: string): boolean {
+  const result = getDb()
+    .prepare('UPDATE messaging_groups SET platform_id = ? WHERE id = ? AND platform_id != ?')
+    .run(newPlatformId, id, newPlatformId);
+  return result.changes > 0;
+}
+
+/**
  * Mark a messaging group as denied by the owner (channel-registration flow).
  * Future mentions on this channel silently drop until an admin explicitly
  * wires it via `createMessagingGroupAgent`, which implicitly clears the

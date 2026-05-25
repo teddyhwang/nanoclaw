@@ -608,6 +608,50 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         logger: 'silent',
       });
 
+      // Detect platform-driven chat-id reassignments (Telegram's
+      // `migrate_to_chat_id` service event, fired when a basic group is
+      // upgraded to a supergroup). When we see one, the chat we know as
+      // `channelIdFromThreadId(thread.id)` is dead — Telegram has assigned
+      // it a brand-new id and the old id immediately stops accepting sends.
+      // Notify the host so it can rewrite messaging_groups.platform_id +
+      // refresh per-session routing before continuing. We do NOT also
+      // forward the migrate event as a normal user message: it has no text,
+      // and our pre-`migrate_to_chat_id`-detection behavior was to bounce
+      // a "your message came through blank" reply to the now-dead old id,
+      // which fails three times and gets given up on permanently.
+      //
+      // Returns true if the event was handled as a migration (caller skips).
+      // Lives inside `setup` so it closes over `adapter` + `setupConfig`.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const maybeHandleChatMigration = async (message: any, threadId: string): Promise<boolean> => {
+        const newChatId = message?.raw?.migrate_to_chat_id;
+        if (typeof newChatId !== 'number' && typeof newChatId !== 'string') return false;
+        const oldPlatformId = adapter.channelIdFromThreadId(threadId);
+        // Mirror the adapter's `telegram:<chatId>` encoding rather than
+        // reusing channelIdFromThreadId (which would need a synthetic
+        // thread id). Channel-type prefix keeps us aligned with the
+        // single known emitter (Telegram); other channels that grow
+        // analogous events will follow the same prefix convention.
+        const newPlatformId = `${adapter.name}:${newChatId}`;
+        if (newPlatformId === oldPlatformId) return true;
+        log.info('Chat platform-id migration detected', {
+          channelType: adapter.name,
+          oldPlatformId,
+          newPlatformId,
+        });
+        try {
+          await setupConfig.onChatMigrated?.(adapter.name, oldPlatformId, newPlatformId);
+        } catch (err) {
+          log.error('onChatMigrated handler threw', {
+            channelType: adapter.name,
+            oldPlatformId,
+            newPlatformId,
+            err,
+          });
+        }
+        return true;
+      };
+
       // Four SDK dispatch paths — bridge just forwards. All per-wiring
       // engage / accumulate / drop / subscribe decisions live in the host
       // router (src/router.ts routeInbound / evaluateEngage). The bridge
@@ -619,6 +663,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // engaged. Carry the SDK's `message.isMention` through so mention-mode
       // wirings still fire on in-thread mentions.
       chat.onSubscribedMessage(async (thread, message) => {
+        if (await maybeHandleChatMigration(message, thread.id)) return;
         const channelId = adapter.channelIdFromThreadId(thread.id);
         await setupConfig.onInbound(
           channelId,
@@ -629,6 +674,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
 
       // @mention in an unsubscribed thread — SDK-confirmed bot mention.
       chat.onNewMention(async (thread, message) => {
+        if (await maybeHandleChatMigration(message, thread.id)) return;
         const channelId = adapter.channelIdFromThreadId(thread.id);
         await setupConfig.onInbound(channelId, thread.id, await messageToInbound(message, true, true));
       });
@@ -638,6 +684,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // inside a DM). Router collapses DM sub-threads to one session via
       // is_group=0 short-circuit.
       chat.onDirectMessage(async (thread, message) => {
+        if (await maybeHandleChatMigration(message, thread.id)) return;
         const channelId = adapter.channelIdFromThreadId(thread.id);
         log.info('Inbound DM received', {
           adapter: adapter.name,
@@ -659,6 +706,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       // so forwarding every one is cheap enough to not need a bridge-side
       // flood gate.
       chat.onNewMessage(/[\s\S]*/, async (thread, message) => {
+        if (await maybeHandleChatMigration(message, thread.id)) return;
         const channelId = adapter.channelIdFromThreadId(thread.id);
         await setupConfig.onInbound(channelId, thread.id, await messageToInbound(message, false, true));
       });

@@ -25,6 +25,7 @@ import { routeInbound } from '../router.js';
 import { log } from '../log.js';
 import { initChannelAdapters, teardownChannelAdapters, getChannelAdapter } from '../channels/channel-registry.js';
 import type { ChannelAdapter, ChannelSetup } from '../channels/adapter.js';
+import { handleChatMigrated } from '../channels/chat-migration.js';
 import { getResponseHandlers, getShutdownCallbacks, type ResponsePayload } from '../response-registry.js';
 
 // Channel barrel — each enabled channel self-registers on import.
@@ -137,6 +138,7 @@ export async function _bootForHost(opts: { managedSignals: boolean }): Promise<v
           log.error('Failed to handle question response', { questionId, err });
         });
       },
+      onChatMigrated: handleChatMigrated,
     };
   });
 

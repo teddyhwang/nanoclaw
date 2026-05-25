@@ -23,6 +23,20 @@ export interface ChannelSetup {
 
   /** Called when a user clicks a button/action in a card (e.g., ask_user_question response). */
   onAction(questionId: string, selectedOption: string, userId: string): void;
+
+  /**
+   * Called when the platform reassigns a chat to a new platform id under
+   * us. Today the only emitter is the Telegram chat-sdk bridge, on a
+   * `migrate_to_chat_id` service event (basic-group → supergroup upgrade).
+   * The host is expected to rewrite `messaging_groups.platform_id` and
+   * refresh per-session routing/destination rows so subsequent inbound
+   * updates under the new id resolve and outbound replies target it.
+   *
+   * Optional: hosts that don't subscribe will silently lose routing for
+   * the chat until an operator rewrites the DB by hand (the failure mode
+   * before this hook existed).
+   */
+  onChatMigrated?(channelType: string, oldPlatformId: string, newPlatformId: string): void | Promise<void>;
 }
 
 /** Delivery address used for reply-to overrides and (normally) the inbound's own origin. */

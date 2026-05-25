@@ -15,6 +15,7 @@ import {
   getMessagingGroupByPlatform,
   updateMessagingGroup,
   deleteMessagingGroup,
+  setMessagingGroupPlatformId,
   createMessagingGroupAgent,
   getMessagingGroupAgents,
   getMessagingGroupAgent,
@@ -151,6 +152,20 @@ describe('messaging groups', () => {
     createMessagingGroup(mg());
     deleteMessagingGroup('mg-1');
     expect(getMessagingGroup('mg-1')).toBeUndefined();
+  });
+
+  it('setMessagingGroupPlatformId rewrites + is idempotent', () => {
+    createMessagingGroup(mg());
+    const changed1 = setMessagingGroupPlatformId('mg-1', 'chan-999');
+    expect(changed1).toBe(true);
+    expect(getMessagingGroup('mg-1')!.platform_id).toBe('chan-999');
+    // Old id no longer resolves.
+    expect(getMessagingGroupByPlatform('discord', 'chan-123')).toBeUndefined();
+    // New id resolves.
+    expect(getMessagingGroupByPlatform('discord', 'chan-999')!.id).toBe('mg-1');
+    // Re-applying same new id is a no-op (returns false).
+    const changed2 = setMessagingGroupPlatformId('mg-1', 'chan-999');
+    expect(changed2).toBe(false);
   });
 });
 

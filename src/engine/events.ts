@@ -143,6 +143,25 @@ export interface EngineEventMap {
     /** Full chat-sdk content blob, JSON-stringified. */
     content: string;
   };
+  /**
+   * Fires after the engine has rewritten `messaging_groups.platform_id`
+   * and refreshed per-session routing in response to a platform-driven
+   * chat-id reassignment (today: Telegram supergroup upgrades, signaled
+   * via `migrate_to_chat_id`). Host plugins that maintain their own
+   * platform-id-keyed state (history indexers, inventory caches, etc.)
+   * should listen and rewrite their copies under `newPlatformId` —
+   * without that, plugin-owned state stays pinned to the dead id even
+   * though the router/delivery now resolve the new one. `sessionsRefreshed`
+   * counts how many per-session inbound.db `session_routing` rows the
+   * engine refreshed (0 when the migrate hit a wired-but-no-session group).
+   */
+  'channel.migrated': {
+    channelType: string;
+    oldPlatformId: string;
+    newPlatformId: string;
+    messagingGroupId: string;
+    sessionsRefreshed: number;
+  };
   'outbound.delivered': { sessionId: string; agentGroupId: string; channelType: string; platformId: string };
   'outbound.failed': { sessionId: string; agentGroupId: string; channelType: string; platformId: string; err: unknown };
   'container.spawn': { sessionId: string; agentGroupId: string };
