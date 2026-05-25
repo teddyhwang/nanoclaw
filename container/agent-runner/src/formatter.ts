@@ -129,9 +129,14 @@ export interface RoutingContext {
  * Failure case this guards against: two near-simultaneous inbound
  * messages where the newest is a non-trigger drive-by ("optimus is
  * smarter again", "Sorta", emoji, ack) and the older one is the
- * actual @mention the agent is answering. Caller passes messages in
- * `seq DESC` (newest first); we walk to find the newest `trigger=1`
- * row.
+ * actual @mention the agent is answering. We walk to find the newest
+ * `trigger=1` row.
+ *
+ * Caller-order independence: `getPendingMessages` returns rows in
+ * `seq ASC` (oldest first) for chronological prompt formatting, while
+ * the picker wants newest-first to pick the most-recent triggering row.
+ * We sort by `seq` internally so the picker is correct regardless of
+ * input order (oldest-first, newest-first, or unsorted).
  *
  * If no `trigger=1` non-task row exists, returns `null` — NOT a
  * fallback to the newest `trigger=0` row. A `trigger=0` chat row is
@@ -161,9 +166,29 @@ export function pickInReplyToMessage(messages: MessageInRow[]): MessageInRow | n
   // posts in ai-friends, 2026-05-11). Exclude them at the picker level.
   const chatLike = messages.filter((m) => m.kind !== 'task');
   if (chatLike.length === 0) return null;
-  // Only a triggering row is a valid reply target. No trigger=1 row →
+  // Walk newest-first independent of caller input order. Order keys,
+  // most-specific first:
+  //   1. `seq`     — host writer assigns this; monotonic per session.
+  //   2. `timestamp` — ISO `datetime('now')` from the writer; coarser
+  //      (second-resolution) but always present, so it tiebreaks two
+  //      rows the same writer flushed in one tick.
+  //   3. insertion index — final fallback when both seq AND timestamp
+  //      tie (test fixtures using `datetime('now')` for back-to-back
+  //      inserts hit this; a stable sort would otherwise preserve
+  //      input order, and `find(trigger===1)` would pick the OLDEST
+  //      trigger row instead of the newest).
+  //
+  // Only a triggering row is a valid reply target — no trigger=1 row →
   // null (never a trigger=0 accumulate-only drive-by). See docstring.
-  return chatLike.find((m) => m.trigger === 1) ?? null;
+  const indexed = chatLike.map((m, idx) => ({ m, idx }));
+  indexed.sort((a, b) => {
+    const seqDelta = (b.m.seq ?? 0) - (a.m.seq ?? 0);
+    if (seqDelta !== 0) return seqDelta;
+    const tsDelta = (b.m.timestamp ?? '').localeCompare(a.m.timestamp ?? '');
+    if (tsDelta !== 0) return tsDelta;
+    return b.idx - a.idx;
+  });
+  return indexed.find((x) => x.m.trigger === 1)?.m ?? null;
 }
 
 /**
