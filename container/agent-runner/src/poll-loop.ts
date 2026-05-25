@@ -82,6 +82,99 @@ export function shouldKeepaliveBridge(args: { lastEventAt: number; now: number; 
   return args.now - args.lastEventAt <= args.inactivityMs;
 }
 
+/**
+ * Pure batch-selection for the initial wake. Decides which rows ride
+ * this provider turn and which are deferred (left pending for the next
+ * wake). Returns the chosen batch plus any log lines the caller should
+ * emit. Pure so it can be tested without standing up the SDK.
+ *
+ * Two isolation layers, applied in order:
+ *
+ * 1. Task/chat isolation — if any trigger=1 task row is present, drop
+ *    ALL chat/chat-sdk rows. Without this, silent-maintenance tasks
+ *    ("do NOT send any messages") get chat shoved into the prompt and
+ *    the model overrides the silence instruction to reply to what looks
+ *    like a live user turn. Two motivating incidents:
+ *      - 2026-05-11 04:01 (shit-talk): mackchiu's trigger=0 accumulate
+ *        chats from the prior evening dragged into the 04:02 maintenance
+ *        wake; agent posted a chat reply despite the silent-task
+ *        instruction.
+ *      - 2026-05-16 13:22 (AI Friends dream leak): the original fix's
+ *        hole — `taskOnlyWake = triggerRows.every(kind==='task')` missed
+ *        the case where AI-Friends mention-sticky chat was marked
+ *        trigger=1. Now isolation triggers on *any* task trigger, and
+ *        defers chat rows regardless of their trigger flag (sticky-
+ *        engage chat is still chat).
+ *
+ * 2. Dream-only isolation — if any dream-series row (`series_id` starts
+ *    with `dream-`) is in the post-step-1 batch, defer every non-dream
+ *    row too. The dream's silent `<internal>` summary must be the only
+ *    result event in the stream so per-push attribution can route the
+ *    text to the dream's fire context. Without this, a co-arriving
+ *    non-dream task (recap/status-update/RSS — anything that registered
+ *    AFTER the dream) wins attribution when the result lands and the
+ *    dream fire row ends with `assistant_text=''`. Observed 2026-05-25,
+ *    `ag-1778154011329-g9zust` (Degenerate Server): dashboard showed
+ *    "Silent fire — no output captured" for a dream that ran correctly.
+ *    The dream is silent-by-design — deferring co-arrivers costs at
+ *    most one poll tick before they get their own clean stream.
+ */
+export function selectInitialBatch(messages: MessageInRow[]): {
+  batch: MessageInRow[];
+  logs: string[];
+} {
+  const logs: string[] = [];
+  const isChatRow = (m: MessageInRow): boolean => m.kind === 'chat' || m.kind === 'chat-sdk';
+  const isDreamRow = (m: MessageInRow): boolean => (m.series_id ?? '').startsWith('dream-');
+
+  let batch = messages;
+
+  const hasTaskTrigger = messages.some((m) => m.trigger === 1 && m.kind === 'task');
+  if (hasTaskTrigger) {
+    const dropped = messages.filter(isChatRow);
+    if (dropped.length > 0) {
+      const stickyDeferred = dropped.filter((m) => m.trigger === 1).length;
+      logs.push(
+        `Task trigger present: isolating task turn, deferring ${dropped.length} chat row(s) ` +
+          `(${stickyDeferred} trigger=1 sticky-engage) — left pending for next chat wake`,
+      );
+      batch = messages.filter((m) => !isChatRow(m));
+    }
+  }
+
+  if (batch.some(isDreamRow)) {
+    const dreamRows = batch.filter(isDreamRow);
+    const nonDream = batch.filter((m) => !isDreamRow(m));
+    if (nonDream.length > 0) {
+      logs.push(
+        `Dream trigger present: isolating ${dreamRows.length} dream row(s), ` +
+          `deferring ${nonDream.length} non-dream row(s) — left pending for next wake`,
+      );
+      batch = dreamRows;
+    }
+  }
+
+  return { batch, logs };
+}
+
+/**
+ * Push-scoped attribution: pick the newest unwritten task context in the
+ * oldest push that still has one. The SDK emits `result` events in push
+ * order, so the earliest push with pending contexts owns the next result.
+ *
+ * Pure so the attribution decision is testable without standing up the
+ * SDK. See processQuery's attribution comment for the 2026-05-25
+ * Degenerate-Server incident this replaces.
+ */
+export function pickPushScopedContext(pushes: TaskFireContext[][]): TaskFireContext | null {
+  for (const push of pushes) {
+    for (let i = push.length - 1; i >= 0; i--) {
+      if (!push[i].written) return push[i];
+    }
+  }
+  return null;
+}
+
 function log(msg: string): void {
   console.error(`[poll-loop] ${msg}`);
 }
@@ -221,21 +314,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     //    isolation triggers on *any* task trigger present, and defers
     //    chat rows regardless of their trigger flag (sticky-engage
     //    chat is still chat — it must not ride a maintenance turn).
-    const triggerRows = messages.filter((m) => m.trigger === 1);
-    const hasTaskTrigger = triggerRows.some((m) => m.kind === 'task');
-    const isChatRow = (m: MessageInRow) => m.kind === 'chat' || m.kind === 'chat-sdk';
-    let batch = messages;
-    if (hasTaskTrigger) {
-      const dropped = messages.filter(isChatRow);
-      if (dropped.length > 0) {
-        const stickyDeferred = dropped.filter((m) => m.trigger === 1).length;
-        log(
-          `Task trigger present: isolating task turn, deferring ${dropped.length} chat row(s) ` +
-            `(${stickyDeferred} trigger=1 sticky-engage) — left pending for next chat wake`,
-        );
-        batch = messages.filter((m) => !isChatRow(m));
-      }
-    }
+    const isolation = selectInitialBatch(messages);
+    for (const line of isolation.logs) log(line);
+    const batch = isolation.batch;
 
     const ids = batch.map((m) => m.id);
     markProcessing(ids);
@@ -696,24 +777,62 @@ async function processQuery(
   // blocks. Captured once here, passed to every dispatchResultText call.
   const turnStartedAt = outboundDbNow();
   // Attribution: result events fold into one provider stream and the SDK
-  // does not tag which pushed prompt produced a given <message> block, so
-  // per-task dispatch provenance across a task↔chat or task↔task boundary
-  // is best-effort. We attribute each result's text/dispatch to the most
-  // recently registered, still-unwritten task context (the initial task
-  // until a follow-up task is appended; thereafter the latest follow-up).
+  // does not tag which pushed prompt produced a given <message> block.
   // The ROW COUNT and KEYS are always exact (one row per due task, keyed
-  // by its own series_id/id); only the dispatched/assistantText payload is
-  // approximate when chat and task turns interleave in a single long
-  // stream. For the canonical silent maintenance/dream task this is exact:
-  // it dispatches nothing → status='silent'. Errors set `streamErrored`
-  // so the finally skips the normal-completion write; the outer catch in
-  // startMessageLoop writes one error fire per unwritten context instead.
-  const mostRecentTaskContext = (): TaskFireContext | null => {
-    for (let i = taskFireContexts.length - 1; i >= 0; i--) {
-      if (!taskFireContexts[i].written) return taskFireContexts[i];
+  // by its own series_id/id); only the dispatched/assistantText *payload*
+  // needs disambiguation when multiple tasks fold into one stream.
+  //
+  // Strategy: push-scoped attribution. The SDK delivers `result` events
+  // in push order — push 1's result before push 2's — so we partition
+  // contexts by which `query.push` (or initial batch) produced them and
+  // serve them in that order. Each result picks the OLDEST push that
+  // still has an unwritten context, then the newest unwritten context
+  // within that push.
+  //
+  // Why push-scoped beats the prior "most recent unwritten overall":
+  //   On 2026-05-25 a Degenerate-Server dream task fired in the initial
+  //   batch alongside 30+ gated recap claims; later a real recap task +
+  //   a chat-sdk turn arrived as separate follow-up pushes. With "most
+  //   recent unwritten overall", the follow-up chat-sdk context became
+  //   `mostRecentTaskContext()` when the agent's `result.text` (which
+  //   was actually the dream's `<internal>` summary) landed — text was
+  //   attributed to the chat task, dream context flushed empty,
+  //   dashboard showed "Silent fire — no output captured" for the dream
+  //   even though it ran correctly.
+  //
+  //   Push-scoping makes the initial-batch dream context the only
+  //   eligible target for the first result; the chat-sdk follow-up only
+  //   becomes eligible after the dream context is written.
+  //
+  // Paired with the dream-only isolation block above (an initial batch
+  // with a dream row defers all non-dream rows), the canonical dream
+  // case is now structurally clean: dream is the lone context in push 0,
+  // its result attributes to it, fire row carries the `<internal>`
+  // summary.
+  //
+  // Errors set `streamErrored` so the finally skips the normal-completion
+  // write; the outer catch in startMessageLoop writes one error fire per
+  // unwritten context instead.
+  //
+  // Each entry is the contexts registered during a single push (initial
+  // batch at index 0, each subsequent `query.push` appends a new entry).
+  // Contexts can appear in only one push — `registerPushContexts` skips
+  // any already present in an earlier push (idempotent with the existing
+  // `registerTaskFireContextOnce`).
+  const pushes: TaskFireContext[][] = [];
+  const registerPushContexts = (ctxs: TaskFireContext[]): void => {
+    const seenInPriorPush = new Set<string>();
+    for (const earlier of pushes) {
+      for (const c of earlier) seenInPriorPush.add(c.taskId);
     }
-    return null;
+    const next = ctxs.filter((c) => !seenInPriorPush.has(c.taskId));
+    pushes.push(next);
   };
+  // Seed push 0 with the initial-batch contexts already populated by
+  // the caller. Safe even when empty (chat-only turn — no task contexts;
+  // results just won't attribute to any context, matching prior behavior).
+  registerPushContexts([...taskFireContexts]);
+  const mostRecentTaskContext = (): TaskFireContext | null => pickPushScopedContext(pushes);
   let streamErrored = false;
 
   // Write a fire row for every still-unwritten task context. Called at
@@ -1154,6 +1273,19 @@ async function processQuery(
         // more work" so the idle clock restarts from now.
         touchHeartbeat();
         lastEventAt = Date.now();
+        // Open a new push partition for per-push attribution before the
+        // SDK push. Result events that arrive after this point are
+        // candidates to attribute to these follow-up task contexts only
+        // once every earlier push's contexts have been written. The push
+        // entry can be empty (a chat-sdk-only follow-up registers no task
+        // contexts) — that's fine; it just means no task-attribution
+        // change for this push, and earlier pushes' contexts remain
+        // eligible for results.
+        const pushTaskContexts = keep
+          .filter((m) => m.kind === 'task' && m.trigger === 1)
+          .map((m) => taskFireContexts.find((c) => c.taskId === m.id))
+          .filter((c): c is TaskFireContext => c !== undefined);
+        registerPushContexts(pushTaskContexts);
         query.push(prompt, followupImageBlocks.length > 0 ? followupImageBlocks : undefined);
         markCompleted(keptIds);
         // Refresh routing.inReplyTo so subsequent outbound rows reply to the
@@ -1250,8 +1382,11 @@ async function processQuery(
           firstResultSeen = true;
           markCompleted(initialBatchIds);
           if (event.text) {
-            // Attribute this result to the most-recent unwritten task
-            // context (best-effort — see processQuery's attribution note).
+            // Attribute this result push-scoped: the newest unwritten
+            // context in the OLDEST push that still has one. The SDK
+            // delivers results in push order, so the earliest pending
+            // push owns the next result. See processQuery's attribution
+            // note for why this beats the prior overall-most-recent walk.
             const fireCtx = mostRecentTaskContext();
             if (fireCtx) fireCtx.assistantText = event.text;
             const { hasUnwrapped, dispatched } = dispatchResultText(
