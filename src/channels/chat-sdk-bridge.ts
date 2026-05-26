@@ -385,6 +385,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           size: att.size,
           width: (att as unknown as Record<string, unknown>).width,
           height: (att as unknown as Record<string, unknown>).height,
+          ...(typeof att.url === 'string' && { url: att.url }),
         };
         // Two paths to populate `data`:
         //   (1) `fetchData()` — preferred when the adapter exposes it;
