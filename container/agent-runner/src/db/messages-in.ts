@@ -37,6 +37,7 @@ export function _resetOnWakeCacheForTests(): void {
 }
 
 export interface MessageInRow {
+  _rowid?: number;
   id: string;
   seq: number | null;
   kind: string;
@@ -141,7 +142,7 @@ export function getPendingMessages(isFirstPoll = false): MessageInRow[] {
     const onWakeFilter = hasOnWakeColumn(inbound) ? 'AND (on_wake = 0 OR ?1 = 1)' : '';
     return inbound
       .prepare(
-        `SELECT * FROM messages_in
+        `SELECT rowid AS _rowid, * FROM messages_in
          WHERE status = 'pending'
            AND kind != 'system'
            AND (process_after IS NULL OR datetime(process_after) <= datetime('now'))
@@ -163,13 +164,43 @@ export function getPendingMessages(isFirstPoll = false): MessageInRow[] {
     ),
   );
 
+  const unacked = pending.filter((m) => !ackedIds.has(m.id));
+
   // Sort by seq ASC for chronological agent view. Can't just
   // `.reverse()` because the SQL `ORDER BY trigger DESC, seq DESC`
   // groups trigger=1 rows ahead of trigger=0 — a plain reverse would
   // put trigger=0 chat first, trigger=1 task last, which both
   // confuses the agent's time-ordering and lets the trigger=1 row
   // end up at the tail of formatMessages' chat block.
-  return pending.filter((m) => !ackedIds.has(m.id)).sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+  return scopeChatBatchToTriggerRoute(unacked).sort(compareMessageOrderAsc);
+}
+
+function scopeChatBatchToTriggerRoute(messages: MessageInRow[]): MessageInRow[] {
+  const taskTrigger = messages.find((m) => m.trigger === 1 && m.kind === 'task');
+  if (taskTrigger) return messages;
+
+  const chatTrigger = messages.filter((m) => m.trigger === 1).sort(compareMessageOrderDesc)[0];
+  if (!chatTrigger) return messages;
+
+  return messages.filter((m) => sameRoute(m, chatTrigger));
+}
+
+function sameRoute(a: MessageInRow, b: MessageInRow): boolean {
+  return a.channel_type === b.channel_type && a.platform_id === b.platform_id && a.thread_id === b.thread_id;
+}
+
+function compareMessageOrderAsc(a: MessageInRow, b: MessageInRow): number {
+  const seqDelta = (a.seq ?? 0) - (b.seq ?? 0);
+  if (seqDelta !== 0) return seqDelta;
+  const timestampDelta = (a.timestamp ?? '').localeCompare(b.timestamp ?? '');
+  if (timestampDelta !== 0) return timestampDelta;
+  const rowidDelta = (a._rowid ?? 0) - (b._rowid ?? 0);
+  if (rowidDelta !== 0) return rowidDelta;
+  return a.id.localeCompare(b.id);
+}
+
+function compareMessageOrderDesc(a: MessageInRow, b: MessageInRow): number {
+  return -compareMessageOrderAsc(a, b);
 }
 
 /** Mark messages as processing — writes to processing_ack in outbound.db. */

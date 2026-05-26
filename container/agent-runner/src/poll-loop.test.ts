@@ -207,6 +207,50 @@ describe('accumulate gate (trigger column)', () => {
     expect(messages.map((m) => m.id).sort()).toEqual(['fresh-trigger', 'recent-noise']);
   });
 
+  it('cross-channel trigger only carries accumulated rows from that same channel', () => {
+    // Degenerates 2026-05-26: a General-channel trigger swept in a
+    // stale Cook-channel trigger=0 question from the shared agent session,
+    // and the model answered Cook even though General caused the wake.
+    // Accumulated context must be route-scoped to the actual chat trigger.
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, trigger, platform_id, channel_type, content)
+         VALUES (?, 'chat-sdk', datetime('now', '-3 minutes'), 'pending', ?, ?, 'discord', ?)`,
+      )
+      .run('cook-context', 0, 'discord:guild:cook', JSON.stringify({ sender: 'mackchiu', text: 'onion rings?' }));
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, trigger, platform_id, channel_type, content)
+         VALUES (?, 'chat-sdk', datetime('now', '-2 minutes'), 'pending', ?, ?, 'discord', ?)`,
+      )
+      .run('general-context', 0, 'discord:guild:general', JSON.stringify({ sender: 'Teddy', text: 'context' }));
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, trigger, platform_id, channel_type, content)
+         VALUES (?, 'chat-sdk', datetime('now'), 'pending', ?, ?, 'discord', ?)`,
+      )
+      .run('general-trigger', 1, 'discord:guild:general', JSON.stringify({ sender: 'Teddy', text: '@Optimus ping' }));
+
+    expect(getPendingMessages().map((m) => m.id)).toEqual(['general-context', 'general-trigger']);
+  });
+
+  it('cross-channel chat triggers are processed one route at a time', () => {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, trigger, platform_id, channel_type, content)
+         VALUES (?, 'chat-sdk', datetime('now', '-1 minute'), 'pending', 1, ?, 'discord', ?)`,
+      )
+      .run('older-cook-trigger', 'discord:guild:cook', JSON.stringify({ text: '@Optimus cook' }));
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, trigger, platform_id, channel_type, content)
+         VALUES (?, 'chat-sdk', datetime('now'), 'pending', 1, ?, 'discord', ?)`,
+      )
+      .run('newer-general-trigger', 'discord:guild:general', JSON.stringify({ text: '@Optimus general' }));
+
+    expect(getPendingMessages().map((m) => m.id)).toEqual(['newer-general-trigger']);
+  });
+
   it('trigger column defaults to 1 for legacy inserts without explicit value', () => {
     // The schema default is 1 (see src/db/schema.ts INBOUND_SCHEMA) — existing
     // rows / tests without the column set are effectively wake-eligible.

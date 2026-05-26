@@ -1917,7 +1917,7 @@ function resolveDestinationThread(
       .prepare(
         `SELECT thread_id FROM messages_in
          WHERE channel_type = ? AND platform_id = ?
-         ORDER BY seq DESC LIMIT 1`,
+         ORDER BY COALESCE(seq, rowid) DESC, datetime(timestamp) DESC, rowid DESC LIMIT 1`,
       )
       .get(channelType, platformId) as { thread_id: string | null } | undefined;
     if (!threadRow) return null;
@@ -1926,7 +1926,7 @@ function resolveDestinationThread(
         `SELECT id FROM messages_in
          WHERE channel_type = ? AND platform_id = ?
            AND kind != 'task' AND trigger = 1
-         ORDER BY seq DESC LIMIT 1`,
+         ORDER BY COALESCE(seq, rowid) DESC, datetime(timestamp) DESC, rowid DESC LIMIT 1`,
       )
       .get(channelType, platformId) as { id: string } | undefined;
     return { threadId: threadRow.thread_id, inReplyTo: replyRow?.id ?? null };
