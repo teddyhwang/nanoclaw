@@ -530,6 +530,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     // (Discord); absent on platforms that don't supply it, where
     // isAddressedTurn keeps its permissive isMention behavior.
     if (config.botUserId) serialized.botUserId = config.botUserId;
+    if (authoredBySelf) serialized.isBotMessage = true;
 
     // Drop raw to save DB space (can be very large)
     serialized.raw = undefined;
