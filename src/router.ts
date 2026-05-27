@@ -626,7 +626,18 @@ async function deliverToAgent(
   // as a continuation of its own prior turn. Shallow-cloned because the same
   // event.message.content is shared across the fan-out — mutating in place
   // would cross-contaminate sibling agents whose isReplyToBot is false.
-  const content = stampReplyToBot(event.message.content as string, isReplyToBot);
+  //
+  // When the host woke this agent for this row (wake=true), also stamp the
+  // wiring's engage_mode so the container's `isAddressedTurn` knows the host
+  // engagement gate fired with a this-bot-specific signal. Without this, a
+  // `engage_mode='pattern'` wiring (every DM and every dedicated-bot group
+  // chat — Nook, Tico, all DMs) looks ambient inside the container because
+  // the message has no @mention/replyTo, the agent goes silent, and the user
+  // sees the bot as broken (2026-05-27 Nook incident).
+  let content = stampReplyToBot(event.message.content as string, isReplyToBot);
+  if (wake) {
+    content = stampEngagement(content, agent.engage_mode);
+  }
 
   const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);
   await writeSessionMessage(session.agent_group_id, session.id, {
@@ -703,6 +714,32 @@ function stampReplyToBot(content: string, isReplyToBot: boolean): string {
 }
 
 /**
+ * Stamp the wiring's `engage_mode` onto the per-agent content JSON so the
+ * container can see *why* the host woke this turn. Only called when wake=true
+ * (the host's engagement gate fired for THIS row). Pure: returns input
+ * untouched if the payload isn't a JSON object.
+ *
+ * The container's `isAddressedTurn` consumes `engageMode='pattern'` as a
+ * sufficient address signal because `evaluateEngage` for `pattern` only
+ * returns true when the per-wiring regex matched this bot's text — i.e. the
+ * operator's configured signal that "this message is for this agent" already
+ * fired. Without this, the in-container safety net only sees @mention /
+ * replyTo, missing the entire "dedicated-bot via `pattern='.'`" case.
+ */
+function stampEngagement(content: string, engageMode: string | null | undefined): string {
+  if (!engageMode) return content;
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(content) as Record<string, unknown>;
+  } catch {
+    return content;
+  }
+  if (!parsed || typeof parsed !== 'object') return content;
+  const stamped = { ...parsed, engageMode };
+  return JSON.stringify(stamped);
+}
+
+/**
  * When fanning out, the same inbound message lands in multiple per-agent
  * session DBs. messages_in.id is PRIMARY KEY, so reuse of the raw id would
  * collide across sessions (or, more subtly, within one session if re-routed
@@ -718,4 +755,5 @@ export const _internals = {
   evaluateEngage,
   evaluateReactionEngage,
   stampReplyToBot,
+  stampEngagement,
 };

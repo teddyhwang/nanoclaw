@@ -9,7 +9,7 @@ import { describe, it, expect } from 'vitest';
 import { _internals } from './router.js';
 import type { MessagingGroupAgent } from './types.js';
 
-const { evaluateEngage, evaluateReactionEngage, stampReplyToBot } = _internals;
+const { evaluateEngage, evaluateReactionEngage, stampReplyToBot, stampEngagement } = _internals;
 
 function buildAgent(overrides: Partial<MessagingGroupAgent> = {}): MessagingGroupAgent {
   return {
@@ -103,6 +103,44 @@ describe('stampReplyToBot — platform-uniform reply-to-self marker', () => {
     stampReplyToBot(original, true);
     // Re-parsing the original string must still show no toBot marker — the
     // function must not have mutated the underlying object graph.
+    expect(JSON.parse(original)).toEqual(before);
+  });
+});
+
+describe('stampEngagement — host engagement-mode marker for container', () => {
+  it('adds engageMode to content JSON when engageMode is provided', () => {
+    const content = JSON.stringify({ text: 'hey', isMention: false });
+    const stamped = JSON.parse(stampEngagement(content, 'pattern'));
+    expect(stamped.engageMode).toBe('pattern');
+    expect(stamped.text).toBe('hey');
+  });
+
+  it('coexists with replyTo.toBot stamping (composition order is irrelevant)', () => {
+    const content = JSON.stringify({
+      text: 'follow-up',
+      replyTo: { text: 'prior', sender: 'Optimus' },
+    });
+    const replyStamped = stampReplyToBot(content, true);
+    const engageStamped = JSON.parse(stampEngagement(replyStamped, 'pattern'));
+    expect(engageStamped.replyTo.toBot).toBe(true);
+    expect(engageStamped.engageMode).toBe('pattern');
+  });
+
+  it('returns input unchanged when engageMode is null/undefined/empty', () => {
+    const content = JSON.stringify({ text: 'x' });
+    expect(stampEngagement(content, null)).toBe(content);
+    expect(stampEngagement(content, undefined)).toBe(content);
+    expect(stampEngagement(content, '')).toBe(content);
+  });
+
+  it('returns input unchanged on unparseable JSON (defensive)', () => {
+    expect(stampEngagement('not json', 'pattern')).toBe('not json');
+  });
+
+  it('does not mutate the input content (per-agent fan-out safety)', () => {
+    const original = JSON.stringify({ text: 'x' });
+    const before = JSON.parse(original);
+    stampEngagement(original, 'pattern');
     expect(JSON.parse(original)).toEqual(before);
   });
 });

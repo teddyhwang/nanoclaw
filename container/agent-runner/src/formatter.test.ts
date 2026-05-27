@@ -900,6 +900,47 @@ describe('isAddressedTurn', () => {
     expect(isAddressedTurn([row({ text: 'random group message' })], 'Optimus')).toBe(false);
   });
 
+  it('true on host-stamped engageMode=pattern (dedicated-bot wiring)', () => {
+    // The 2026-05-27 Nook incident: telegram `pattern='.'` wiring (every
+    // message goes to this bot) but no @mention/replyTo. Before
+    // stampEngagement, this read as ambient and the agent silent-turn-
+    // completed on a direct question.
+    expect(
+      isAddressedTurn(
+        [row({ text: "What's going on did you fix it?", engageMode: 'pattern' })],
+        'Optimus',
+      ),
+    ).toBe(true);
+  });
+
+  it('mention-sticky engagement WITHOUT a this-bot mention is NOT addressed (multi-bot channel safety)', () => {
+    // AI Friends shape: shared channel where the host woke this bot for an
+    // @other-bot mention. engageMode='mention-sticky' must not bypass the
+    // botUserId discriminator — only engageMode='pattern' is sufficient.
+    expect(
+      isAddressedTurn(
+        [
+          row({
+            text: '<@456> hey',
+            isMention: true,
+            botUserId: '123',
+            engageMode: 'mention-sticky',
+          }),
+        ],
+        'Optimus',
+      ),
+    ).toBe(false);
+  });
+
+  it('engageMode=pattern still respects trigger=0 (accumulate gating)', () => {
+    expect(
+      isAddressedTurn(
+        [row({ text: 'ambient', engageMode: 'pattern' }, { trigger: 0 })],
+        'Optimus',
+      ),
+    ).toBe(false);
+  });
+
   it('false for trigger=0 accumulate-only rows even if they look addressed', () => {
     expect(isAddressedTurn([row({ text: '<@123>', isMention: true }, { trigger: 0 })], 'Optimus')).toBe(false);
   });

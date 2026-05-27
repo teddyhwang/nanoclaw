@@ -273,12 +273,26 @@ export function isAddressedTurn(messages: MessageInRow[], assistantName: string)
       botUserId?: unknown;
       text?: unknown;
       replyTo?: { toBot?: unknown; sender?: unknown };
+      engageMode?: unknown;
     };
     try {
       parsed = JSON.parse(m.content) as typeof parsed;
     } catch {
       continue;
     }
+    // Host-stamped engagement signal (router.stampEngagement, wake=true only).
+    // `engage_mode='pattern'` is sufficient on its own: `evaluateEngage` only
+    // returns true when the per-wiring regex matched, so a pattern wake IS
+    // the operator's configured "this message is for THIS agent" signal.
+    // Without this, dedicated-bot wirings (every DM, every `pattern='.'`
+    // group like Nook/Tico) look ambient inside the container because no
+    // @mention/replyTo is present, the agent goes silent, and the user sees
+    // the bot as broken (2026-05-27 Nook incident). `mention` and
+    // `mention-sticky` deliberately fall through — those modes can wake for
+    // a mention of a *different* bot in a multi-bot channel (AI Friends), so
+    // we still need the isMention/botUserId discriminator below to attribute
+    // the address to THIS bot.
+    if (parsed.engageMode === 'pattern') return true;
     if (parsed.isMention === true) {
       const botUserId = typeof parsed.botUserId === 'string' ? parsed.botUserId : '';
       if (botUserId.length === 0) {
