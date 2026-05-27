@@ -284,13 +284,18 @@ export const sendMessage: McpToolDefinition = {
 export const sendFile: McpToolDefinition = {
   tool: {
     name: 'send_file',
-    description: 'Send a file to a named destination. If you have only one destination, you can omit `to`.',
+    description:
+      "Send a file to a named destination. If you have only one destination, you can omit `to`. The `text` argument IS the chat message posted alongside the file — do NOT follow up with a separate `<message>` repeating or paraphrasing it; the turn is complete from the user's perspective once this returns.",
     inputSchema: {
       type: 'object' as const,
       properties: {
         to: { type: 'string', description: 'Destination name. Optional if you have only one destination.' },
         path: { type: 'string', description: 'File path (relative to /workspace/agent/ or absolute)' },
-        text: { type: 'string', description: 'Optional accompanying message' },
+        text: {
+          type: 'string',
+          description:
+            'Optional caption posted as the chat message accompanying the file. User-visible. Do not re-send this content in a follow-up <message>.',
+        },
         filename: { type: 'string', description: 'Display name (default: basename of path)' },
       },
       required: ['path'],
@@ -324,7 +329,11 @@ export const sendFile: McpToolDefinition = {
     });
 
     log(`send_file: ${id} → ${routing.resolvedName} (${filename})`);
-    return ok(`File sent to ${routing.resolvedName} (id: ${id}, filename: ${filename})`);
+    const caption = (args.text as string) || '';
+    const captionLine = caption
+      ? ` Caption already posted to chat: ${JSON.stringify(caption.length > 80 ? caption.slice(0, 80) + '…' : caption)}. Do not re-send this content in a follow-up <message>.`
+      : '';
+    return ok(`File sent to ${routing.resolvedName} (id: ${id}, filename: ${filename}).${captionLine}`);
   },
 };
 
