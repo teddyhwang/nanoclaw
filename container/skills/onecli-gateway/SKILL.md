@@ -40,8 +40,9 @@ Google Slides**, always call the `mcp__google__google_call` MCP tool:
 - `mcp__google__google_capabilities` — report what the sender has connected
 
 For **file uploads / attachments** (Drive content, Gmail attachments,
-Docs/Sheets imports), pass `media_mime_type` + `media_base64` to
-`google_call`. Without these, an upload-family endpoint returns
+Docs/Sheets imports), write the file under `/workspace/agent/` and pass
+`media_mime_type` + `media_path` to `google_call`. Without one of the
+`media_*` pairs, an upload-family endpoint returns
 "uploading message via /upload/\* URL required" or silently creates a
 metadata-only resource. Example for Drive content upload:
 
@@ -53,9 +54,16 @@ google_call({
   params: '{"uploadType":"multipart","fields":"id,name,webViewLink"}',
   body: '{"name":"labels.docx","parents":["<folder-id>"]}',
   media_mime_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  media_base64: "<base64 of file bytes>"
+  media_path: ".outbox/labels.docx"
 })
 ```
+
+`media_path` is RELATIVE to `/workspace/agent/`, no leading `/`, no `..`.
+**Do NOT use `media_base64` for files over ~4 KB** — the model silently
+truncates long string literals inside tool inputs with `...`, producing
+a corrupt upload (Word throws `OfficeImportError 912`, zip headers
+broken, no error from the upload itself). Always go through `media_path`
+for attachments. `media_base64` is only safe for tiny inline payloads.
 
 For artifacts you generated that the chat user just wants to see
 (screenshots, generated docx/PDF, charts), prefer
