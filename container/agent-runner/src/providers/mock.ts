@@ -1,4 +1,3 @@
-import { EMPTY_STATS, type SessionStats } from '../session-stats.js';
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
@@ -17,15 +16,6 @@ export class MockProvider implements AgentProvider {
 
   isSessionInvalid(_err: unknown): boolean {
     return false;
-  }
-
-  /**
-   * Mock has no on-disk transcript; lazy rotation falls back to day-boundary
-   * only for mock-driven sessions. Tests that want to exercise threshold
-   * branches should call the evaluator directly with synthesized stats.
-   */
-  readSessionStats(_continuation: string): SessionStats {
-    return { ...EMPTY_STATS };
   }
 
   query(input: QueryInput): AgentQuery {

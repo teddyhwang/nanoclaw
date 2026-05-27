@@ -13,13 +13,12 @@ import {
   clearContinuation,
   clearContinuationStartedAt,
   clearCurrentBatchReplyTarget,
-  getContinuationStartedAt,
   migrateLegacyContinuation,
   setContinuation,
   setContinuationStartedAt,
   setCurrentBatchReplyTarget,
 } from './db/session-state.js';
-import { computeRotationDate, evaluateRotation } from './session-rotation.js';
+import { computeRotationDate } from './session-rotation.js';
 import { TIMEZONE } from './timezone.js';
 import { clearCurrentInReplyTo, setCurrentInReplyTo } from './current-batch.js';
 import fs from 'fs';
@@ -175,6 +174,30 @@ export function pickPushScopedContext(pushes: TaskFireContext[][]): TaskFireCont
   return null;
 }
 
+/**
+ * Number of consecutive `database disk image is malformed` errors after which
+ * the follow-up poll gives up and exits the process. At ACTIVE_POLL_INTERVAL_MS
+ * = 500ms this is roughly 5 seconds — long enough to dodge a transient torn
+ * read during a host write, short enough to recover quickly from a poisoned
+ * page cache (host-sweep then respawns with a fresh mount).
+ */
+const CORRUPTION_STREAK_EXIT = 10;
+
+/**
+ * True for SQLite errors that indicate a corrupt READ view — almost always a
+ * cross-mount page-cache coherency issue on Docker Desktop macOS rather than
+ * actual file damage (host-side integrity_check passes). Reopening the DB
+ * handle inside this process does NOT recover; only a fresh container mount
+ * does. Caller's job is to exit so host-sweep respawns the container.
+ */
+export function isCorruptionError(msg: string): boolean {
+  return (
+    msg.includes('database disk image is malformed') ||
+    msg.includes('SQLITE_CORRUPT') ||
+    msg.includes('file is not a database')
+  );
+}
+
 function log(msg: string): void {
   console.error(`[poll-loop] ${msg}`);
 }
@@ -247,6 +270,19 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   // other providers may reload a thread ID, etc.). Keyed per-provider so
   // a Codex thread id never gets handed to Claude or vice versa.
   let continuation: string | undefined = migrateLegacyContinuation(config.providerName);
+
+  // Before resuming, drop a session whose on-disk transcript has grown too
+  // large/old to cold-resume within the host's idle ceiling. Without this a
+  // long-lived hub keeps trying to reload an ever-growing .jsonl, hangs the
+  // first turn, and gets killed before it can reply (then repeats forever).
+  if (continuation) {
+    const rotateReason = config.provider.maybeRotateContinuation?.(continuation, config.cwd);
+    if (rotateReason) {
+      log(`Rotating session — ${rotateReason}; starting fresh`);
+      clearContinuation(config.providerName);
+      continuation = undefined;
+    }
+  }
 
   if (continuation) {
     log(`Resuming agent session ${continuation}`);
@@ -484,36 +520,18 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       log(`Loaded ${imageBlocks.length} image attachment(s) for multimodal turn`);
     }
 
-    // Lazy session rotation — fires BEFORE provider.query() so the current
-    // turn always runs on a coherent thread (rotating mid-flight would
-    // destroy the in-memory `resume` id while the SDK is still using it).
-    //
-    // Rationale: the host-side 04:00 dream task already calls the
-    // `rotate_session` MCP tool for the common "session has gotten too old"
-    // case. This hook adds the v1 drift-trigger axes that 04:00 alone can't
-    // cover — a single very chatty day that compacts multiple times before
-    // the next dream pass arrives. The original ai-friends 2026-04-16
-    // incident (4 days / 2+ compacts / 7.6 MB) is the canonical shape.
-    //
-    // The provider owns the stats reader (see AgentProvider.readSessionStats);
-    // a provider that returns EMPTY_STATS effectively degrades to "rotate
-    // only at the 04:00 day boundary," which is the v2-only baseline.
+    // Per-dequeue session rotation — fires BEFORE provider.query() so the
+    // current turn always runs on a coherent thread (rotating mid-flight
+    // would destroy the in-memory `resume` id while the SDK is still using
+    // it). Upstream calls maybeRotateContinuation once at container boot;
+    // we additionally call it before every query so drift-axis triggers
+    // (post-compact summaries, day-boundary crossings — see
+    // session-rotation.ts) fire even in a long-lived warm container.
     if (continuation) {
-      const stats = config.provider.readSessionStats(continuation);
-      const startedAt = getContinuationStartedAt(config.providerName);
-      const decision = evaluateRotation(new Date(), TIMEZONE, startedAt, stats);
-      if (decision.reason !== 'no-session' && decision.reason !== 'same-day') {
-        log(
-          `Rotation evaluator: reason=${decision.reason} ` +
-            `rotate=${decision.rotate} compactCount=${stats.compactCount} ` +
-            `sizeBytes=${stats.sizeBytes} tokensUsed=${stats.tokensUsed ?? 'n/a'} ` +
-            `startedAt=${startedAt ?? 'unstamped'}`,
-        );
-      }
-      if (decision.rotate) {
-        log(`Rotating session before query: ${decision.reason} ` + `(previous continuation: ${continuation})`);
+      const reason = config.provider.maybeRotateContinuation?.(continuation, config.cwd);
+      if (reason) {
+        log(`Rotating session before query: ${reason} (previous continuation: ${continuation})`);
         clearContinuation(config.providerName);
-        clearContinuationStartedAt(config.providerName);
         continuation = undefined;
       }
     }
@@ -915,6 +933,7 @@ async function processQuery(
     if (!shouldKeepaliveBridge({ lastEventAt, now: Date.now(), inactivityMs: STREAM_INACTIVITY_MS })) return;
     touchHeartbeat();
   }, QUERY_KEEPALIVE_MS);
+  let corruptionStreak = 0;
   const pollHandle = setInterval(() => {
     if (done || pollInFlight || endedForCommand) return;
     pollInFlight = true;
@@ -1335,6 +1354,31 @@ async function processQuery(
         // path is not, so it needs its own.
         const errMsg = err instanceof Error ? err.message : String(err);
         log(`Follow-up poll error: ${errMsg}`);
+
+        // Detect SQLite cross-mount corruption (Docker Desktop macOS virtiofs /
+        // gRPC-FUSE coherency bug — the kernel page cache for the inbound.db
+        // bind mount can latch a torn snapshot mid-host-write, after which
+        // every fresh openInboundDb() in this process sees the same broken
+        // view. Reopening inside the container does NOT recover; only a fresh
+        // container mount does. Exit so the host sweep respawns us.
+        if (isCorruptionError(errMsg)) {
+          corruptionStreak += 1;
+          if (corruptionStreak >= CORRUPTION_STREAK_EXIT) {
+            log(
+              `Follow-up poll: ${corruptionStreak} consecutive '${errMsg}' errors — ` +
+                `inbound.db page cache is poisoned. Exiting so host respawns with a fresh mount.`,
+            );
+            // Stop touching the heartbeat so host-sweep stale detection fires
+            // promptly even if exit() races with in-flight async work.
+            done = true;
+            clearInterval(pollHandle);
+            // Defer exit one tick so this log line flushes through Docker's
+            // log driver before the process dies.
+            setTimeout(() => process.exit(75), 100);
+          }
+        } else {
+          corruptionStreak = 0;
+        }
       } finally {
         pollInFlight = false;
       }

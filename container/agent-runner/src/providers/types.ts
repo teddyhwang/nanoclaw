@@ -1,5 +1,3 @@
-import type { SessionStats } from '../session-stats.js';
-
 export interface AgentProvider {
   /**
    * True if the provider's underlying SDK handles slash commands natively and
@@ -18,19 +16,19 @@ export interface AgentProvider {
   isSessionInvalid(err: unknown): boolean;
 
   /**
-   * Snapshot the on-disk state of the given continuation so the lazy
-   * rotation evaluator (in `../session-rotation.ts`) can decide whether to
-   * clear it before the next turn. Each provider owns its on-disk shape
-   * (jsonl scan, state-db query, etc.) and returns the union shape in
-   * `SessionStats`.
+   * Optional pre-resume maintenance. Given the stored continuation token,
+   * decide whether its backing transcript has grown too large or too old to
+   * resume cheaply. Return a non-null reason string to tell the caller to drop
+   * the continuation and start a fresh session (the provider archives any
+   * recoverable summary first); return null to keep resuming.
    *
-   * Implementations MUST be cheap (this runs on every dequeue) and MUST NOT
-   * throw — return `EMPTY_STATS` on any error so a malformed transcript
-   * never blocks message processing. Providers that don't track on-disk
-   * stats can return `EMPTY_STATS` unconditionally; their sessions then
-   * rotate only on the day-boundary signal.
+   * Guards the cold-resume failure mode: a long-lived hub session accumulates
+   * days of history — including base64 image blocks the agent Read — and the
+   * SDK reloads the whole .jsonl on every resume. Past a threshold the first
+   * turn alone can exceed the host's idle ceiling, so the container is killed
+   * before it ever replies. Providers without an on-disk transcript omit this.
    */
-  readSessionStats(continuation: string): SessionStats;
+  maybeRotateContinuation?(continuation: string, cwd: string): string | null;
 }
 
 /**
@@ -151,11 +149,6 @@ export interface AgentQuery {
   /** Force-stop the query. */
   abort(): void;
 }
-
-// Re-export so providers in skill-installed branches can implement the
-// stats reader without reaching across to the sibling module path.
-export type { SessionStats };
-export { EMPTY_STATS } from '../session-stats.js';
 
 export type ProviderEvent =
   | { type: 'init'; continuation: string }

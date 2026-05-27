@@ -9,7 +9,7 @@ import {
   setContinuation,
   setContinuationStartedAt,
 } from './db/session-state.js';
-import { computeRotationDate } from './session-rotation.js';
+import { computeRotationDate, evaluateRotation } from './session-rotation.js';
 import { TIMEZONE } from './timezone.js';
 import { MockProvider } from './providers/mock.js';
 import { runPollLoop } from './poll-loop.js';
@@ -844,9 +844,12 @@ describe('poll loop — stale session recovery', () => {
 });
 
 /**
- * Provider that returns configurable stats from readSessionStats so we can
- * drive the lazy rotation hook. Emits an init event with a new continuation
- * so the stamp path also runs.
+ * Provider that drives the day-aware rotation evaluator via its
+ * `maybeRotateContinuation` hook so poll-loop integration tests can exercise
+ * the same rotation flow ClaudeProvider does (just without a real on-disk
+ * transcript). Reuses the real `evaluateRotation` so test coverage tracks
+ * the production decision function. Emits an init event with a new
+ * continuation so the stamp path also runs.
  */
 class StatsConfigurableProvider {
   readonly supportsNativeSlashCommands = false;
@@ -869,8 +872,11 @@ class StatsConfigurableProvider {
     return false;
   }
 
-  readSessionStats() {
-    return { ...this.stats };
+  maybeRotateContinuation(continuation: string): string | null {
+    if (!continuation) return null;
+    const startedAt = getContinuationStartedAt('mock');
+    const decision = evaluateRotation(new Date(), TIMEZONE, startedAt, this.stats);
+    return decision.rotate ? decision.reason : null;
   }
 
   query(_input: { prompt: string; cwd: string; continuation?: string }) {
@@ -1000,10 +1006,6 @@ class EndingProvider {
     return false;
   }
 
-  readSessionStats() {
-    return { compactCount: 0, sizeBytes: 0, turnCount: 0 };
-  }
-
   query(input: { prompt: string }) {
     const factory = this.responseFactory;
     const pending: string[] = [];
@@ -1062,10 +1064,6 @@ class ThrowingProvider {
     return false;
   }
 
-  readSessionStats() {
-    return { compactCount: 0, sizeBytes: 0, turnCount: 0 };
-  }
-
   query(_input: { prompt: string; cwd: string }) {
     const errorMessage = this.errorMessage;
     return {
@@ -1088,10 +1086,6 @@ class InvalidSessionProvider {
 
   isSessionInvalid(): boolean {
     return true;
-  }
-
-  readSessionStats() {
-    return { compactCount: 0, sizeBytes: 0, turnCount: 0 };
   }
 
   query(_input: { prompt: string; cwd: string }) {
