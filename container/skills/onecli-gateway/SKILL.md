@@ -10,7 +10,7 @@ description: >-
 compatibility: Requires HTTPS_PROXY set in environment (automatic when launched via `onecli run`)
 metadata:
   author: onecli
-  version: "0.5.0"
+  version: '0.5.0'
 ---
 
 # OneCLI Gateway
@@ -19,21 +19,63 @@ Your outbound HTTPS traffic is transparently proxied through the OneCLI
 gateway, which injects stored credentials at the proxy boundary. You never
 see or handle credential values directly.
 
-## How to Access External Services
+## Google services — use the Google MCP, NOT curl
 
-You have direct HTTP access to external APIs. OAuth apps (Gmail, GitHub,
-Google Calendar, Google Drive, etc.) and API key services are all available
-through the gateway. Just make the request directly; the gateway injects
-credentials if the app is connected. If not, it returns an error with a
-connect URL you can present to the user.
+> **Optimus host override.** In this deployment, OneCLI does **not** inject
+> credentials for `*.googleapis.com`. Google services use a separate, per-
+> message-sender MCP gateway that resolves the acting user's OAuth from the
+> dashboard. The skill examples below (`curl gmail.googleapis.com`) do not
+> apply to Google. If you `curl` a Google endpoint you will get **401
+> Unauthorized** every time — wasted turn.
 
-## Making Requests
+For **Gmail, Google Calendar, Google Drive, Google Sheets, Google Docs, and
+Google Slides**, always call the `mcp__google__google_call` MCP tool:
+
+- `mcp__google__google_schema` — discover available methods/parameters
+- `mcp__google__google_call` — dispatch any method on those six services
+- `mcp__google__google_list_my_accounts` — list labeled connections
+  (`primary`, `catering`, etc.)
+- `mcp__google__google_workspace_members` — discover shared accounts in
+  this workspace
+- `mcp__google__google_capabilities` — report what the sender has connected
+
+For **file uploads / attachments** (Drive content, Gmail attachments,
+Docs/Sheets imports), pass `media_mime_type` + `media_base64` to
+`google_call`. Without these, an upload-family endpoint returns
+"uploading message via /upload/\* URL required" or silently creates a
+metadata-only resource. Example for Drive content upload:
+
+```
+google_call({
+  service: "drive",
+  resource: "files",
+  method: "create",
+  params: '{"uploadType":"multipart","fields":"id,name,webViewLink"}',
+  body: '{"name":"labels.docx","parents":["<folder-id>"]}',
+  media_mime_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  media_base64: "<base64 of file bytes>"
+})
+```
+
+For artifacts you generated that the chat user just wants to see
+(screenshots, generated docx/PDF, charts), prefer
+`mcp__nanoclaw__send_file` — it posts directly to the chat without the
+Drive/email roundtrip.
+
+## How to Access Other External Services
+
+For everything else — GitHub, Stripe, third-party REST APIs that are wired
+into OneCLI — you have direct HTTP access. OAuth apps and API key services
+are available through the gateway. Just make the request directly; the
+gateway injects credentials if the app is connected. If not, it returns an
+error with a connect URL you can present to the user.
+
+## Making Requests (non-Google)
 
 Call the real API URL. The gateway intercepts the request and injects
 credentials automatically.
 
 ```bash
-curl -s "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=5"
 curl -s "https://api.github.com/user/repos?per_page=10"
 curl -s "https://api.stripe.com/v1/charges?limit=5"
 ```
@@ -41,6 +83,8 @@ curl -s "https://api.stripe.com/v1/charges?limit=5"
 Standard HTTP clients (curl, fetch, requests, axios, Go net/http, git) all
 honor the `HTTPS_PROXY` environment variable automatically. You do not need
 to set any auth headers.
+
+**Do not `curl` `*.googleapis.com`** — see the Google MCP section above.
 
 ## Credential Stubs for MCP Servers
 
@@ -72,12 +116,15 @@ request. If the retry still fails, ask if they need help with the setup.
 
 ## Rules
 
-- **Never** say "I don't have access to X" without first making the HTTP
-  request through the proxy.
+- **Never** say "I don't have access to X" without first making the
+  appropriate call — `mcp__google__google_call` for Google services,
+  proxied HTTP for everything else.
+- **Never** `curl` `*.googleapis.com`. Use `mcp__google__*` tools.
 - **Never** use browser extensions, gcloud, or manual auth flows. The
-  gateway handles credentials for you.
+  gateway and MCP handle credentials for you.
 - **Never** ask the user for API keys or tokens directly. Direct them to
-  connect the service in the OneCLI dashboard.
+  connect the service in the OneCLI dashboard (or, for Google, at
+  `/settings/integrations`).
 - **Never** suggest the user open Gmail/Calendar/GitHub in their browser
   when they ask you to read or interact with those services. You have API
   access. Use it.
