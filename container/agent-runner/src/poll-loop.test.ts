@@ -576,6 +576,45 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(text).not.toContain('[degraded');
   });
 
+  it('recovers a final <message> block whose closing </message> was dropped by the model (2026-05-28 epicure pairing)', () => {
+    // Long-bodied Claude replies occasionally end without emitting the
+    // trailing `</message>`. Pre-fix, the strict regex matched zero blocks
+    // and the entire (correct) answer was suppressed as scratchpad,
+    // triggering the "no <message to=...> blocks" retry nudge. Tolerate it
+    // by treating end-of-text as an implicit close on the trailing opener.
+    insertChannelDestination('boys-night');
+
+    dispatchResultText(
+      '<message to="boys-night" reply_to_message_id="#1">Epicure pulled the pairing graph for beef + onion and the strongest universal bridges are cumin, paprika, parsley, red pepper, and olive oil.',
+      ROUTING,
+    );
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    const text = JSON.parse(out[0].content).text;
+    expect(text).toContain('cumin, paprika, parsley');
+    expect(text).not.toContain('<message');
+    expect(text).not.toContain('</message>');
+  });
+
+  it('does not synthesize a close when a properly closed <message> block is followed by unwrapped trailing text', () => {
+    // The recovery must not fire when the LAST opener already has its
+    // matching `</message>` — trailing scratchpad after a closed block is
+    // a normal mixed turn (covered by the test above) and should keep
+    // hitting the existing scratchpad path, not get re-wrapped.
+    insertChannelDestination('boys-night');
+
+    dispatchResultText(
+      '<message to="boys-night">Done.</message>\nSome trailing scratchpad notes that include the substring <message but no real opener.',
+      ROUTING,
+    );
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    const text = JSON.parse(out[0].content).text;
+    expect(text).toBe('Done.');
+  });
+
   it('allows an explicit reply_to_message_id on a task-style <message> block', () => {
     insertChannelDestination('boys-night');
     getInboundDb()

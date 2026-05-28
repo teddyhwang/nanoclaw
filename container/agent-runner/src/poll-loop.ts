@@ -1627,6 +1627,23 @@ export function dispatchResultText(
 ): { sent: number; hasUnwrapped: boolean; dispatched: DispatchedMessage[] } {
   const MESSAGE_RE = /<message\s+([^>]*)>([\s\S]*?)<\/message>/g;
 
+  // Tolerate a final unclosed `<message to="...">`: long-bodied replies on
+  // Claude occasionally drop the closing `</message>` (observed 2026-05-28
+  // in degen_server_cook: Epicure pairing reply truncated mid-tag, parser
+  // returned 0 blocks and the full answer was suppressed as scratchpad).
+  // If the last well-formed `<message ...>` opener has no matching
+  // `</message>` after it, synthesize one at end-of-text so the regex
+  // captures the body. The opener match requires whitespace + attrs + `>`
+  // so a bare `<message` substring in scratchpad doesn't trigger recovery.
+  const openerRe = /<message\s+[^>]*>/g;
+  let lastOpenerEnd = -1;
+  let openerMatch: RegExpExecArray | null;
+  while ((openerMatch = openerRe.exec(text)) !== null) {
+    lastOpenerEnd = openerMatch.index + openerMatch[0].length;
+  }
+  const normalizedText =
+    lastOpenerEnd !== -1 && !text.slice(lastOpenerEnd).includes('</message>') ? `${text}</message>` : text;
+
   let match: RegExpExecArray | null;
   let sent = 0;
   let lastIndex = 0;
@@ -1642,9 +1659,9 @@ export function dispatchResultText(
   // repeats that differ in substance.
   const seen = new Set<string>();
 
-  while ((match = MESSAGE_RE.exec(text)) !== null) {
+  while ((match = MESSAGE_RE.exec(normalizedText)) !== null) {
     if (match.index > lastIndex) {
-      scratchpadParts.push(text.slice(lastIndex, match.index));
+      scratchpadParts.push(normalizedText.slice(lastIndex, match.index));
     }
     const block = parseMessageBlock(match[1], match[2]);
     lastIndex = MESSAGE_RE.lastIndex;
@@ -1675,8 +1692,8 @@ export function dispatchResultText(
     dispatched.push({ destination: toName, body });
     sent++;
   }
-  if (lastIndex < text.length) {
-    scratchpadParts.push(text.slice(lastIndex));
+  if (lastIndex < normalizedText.length) {
+    scratchpadParts.push(normalizedText.slice(lastIndex));
   }
 
   const scratchpad = stripInternalTags(scratchpadParts.join('')).trim();
