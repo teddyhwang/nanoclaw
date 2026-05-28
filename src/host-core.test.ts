@@ -1071,6 +1071,72 @@ describe('writeSessionRouting', () => {
     expect(row!.platform_id).toBe('discord:1158397269079506955:1355364313342148629');
   });
 
+  it('agent-shared session pinned to one mg STILL prefers most-recent trigger row from another (2026-05-28 Degenerates fix)', async () => {
+    // The merged Degenerates regression v2: the agent-shared session was
+    // created when chat A first woke the agent, so session.messaging_group_id
+    // = mg-A. But subsequent wakes come from chat B, C, D in the merged
+    // group. Before this fix, writeSessionRouting kept reading mg-A's coords
+    // from the session row, so every escalation was stamped as "from chat A"
+    // regardless of which chat actually woke the agent. Fix: the most-recent
+    // trigger=1 chat row wins over the session-pinned messaging_group_id.
+    createAgentGroup({
+      id: 'ag-1',
+      name: 'Agent',
+      folder: 'agent',
+      agent_provider: null,
+      created_at: now(),
+    });
+    createMessagingGroup({
+      id: 'mg-ai-friends',
+      channel_type: 'discord',
+      platform_id: 'discord:guild:ai-friends',
+      name: 'AI Friends',
+      is_group: 1,
+      unknown_sender_policy: 'public',
+      created_at: now(),
+    });
+    createMessagingGroup({
+      id: 'mg-cook',
+      channel_type: 'discord',
+      platform_id: 'discord:guild:cook',
+      name: 'Cook',
+      is_group: 1,
+      unknown_sender_policy: 'public',
+      created_at: now(),
+    });
+
+    // Session pinned to AI Friends (first chat to wake the agent).
+    const { session } = resolveSession('ag-1', 'mg-ai-friends', null, 'shared');
+    expect(session.messaging_group_id).toBe('mg-ai-friends');
+
+    // Subsequent wake comes from Cook — the chat that actually woke the
+    // agent. Routing must reflect Cook, not the session-pinned AI Friends.
+    await writeSessionMessage('ag-1', session.id, {
+      id: 'msg-from-cook',
+      kind: 'chat-sdk',
+      timestamp: now(),
+      channelType: 'discord',
+      platformId: 'discord:guild:cook',
+      trigger: 1,
+      content: JSON.stringify({ text: 'escalate this' }),
+    });
+
+    writeSessionRouting('ag-1', session.id);
+
+    const db = new Database(inboundDbPath('ag-1', session.id));
+    const row = db.prepare('SELECT channel_type, platform_id FROM session_routing WHERE id = 1').get() as
+      | {
+          channel_type: string | null;
+          platform_id: string | null;
+        }
+      | undefined;
+    db.close();
+
+    expect(row).toBeDefined();
+    expect(row!.channel_type).toBe('discord');
+    expect(row!.platform_id).toBe('discord:guild:cook');
+  });
+
   it('includes thread_id from per-thread session', async () => {
     createAgentGroup({
       id: 'ag-1',

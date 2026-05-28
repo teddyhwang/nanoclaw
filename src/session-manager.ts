@@ -182,50 +182,59 @@ export function writeSessionRouting(agentGroupId: string, sessionId: string): vo
 
   let channelType: string | null = null;
   let platformId: string | null = null;
-  if (session.messaging_group_id) {
-    const mg = getMessagingGroup(session.messaging_group_id);
-    if (mg) {
-      channelType = mg.channel_type;
-      platformId = mg.platform_id;
-    }
-  }
 
   const db = openInboundDb(agentGroupId, sessionId);
   try {
-    // Agent-shared / merged session: no messaging_group_id to derive
-    // from. Use the most-recent triggering chat row's coords — the chat
-    // this wake is actually handling. Without this, getSessionRouting()
-    // returns nulls for these sessions and source-chat-scoped tools
-    // (search_conversations, escalate_to_dev_agent) have no chat scope.
-    if (!channelType || !platformId) {
-      try {
-        const row = db
-          .prepare(
-            // channel_type='agent' is the agent-to-agent pseudo-channel
-            // (agent-route.ts writes a2a inbound as kind='chat',
-            // channel_type='agent'). It is NOT a user-facing chat scope —
-            // getMessagingGroupByPlatform could never resolve it, and an
-            // A2A-only session legitimately has no chat routing (bug
-            // #2332's known shape). Exclude it so an a2a row never gets
-            // mistaken for "the chat this wake is about".
-            `SELECT channel_type, platform_id
-               FROM messages_in
-              WHERE trigger = 1
-                AND kind IN ('chat', 'chat-sdk')
-                AND channel_type IS NOT NULL
-                AND channel_type != 'agent'
-                AND platform_id IS NOT NULL
-              ORDER BY seq DESC
-              LIMIT 1`,
-          )
-          .get() as { channel_type: string; platform_id: string } | undefined;
-        if (row) {
-          channelType = row.channel_type;
-          platformId = row.platform_id;
-        }
-      } catch {
-        // messages_in shape older than expected — leave coords null,
-        // same degraded behavior as before this fallback existed.
+    // PREFER the most-recent triggering chat row's coords — that row IS the
+    // chat the current wake is about. The previous implementation preferred
+    // session.messaging_group_id first and only used the trigger row for
+    // null sessions, which broke wirings like the "Degenerates" merged
+    // agent group: five chats (AI Friends, Boys Night, Golf, Cook,
+    // Hung's Bday) share one agent group; the session created the first
+    // time AI Friends woke the agent has `messaging_group_id =
+    // mg-AI-Friends` and that ID never changes, so every escalation from
+    // any of the other four chats was stamped as "from AI Friends".
+    //
+    // channel_type='agent' is the agent-to-agent pseudo-channel (see
+    // agent-route.ts: it writes a2a inbound as kind='chat',
+    // channel_type='agent'). It is NOT a user-facing chat scope —
+    // getMessagingGroupByPlatform could never resolve it, and an A2A-only
+    // session legitimately has no chat routing (bug #2332's known shape).
+    // Exclude it so an a2a row never gets mistaken for "the chat this
+    // wake is about".
+    try {
+      const row = db
+        .prepare(
+          `SELECT channel_type, platform_id
+             FROM messages_in
+            WHERE trigger = 1
+              AND kind IN ('chat', 'chat-sdk')
+              AND channel_type IS NOT NULL
+              AND channel_type != 'agent'
+              AND platform_id IS NOT NULL
+            ORDER BY seq DESC
+            LIMIT 1`,
+        )
+        .get() as { channel_type: string; platform_id: string } | undefined;
+      if (row) {
+        channelType = row.channel_type;
+        platformId = row.platform_id;
+      }
+    } catch {
+      // messages_in shape older than expected — fall through to the
+      // session.messaging_group_id fallback below.
+    }
+
+    // Fallback to session.messaging_group_id for sessions that have not
+    // yet seen a triggering chat row (a freshly-created single-chat
+    // session that's about to receive its first wake; pre-trigger
+    // bootstrap writes). The session's pinned messaging group is the
+    // best available signal in that case.
+    if ((!channelType || !platformId) && session.messaging_group_id) {
+      const mg = getMessagingGroup(session.messaging_group_id);
+      if (mg) {
+        channelType = mg.channel_type;
+        platformId = mg.platform_id;
       }
     }
 
