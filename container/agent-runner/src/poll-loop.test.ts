@@ -576,6 +576,38 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(text).not.toContain('[degraded');
   });
 
+  it('strips nested <internal> blocks from delivered <message> bodies', () => {
+    insertChannelDestination('boys-night');
+
+    dispatchResultText(
+      '<message to="boys-night">Visible line.<internal>private scratchpad</internal>Still visible.</message>',
+      ROUTING,
+    );
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    const text = JSON.parse(out[0].content).text;
+    expect(text).toBe('Visible line.Still visible.');
+    expect(text).not.toContain('<internal>');
+    expect(text).not.toContain('private scratchpad');
+  });
+
+  it('drops a <message> body that consists entirely of nested <internal> scratchpad', () => {
+    insertChannelDestination('boys-night');
+
+    dispatchResultText(
+      '<message to="boys-night"><internal>Task aborted: already passed. No post warranted.</internal></message>',
+      ROUTING,
+    );
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].kind).toBe('system');
+    expect(JSON.parse(out[0].content)).toEqual({ action: 'silent_turn_complete' });
+    expect(out[0].channel_type).toBeNull();
+    expect(out[0].platform_id).toBeNull();
+  });
+
   it('recovers a final <message> block whose closing </message> was dropped by the model (2026-05-28 epicure pairing)', () => {
     // Long-bodied Claude replies occasionally end without emitting the
     // trailing `</message>`. Pre-fix, the strict regex matched zero blocks

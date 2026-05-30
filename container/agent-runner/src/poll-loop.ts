@@ -1670,7 +1670,17 @@ export function dispatchResultText(
       continue;
     }
     const toName = block.to;
-    const body = block.body;
+    const nestedInternal = block.body.includes('<internal>');
+    const body = stripInternalTags(block.body);
+    if (nestedInternal) {
+      if (body.length === 0) {
+        log(
+          `WARNING: <message to="${toName}"> body contained only <internal> scratchpad — dropping block as silent output`,
+        );
+        continue;
+      }
+      log(`WARNING: stripping nested <internal> scratchpad from <message to="${toName}"> body before delivery`);
+    }
 
     const dest = findByName(toName);
     if (!dest) {
