@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 
-import { extractAssistantText, selectResultTextForDelivery } from './claude.js';
+import { extractAssistantText, mcpTimeoutEnv, selectResultTextForDelivery } from './claude.js';
 
 describe('ClaudeProvider result delivery helpers', () => {
   it('extracts text from SDK assistant message content blocks', () => {
@@ -49,5 +49,28 @@ describe('ClaudeProvider result delivery helpers', () => {
     const text = selectResultTextForDelivery('Done but forgot the wrapper.', '<message to="chat">Working.</message>');
 
     expect(text).toBe('Done but forgot the wrapper.');
+  });
+});
+
+describe('mcpTimeoutEnv', () => {
+  it('applies default MCP timeouts when the inherited env has none', () => {
+    const env = mcpTimeoutEnv({});
+    // Defaults: 120s tool-call bound, 30s connect bound. A hung MCP call is
+    // aborted by the CLI instead of wedging the turn for the host's 60-min
+    // MCP_TOOL_CEILING_MS (the Cook-chat freeze, 2026-05-31).
+    expect(env.MCP_TOOL_TIMEOUT).toBe('120000');
+    expect(env.MCP_TIMEOUT).toBe('30000');
+  });
+
+  it('lets an explicit host/operator override win over the default', () => {
+    const env = mcpTimeoutEnv({ MCP_TOOL_TIMEOUT: '5000', MCP_TIMEOUT: '1000' });
+    expect(env.MCP_TOOL_TIMEOUT).toBe('5000');
+    expect(env.MCP_TIMEOUT).toBe('1000');
+  });
+
+  it('defaults each var independently', () => {
+    const env = mcpTimeoutEnv({ MCP_TOOL_TIMEOUT: '90000' });
+    expect(env.MCP_TOOL_TIMEOUT).toBe('90000');
+    expect(env.MCP_TIMEOUT).toBe('30000');
   });
 });

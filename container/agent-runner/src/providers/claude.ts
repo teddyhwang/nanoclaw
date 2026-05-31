@@ -283,7 +283,11 @@ const postToolUseHook: HookCallback = async () => {
  * the agent's `conversations/` folder so context survives a compaction or a
  * session rotation. Best-effort: returns false (and logs) on any failure.
  */
-function archiveTranscriptFile(transcriptPath: string | undefined, sessionId: string | undefined, assistantName?: string): boolean {
+function archiveTranscriptFile(
+  transcriptPath: string | undefined,
+  sessionId: string | undefined,
+  assistantName?: string,
+): boolean {
   if (!transcriptPath || !fs.existsSync(transcriptPath)) {
     log('No transcript found for archiving');
     return false;
@@ -300,14 +304,20 @@ function archiveTranscriptFile(transcriptPath: string | undefined, sessionId: st
     if (fs.existsSync(indexPath)) {
       try {
         const index = JSON.parse(fs.readFileSync(indexPath, 'utf-8'));
-        summary = index.entries?.find((e: { sessionId: string; summary?: string }) => e.sessionId === sessionId)?.summary;
+        summary = index.entries?.find(
+          (e: { sessionId: string; summary?: string }) => e.sessionId === sessionId,
+        )?.summary;
       } catch {
         /* ignore */
       }
     }
 
     const name = summary
-      ? summary.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 50)
+      ? summary
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-+|-+$/g, '')
+          .slice(0, 50)
       : `conversation-${new Date().getHours().toString().padStart(2, '0')}${new Date().getMinutes().toString().padStart(2, '0')}`;
 
     const conversationsDir = process.env.NANOCLAW_CONVERSATIONS_DIR || '/workspace/agent/conversations';
@@ -411,6 +421,44 @@ function transcriptStartMs(transcriptPath: string): number | null {
 const CLAUDE_CODE_AUTO_COMPACT_WINDOW = process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW || '165000';
 
 /**
+ * MCP call timeouts (ms), honored natively by the Claude Code CLI
+ * (`claude.exe`, verified ≥2.1.128) which owns the MCP client connections
+ * in subprocess mode. Without an explicit bound a hung MCP tool call —
+ * e.g. a stdio `mcp-remote` bridge whose upstream stalls on a specific
+ * request — never returns, the SDK turn blocks on it forever, and the
+ * poll-loop wedges. The host watchdog only reaps it after MCP_TOOL_CEILING_MS
+ * (60 min) because PreToolUse keeps refreshing the heartbeat, so the chat
+ * goes silent for up to an hour (observed 2026-05-31, Cook chat: a
+ * `find_pairings(["steak","butter"])` epicure call hung and froze the group).
+ *
+ * MCP_TOOL_TIMEOUT bounds a single tool *call*: on timeout the CLI returns an
+ * error to the agent, which continues the turn and replies instead of hanging.
+ * MCP_TIMEOUT bounds server *startup/connection* so an unreachable server
+ * fails fast rather than stalling the turn at spawn.
+ *
+ * Operator-overridable via the same-named host env vars. Defaults: 120s tool
+ * call (generous for legitimately slow reads like gws-docs on a large doc,
+ * short enough to self-heal), 30s connect.
+ */
+const MCP_TOOL_TIMEOUT = process.env.MCP_TOOL_TIMEOUT || '120000';
+const MCP_TIMEOUT = process.env.MCP_TIMEOUT || '30000';
+
+/**
+ * Resolve the MCP timeout env vars to inject into the CLI subprocess. A value
+ * already present in the inherited env (an explicit host/operator override)
+ * always wins; otherwise the module default applies. Exported for testing.
+ */
+export function mcpTimeoutEnv(inherited: Record<string, string | undefined> = {}): {
+  MCP_TOOL_TIMEOUT: string;
+  MCP_TIMEOUT: string;
+} {
+  return {
+    MCP_TOOL_TIMEOUT: inherited.MCP_TOOL_TIMEOUT ?? MCP_TOOL_TIMEOUT,
+    MCP_TIMEOUT: inherited.MCP_TIMEOUT ?? MCP_TIMEOUT,
+  };
+}
+
+/**
  * Stale-session detection. Matches Claude Code's error text when a
  * resumed session can't be found — missing transcript .jsonl, unknown
  * session ID, etc.
@@ -490,6 +538,9 @@ export class ClaudeProvider implements AgentProvider {
     this.env = {
       ...(options.env ?? {}),
       CLAUDE_CODE_AUTO_COMPACT_WINDOW,
+      // Bound MCP tool calls / connections so a hung MCP server can't wedge
+      // the turn. A host/operator override in options.env still wins.
+      ...mcpTimeoutEnv(options.env),
     };
   }
 
@@ -594,7 +645,9 @@ export class ClaudeProvider implements AgentProvider {
     try {
       clearContinuationStartedAt('claude');
     } catch (err) {
-      log(`clearContinuationStartedAt failed (likely no session DB yet): ${err instanceof Error ? err.message : String(err)}`);
+      log(
+        `clearContinuationStartedAt failed (likely no session DB yet): ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
     return reason;
   }
