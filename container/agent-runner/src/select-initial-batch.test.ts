@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 
-import { selectInitialBatch } from './poll-loop.js';
+import { selectInitialBatch, shouldDeferTaskFromChatTurn } from './poll-loop.js';
 import type { MessageInRow } from './db/messages-in.js';
 
 // Pure batch-isolation covers two incidents:
@@ -99,5 +99,39 @@ describe('selectInitialBatch', () => {
     expect(logs.some((l) => l.includes('Task trigger present'))).toBe(true);
     // Step 2 has nothing to defer (batch is already just the dream).
     expect(logs.some((l) => l.includes('Dream trigger'))).toBe(false);
+  });
+});
+
+// Reverse isolation: a task trigger arriving as a FOLLOW-UP during an active
+// CHAT turn must be deferred so it gets its own selectInitialBatch-isolated
+// turn — otherwise the dream/maintenance prompt folds into the live chat
+// conversation and the consolidation never runs (2026-05-31 degen incident:
+// dream fires 05-27/30/31 empty, group memory frozen since 05-28).
+describe('shouldDeferTaskFromChatTurn', () => {
+  it('defers a task trigger that arrives during an active chat turn', () => {
+    const dream = row('t-dream', 'task', { trigger: 1, series_id: 'dream-ag-x' });
+    expect(shouldDeferTaskFromChatTurn('Teddy', [dream])).toBe(true);
+  });
+
+  it('does not defer when the active turn is task-only (activeSender null)', () => {
+    const dream = row('t-dream', 'task', { trigger: 1, series_id: 'dream-ag-x' });
+    // Task-only turns are handled by the existing forward guard, not this one.
+    expect(shouldDeferTaskFromChatTurn(null, [dream])).toBe(false);
+  });
+
+  it('does not defer chat-only follow-ups during a chat turn', () => {
+    const chat = row('c1', 'chat-sdk', { trigger: 1 });
+    expect(shouldDeferTaskFromChatTurn('Teddy', [chat])).toBe(false);
+  });
+
+  it('ignores trigger=0 accumulate task rows (only trigger=1 tasks defer)', () => {
+    const accum = row('t0', 'task', { trigger: 0 });
+    expect(shouldDeferTaskFromChatTurn('Teddy', [accum])).toBe(false);
+  });
+
+  it('defers a mixed chat+task follow-up batch during a chat turn', () => {
+    const chat = row('c1', 'chat-sdk', { trigger: 1 });
+    const dream = row('t-dream', 'task', { trigger: 1, series_id: 'dream-ag-x' });
+    expect(shouldDeferTaskFromChatTurn('Teddy', [chat, dream])).toBe(true);
   });
 });

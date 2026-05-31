@@ -165,6 +165,21 @@ export function selectInitialBatch(messages: MessageInRow[]): {
  * SDK. See processQuery's attribution comment for the 2026-05-25
  * Degenerate-Server incident this replaces.
  */
+/**
+ * Reverse-isolation decision: should an incoming follow-up batch be deferred
+ * because a task trigger (dream/maintenance/RSS occurrence) arrived while a
+ * CHAT turn is active? `activeSender` is truthy exactly when the active turn
+ * is a chat turn (it's the chat sender; null/empty for task-only turns). The
+ * pre-existing follow-up guard only defers chat *into* a task turn — this is
+ * its mirror, so a task that comes due mid-chat gets its own
+ * selectInitialBatch-isolated turn instead of folding into the live chat
+ * conversation. Pure so the decision is testable without the SDK stream.
+ */
+export function shouldDeferTaskFromChatTurn(activeSender: string | null, followups: MessageInRow[]): boolean {
+  if (!activeSender) return false;
+  return followups.some((m) => m.kind === 'task' && m.trigger === 1);
+}
+
 export function pickPushScopedContext(pushes: TaskFireContext[][]): TaskFireContext | null {
   for (const push of pushes) {
     for (let i = push.length - 1; i >= 0; i--) {
@@ -1155,6 +1170,32 @@ async function processQuery(
               return;
             }
           }
+        }
+
+        // Symmetric guard for the REVERSE case: a task trigger (the dream /
+        // maintenance occurrence is the common one) arriving while a CHAT
+        // turn is active. The block above only defers chat *into* a task
+        // turn; without this, a dream task that comes due mid-chat gets
+        // `query.push`ed straight into the live chat conversation. The
+        // silent-maintenance prompt folds into the chat thread and the agent
+        // emits a throwaway chat-evaluation `<internal>` (or nothing) instead
+        // of running the Dream protocol — the dream fire records empty and the
+        // day's consolidation never happens. Observed 2026-05-31
+        // `ag-1778154011329-g9zust`: group notes/CURRENT froze at 2026-05-28;
+        // dream fires 05-27/30/31 were all `silent` empty because the dream
+        // rode a later chat wake into an active chat turn. End the stream so
+        // the outer loop re-queries the task in its own selectInitialBatch-
+        // isolated turn. The task rows stay pending (never markProcessing'd
+        // here), so they're not lost. `activeSender` truthy === a chat turn
+        // is active (it's the chat sender; null for task-only turns).
+        if (shouldDeferTaskFromChatTurn(activeSender, newMessages) && !endedForCommand) {
+          const taskCount = newMessages.filter((m) => m.kind === 'task' && m.trigger === 1).length;
+          log(
+            `Task trigger (${taskCount}) arrived during an active chat turn — ending stream so the task gets an isolated turn`,
+          );
+          endedForCommand = true;
+          query.end();
+          return;
         }
 
         const newIds = newMessages.map((m) => m.id);
