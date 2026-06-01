@@ -45,37 +45,31 @@ describe('evaluateRotation', () => {
   });
 
   test('no stamp + compacted disk evidence → rotate (pre-fix unstamped row)', () => {
-    const decision = evaluateRotation(
-      now,
-      TZ,
-      undefined,
-      statsFrom({ compactCount: 1 }),
-    );
+    const decision = evaluateRotation(now, TZ, undefined, statsFrom({ compactCount: 1 }));
     expect(decision).toEqual({ rotate: true, reason: 'compacted' });
   });
 
   test('same rotation day → preserve even if compacted (mid-chat continuity)', () => {
-    const decision = evaluateRotation(
-      now,
-      TZ,
-      '2026-05-13',
-      statsFrom({ compactCount: 5 }),
-    );
+    const decision = evaluateRotation(now, TZ, '2026-05-13', statsFrom({ compactCount: 5 }));
     expect(decision).toEqual({ rotate: false, reason: 'same-day' });
   });
 
-  test('prior rotation day + quiet → quiet-session (no need to rotate yet)', () => {
+  test('prior rotation day + no disk evidence → cross-day-stale (force rotate)', () => {
+    // Regression: a stamped cross-day session with empty in-container stats
+    // (transcript .jsonl absent/unreadable) must still rotate. Pre-fix this
+    // fell through to quiet-session/rotate:false and stranded the Degenerates
+    // Claude thread from 2026-05-30, emptying every 04:00 dream turn.
     const decision = evaluateRotation(now, TZ, '2026-05-12', statsFrom({}));
-    expect(decision).toEqual({ rotate: false, reason: 'quiet-session' });
+    expect(decision).toEqual({ rotate: true, reason: 'cross-day-stale' });
+  });
+
+  test('prior rotation day, one day back, still rotates with no evidence', () => {
+    const decision = evaluateRotation(now, TZ, '2026-05-12', statsFrom({}));
+    expect(decision.rotate).toBe(true);
   });
 
   test('prior day + one compact → rotate (chained-compaction risk)', () => {
-    const decision = evaluateRotation(
-      now,
-      TZ,
-      '2026-05-12',
-      statsFrom({ compactCount: 1 }),
-    );
+    const decision = evaluateRotation(now, TZ, '2026-05-12', statsFrom({ compactCount: 1 }));
     expect(decision).toEqual({ rotate: true, reason: 'compacted' });
   });
 
@@ -89,23 +83,17 @@ describe('evaluateRotation', () => {
     expect(decision).toEqual({ rotate: true, reason: 'size-threshold' });
   });
 
-  test('prior day + size exactly at threshold → not yet (strict greater)', () => {
-    const decision = evaluateRotation(
-      now,
-      TZ,
-      '2026-05-12',
-      statsFrom({ sizeBytes: SIZE_ROTATION_THRESHOLD_BYTES }),
-    );
-    expect(decision).toEqual({ rotate: false, reason: 'quiet-session' });
+  test('prior day + size exactly at threshold → cross-day-stale (size guard is strict greater, but cross-day still rotates)', () => {
+    // The size guard itself is strict-greater so it does NOT fire at exactly
+    // the threshold, but the session is still cross-day with a stamp, so the
+    // cross-day-stale guard rotates it anyway (reason is cross-day-stale, not
+    // size-threshold).
+    const decision = evaluateRotation(now, TZ, '2026-05-12', statsFrom({ sizeBytes: SIZE_ROTATION_THRESHOLD_BYTES }));
+    expect(decision).toEqual({ rotate: true, reason: 'cross-day-stale' });
   });
 
   test('prior day + tokens over threshold → rotate (codex-style signal)', () => {
-    const decision = evaluateRotation(
-      now,
-      TZ,
-      '2026-05-12',
-      statsFrom({ tokensUsed: TOKENS_ROTATION_THRESHOLD + 1 }),
-    );
+    const decision = evaluateRotation(now, TZ, '2026-05-12', statsFrom({ tokensUsed: TOKENS_ROTATION_THRESHOLD + 1 }));
     expect(decision).toEqual({ rotate: true, reason: 'tokens-threshold' });
   });
 

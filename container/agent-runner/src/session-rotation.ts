@@ -50,6 +50,7 @@ export type RotationReason =
   | 'no-session'
   | 'same-day'
   | 'quiet-session'
+  | 'cross-day-stale'
   | 'compacted'
   | 'size-threshold'
   | 'tokens-threshold';
@@ -66,6 +67,24 @@ export interface RotationDecision {
  * (compactCount, sizeBytes, tokensUsed) rotate even when `startedAt` is
  * missing — an unstamped row with disk evidence is a pre-fix artifact, not
  * a genuine "no session" state.
+ *
+ * A stamped session whose `startedAt` precedes the current rotation day MUST
+ * rotate even with no readable disk evidence (`cross-day-stale`). The
+ * transcript `.jsonl` is read from inside the container at a path that is
+ * frequently absent/unreadable there, so `readClaudeSessionStats` returns
+ * EMPTY_STATS and the compact/size/token guards never fire. Before this case
+ * existed, such a session fell through to `quiet-session` → rotate:false and
+ * NEVER rotated: the day boundary at the top only *prevents same-day*
+ * rotation, it doesn't *force cross-day* rotation. That stranded the
+ * Degenerates Claude continuation on a single thread from 2026-05-30 onward
+ * (`continuation_started_at:claude` frozen, re-stamped continuation), so every
+ * 04:00 dream landed on an over-grown thread and returned an empty turn —
+ * which meant the dream's own step-6 `rotate_session` never ran, a
+ * self-reinforcing loop. `startedAt` being from a prior rotation day is itself
+ * sufficient evidence the thread has lived ≥1 full day across the dream
+ * boundary; that is exactly when we want a clean thread seeded by the fresh
+ * 04:00 knowledge files. Only sessions that already passed the same-day guard
+ * reach here, so this can never rotate a live same-day conversation.
  */
 export function evaluateRotation(
   now: Date,
@@ -82,12 +101,13 @@ export function evaluateRotation(
   if (stats.sizeBytes > SIZE_ROTATION_THRESHOLD_BYTES) {
     return { rotate: true, reason: 'size-threshold' };
   }
-  if (
-    typeof stats.tokensUsed === 'number' &&
-    stats.tokensUsed > TOKENS_ROTATION_THRESHOLD
-  ) {
+  if (typeof stats.tokensUsed === 'number' && stats.tokensUsed > TOKENS_ROTATION_THRESHOLD) {
     return { rotate: true, reason: 'tokens-threshold' };
   }
   if (!startedAt) return { rotate: false, reason: 'no-session' };
-  return { rotate: false, reason: 'quiet-session' };
+  // Stamped + not same-day (the same-day guard above already returned) ⇒ the
+  // thread has crossed at least one rotation boundary. Rotate even without
+  // disk evidence — empty in-container stats must not strand a cross-day
+  // thread on the same continuation indefinitely.
+  return { rotate: true, reason: 'cross-day-stale' };
 }
