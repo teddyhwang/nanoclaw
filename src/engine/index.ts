@@ -267,3 +267,21 @@ export {
   type SensitiveGateInput,
   type SensitiveGateDecision,
 } from '../modules/approvals/sensitive-gate.js';
+
+// Self-confirmation primitive + approval-handler registry. Exposed for
+// host plugins that drive their own in-channel self-confirm flows for
+// surfaces the dashboard-server MCP preHandler can't reach — the golf
+// booking CLI is one (an in-container bash tool, not an MCP route, so it
+// rides a system-action round-trip instead of the preHandler). The host
+// plugin (apps/optimus/src/plugins/golf-confirm.ts) registers a
+// `sensitive_golf_confirm` delivery action that calls requestConfirmation
+// here (engine-side, where the delivery adapter + response registry live),
+// and an approval handler that fires on the actor's Confirm. See
+// knowledge/projects/sensitive-action-approvals.md (Phase 3).
+export {
+  requestConfirmation,
+  registerApprovalHandler,
+  notifyAgent,
+  type RequestConfirmationOptions,
+  type ApprovalHandlerContext,
+} from '../modules/approvals/primitive.js';

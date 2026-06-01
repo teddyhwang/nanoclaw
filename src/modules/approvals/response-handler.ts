@@ -115,11 +115,11 @@ async function handleRegisteredApproval(
   // callback could resolve it (approve/reject/confirm/cancel). Two trust
   // models, keyed by the row's action:
   //
-  //   - sensitive_mcp_confirm (self-confirm gate): the authorized clicker
-  //     is the recorded actor (the triggering sender), NOT an approver.
-  //     The card is delivered in-channel where every member can see it, so
-  //     a bystander clicking Confirm must be a no-op. Authorize against
-  //     payload.actorId.
+  //   - sensitive_mcp_confirm / sensitive_golf_confirm (self-confirm
+  //     gates): the authorized clicker is the recorded actor (the
+  //     triggering sender), NOT an approver. The card is delivered
+  //     in-channel where every member can see it, so a bystander clicking
+  //     Confirm must be a no-op. Authorize against payload.actorId.
   //   - everything else (CLI / OneCLI / self-mod admin-approval): the card
   //     is in an approver's DM; authorize against pickApprover.
   //
@@ -127,8 +127,13 @@ async function handleRegisteredApproval(
   // WITHOUT consuming the row — it stays pending so a legitimate actor /
   // approver can still act, and a bystander cannot deny it by clicking the
   // negative option. No wakeContainer: nothing changed for the agent.
+  // The two self-confirm gates (MCP integrations + golf booking) share a
+  // single trust model: in-channel card, authorize against the recorded
+  // actorId, positive option is 'confirm'. Everything else is
+  // admin-approval (DM card, pickApprover, positive option 'approve').
+  const isSelfConfirm = approval.action === 'sensitive_mcp_confirm' || approval.action === 'sensitive_golf_confirm';
   let authorized: boolean;
-  if (approval.action === 'sensitive_mcp_confirm') {
+  if (isSelfConfirm) {
     let actorId = '';
     try {
       actorId = (JSON.parse(approval.payload) as { actorId?: string }).actorId ?? '';
@@ -153,9 +158,9 @@ async function handleRegisteredApproval(
   // Positive option is action-dependent: admin-approval cards use
   // 'approve'; the self-confirm gate uses 'confirm'. Anything else is the
   // negative path (reject / cancel) — drop the row, tell the agent.
-  const positiveValue = approval.action === 'sensitive_mcp_confirm' ? 'confirm' : 'approve';
+  const positiveValue = isSelfConfirm ? 'confirm' : 'approve';
   if (selectedOption !== positiveValue) {
-    const verb = approval.action === 'sensitive_mcp_confirm' ? 'cancelled' : 'rejected by admin';
+    const verb = isSelfConfirm ? 'cancelled' : 'rejected by admin';
     notify(`Your ${approval.action} request was ${verb}.`);
     log.info('Approval not granted', {
       approvalId: approval.approval_id,

@@ -166,3 +166,82 @@ describe('handleApprovalsResponse clicker authorization', () => {
     expect(getPendingApproval(APPROVAL)).toBeUndefined();
   });
 });
+
+// ── sensitive_golf_confirm: actor-keyed self-confirm (Phase 3) ──
+//
+// Golf booking rides the same self-confirm trust model as
+// sensitive_mcp_confirm: the card is delivered IN-CHANNEL (every member
+// sees it), so authorization is against the recorded payload.actorId — NOT
+// pickApprover. A bystander tapping Confirm must be a no-op; only the
+// triggering actor's Confirm fires the registered handler. The positive
+// option is 'confirm' (not 'approve').
+describe('handleApprovalsResponse — sensitive_golf_confirm actor-keyed auth', () => {
+  const GOLF_APPROVAL = 'cfm-golf-test';
+  const GOLF_ACTION = 'sensitive_golf_confirm';
+  const ACTOR = 'discord:actor-7';
+  let golfHandlerCalls: number;
+
+  beforeEach(() => {
+    golfHandlerCalls = 0;
+    registerApprovalHandler(GOLF_ACTION, async () => {
+      golfHandlerCalls += 1;
+    });
+    // ACTOR is NOT an approver (no role) — proving auth keys off actorId,
+    // not pickApprover, for this action.
+    createUser({ id: ACTOR, kind: 'discord', display_name: 'Actor', created_at: now() });
+    createPendingApproval({
+      approval_id: GOLF_APPROVAL,
+      session_id: SESSION,
+      request_id: GOLF_APPROVAL,
+      action: GOLF_ACTION,
+      payload: JSON.stringify({ actorId: ACTOR, token: 'golftok-x', booking: { index: 1 } }),
+      created_at: now(),
+      agent_group_id: AG,
+      status: 'pending',
+      title: 'Confirm golf booking',
+      options_json: '[]',
+    });
+  });
+
+  function golfClick(value: string, userId: string | null): ResponsePayload {
+    return {
+      questionId: GOLF_APPROVAL,
+      value,
+      userId,
+      channelType: 'discord',
+      platformId: 'chan-1',
+      threadId: null,
+    };
+  }
+
+  it('ignores a Confirm from a bystander (non-actor) and leaves the row pending', async () => {
+    const claimed = await handleApprovalsResponse(golfClick('confirm', BYSTANDER));
+    expect(claimed).toBe(true);
+    expect(golfHandlerCalls).toBe(0);
+    expect(getPendingApproval(GOLF_APPROVAL)).toBeDefined();
+    expect(wakeContainer).not.toHaveBeenCalled();
+  });
+
+  it('ignores a Confirm even from an eligible approver who is not the actor', async () => {
+    // OWNER is a global approver, but golf self-confirm authorizes against
+    // actorId only — an approver who is not the actor must be a no-op.
+    const claimed = await handleApprovalsResponse(golfClick('confirm', OWNER));
+    expect(claimed).toBe(true);
+    expect(golfHandlerCalls).toBe(0);
+    expect(getPendingApproval(GOLF_APPROVAL)).toBeDefined();
+  });
+
+  it('fires the handler on the actor Confirm and consumes the row', async () => {
+    const claimed = await handleApprovalsResponse(golfClick('confirm', ACTOR));
+    expect(claimed).toBe(true);
+    expect(golfHandlerCalls).toBe(1);
+    expect(getPendingApproval(GOLF_APPROVAL)).toBeUndefined();
+  });
+
+  it('treats Cancel as the negative path: no handler, row consumed', async () => {
+    const claimed = await handleApprovalsResponse(golfClick('cancel', ACTOR));
+    expect(claimed).toBe(true);
+    expect(golfHandlerCalls).toBe(0);
+    expect(getPendingApproval(GOLF_APPROVAL)).toBeUndefined();
+  });
+});
