@@ -760,6 +760,62 @@ describe('formatAttachments — text inlining', () => {
     // Image marker should NOT be wrapped in attached_file.
     expect(out.match(/<attached_file/g)?.length).toBe(1);
   });
+
+  it('surfaces a host-computed videoMarker for video attachments', () => {
+    const out = formatAttachments([
+      {
+        type: 'video',
+        name: 'clip.mp4',
+        mimeType: 'video/mp4',
+        localPath: 'inbox/m/clip.mp4',
+        videoMarker: '[Video: hello there | Summary: a cat jumps off a table]',
+      },
+    ]);
+    expect(out).toContain('[video: clip.mp4 — saved to /workspace/inbox/m/clip.mp4]');
+    expect(out).toContain('[Video: hello there | Summary: a cat jumps off a table]');
+    // Frames flow separately via extractImageAttachments, not inlined here.
+    expect(out).not.toContain('<attached_file');
+  });
+
+  it('falls back to transcript/summary fields when no videoMarker present', () => {
+    const out = formatAttachments([
+      {
+        type: 'video',
+        name: 'clip.mp4',
+        mimeType: 'video/mp4',
+        localPath: 'inbox/m/clip.mp4',
+        transcript: 'spoken words',
+        summary: 'someone waves',
+      },
+    ]);
+    expect(out).toContain('[Video: spoken words]');
+    expect(out).toContain('[Video Summary: someone waves]');
+  });
+
+  it('emits only the base marker for an unprocessed video (no transcript/summary)', () => {
+    const out = formatAttachments([
+      {
+        type: 'video',
+        name: 'clip.mp4',
+        mimeType: 'video/mp4',
+        localPath: 'inbox/m/clip.mp4',
+      },
+    ]);
+    expect(out.trim()).toBe('[video: clip.mp4 — saved to /workspace/inbox/m/clip.mp4]');
+  });
+
+  it('escapes XML-special characters in the video marker', () => {
+    const out = formatAttachments([
+      {
+        type: 'video',
+        name: 'clip.mp4',
+        mimeType: 'video/mp4',
+        localPath: 'inbox/m/clip.mp4',
+        videoMarker: '[Video: <script> & "quotes"]',
+      },
+    ]);
+    expect(out).toContain('&lt;script&gt; &amp; &quot;quotes&quot;');
+  });
 });
 
 describe('reaction rendering', () => {
@@ -905,12 +961,9 @@ describe('isAddressedTurn', () => {
     // message goes to this bot) but no @mention/replyTo. Before
     // stampEngagement, this read as ambient and the agent silent-turn-
     // completed on a direct question.
-    expect(
-      isAddressedTurn(
-        [row({ text: "What's going on did you fix it?", engageMode: 'pattern' })],
-        'Optimus',
-      ),
-    ).toBe(true);
+    expect(isAddressedTurn([row({ text: "What's going on did you fix it?", engageMode: 'pattern' })], 'Optimus')).toBe(
+      true,
+    );
   });
 
   it('mention-sticky engagement WITHOUT a this-bot mention is NOT addressed (multi-bot channel safety)', () => {
@@ -933,12 +986,7 @@ describe('isAddressedTurn', () => {
   });
 
   it('engageMode=pattern still respects trigger=0 (accumulate gating)', () => {
-    expect(
-      isAddressedTurn(
-        [row({ text: 'ambient', engageMode: 'pattern' }, { trigger: 0 })],
-        'Optimus',
-      ),
-    ).toBe(false);
+    expect(isAddressedTurn([row({ text: 'ambient', engageMode: 'pattern' }, { trigger: 0 })], 'Optimus')).toBe(false);
   });
 
   it('false for trigger=0 accumulate-only rows even if they look addressed', () => {

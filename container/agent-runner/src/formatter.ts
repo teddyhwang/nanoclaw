@@ -629,7 +629,28 @@ export function formatAttachments(attachments: any[] | undefined): string {
       }
       return baseMarker;
     }
-    if (type === 'image' || type === 'video') {
+    if (type === 'video') {
+      // Host-side video processing (engine session-manager) stamps a
+      // ready-made `[Video: …]` marker plus the raw transcript/summary, and
+      // appends the extracted keyframes as separate `type:'image'`
+      // attachments (which extractImageAttachments pulls into vision blocks).
+      // Surface the text here so the agent gets the spoken content + visual
+      // summary alongside the frames; fall back to the base marker when the
+      // host produced nothing (no API key / processing failed).
+      const videoMarker = typeof a.videoMarker === 'string' ? a.videoMarker.trim() : '';
+      if (videoMarker.length > 0) {
+        return `${baseMarker}\n${escapeXml(videoMarker)}`;
+      }
+      const transcript = typeof a.transcript === 'string' ? a.transcript.trim() : '';
+      const summary = typeof a.summary === 'string' ? a.summary.trim() : '';
+      if (transcript.length > 0 || summary.length > 0) {
+        const t = transcript ? `[Video: ${escapeXml(transcript)}]` : '';
+        const s = summary ? `[Video Summary: ${escapeXml(summary)}]` : '';
+        return [baseMarker, t, s].filter(Boolean).join('\n');
+      }
+      return baseMarker;
+    }
+    if (type === 'image') {
       return baseMarker;
     }
     if (!isTextEligible(a)) return baseMarker;

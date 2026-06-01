@@ -20,6 +20,7 @@ import type { OutboundFile } from './channels/adapter.js';
 import { DATA_DIR } from './config.js';
 import { getPlatformCredentialReader } from './engine/platform-credentials.js';
 import { transcribeAudio } from './media/transcription.js';
+import { formatVideoMarker, processVideo } from './media/video.js';
 import { getMessagingGroup } from './db/messaging-groups.js';
 import {
   createSession,
@@ -358,6 +359,11 @@ async function extractAttachmentFiles(
   }
 
   let changed = false;
+  // Synthetic `type:'image'` attachments for video keyframes. Collected
+  // during the loop (mutating `attachments` mid-iteration is unsafe) and
+  // appended after, so they flow through the container's existing
+  // `extractImageAttachments` vision rail with no per-harness branching.
+  const syntheticFrames: Array<Record<string, unknown>> = [];
   for (const att of attachments) {
     if (typeof att.data !== 'string') continue;
 
@@ -432,6 +438,44 @@ async function extractAttachmentFiles(
       }
     }
 
+    // Video processing pass — channel-agnostic, single engine site (same as
+    // voice). Extracts keyframes into the inbox message dir + a Gemini
+    // transcript/visual-summary, stamps `att.transcript`/`att.summary` for the
+    // formatter, and queues the keyframes as synthetic `type:'image'`
+    // attachments so they ride the container's existing vision rail. Failures
+    // fall through: the agent still sees the `[video: …]` marker.
+    if (isVideoAttachment(att)) {
+      const reader = getPlatformCredentialReader();
+      try {
+        const result = await processVideo(buffer, {
+          frameDir: inboxDir,
+          mimeType: typeof att.mimeType === 'string' ? att.mimeType : undefined,
+          getCredential: reader ?? undefined,
+        });
+        if (result) {
+          att.transcript = result.transcript;
+          att.summary = result.summary;
+          att.videoMarker = formatVideoMarker(result.transcript, result.summary);
+          for (const frame of result.frames) {
+            syntheticFrames.push({
+              type: 'image',
+              name: frame.filename,
+              mimeType: 'image/jpeg',
+              localPath: `inbox/${messageId}/${frame.filename}`,
+              fromVideo: filename,
+            });
+          }
+          changed = true;
+        }
+      } catch (err) {
+        log.warn('Video processing threw — continuing without transcript/frames', {
+          messageId,
+          filename,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
     const filePath = path.join(inboxDir, filename);
     try {
       // wx = exclusive create. Refuses to follow a pre existing symlink or
@@ -457,6 +501,15 @@ async function extractAttachmentFiles(
     log.debug('Saved attachment to inbox', { messageId, filename, size: att.size });
   }
 
+  // Append video-derived keyframes after iteration so the container's
+  // `extractImageAttachments` surfaces them as vision blocks. They carry a
+  // `localPath` (host wrote the bytes in the video branch) but no `data`, so
+  // the attachment-file loop above would have skipped them anyway.
+  if (syntheticFrames.length > 0) {
+    attachments.push(...syntheticFrames);
+    changed = true;
+  }
+
   return changed ? JSON.stringify(parsed) : contentStr;
 }
 
@@ -470,6 +523,19 @@ function isVoiceAttachment(att: Record<string, unknown>): boolean {
   if (type === 'audio' || type === 'voice') return true;
   const mime = typeof att.mimeType === 'string' ? att.mimeType : '';
   return mime.startsWith('audio/');
+}
+
+/**
+ * Identify video attachments for the host-side processing pass. Matches the
+ * `video` type tag AND any `video/` mimeType. Excludes the gifv/animated case
+ * that chat-sdk-bridge already rewrote to `type:'image'` (image/gif) before
+ * the engine sees it — those carry `image/*` mimeTypes and a non-video type.
+ */
+function isVideoAttachment(att: Record<string, unknown>): boolean {
+  const type = typeof att.type === 'string' ? att.type : '';
+  const mime = typeof att.mimeType === 'string' ? att.mimeType : '';
+  if (type === 'video') return true;
+  return mime.startsWith('video/');
 }
 
 /** Open the inbound DB for a session (host reads/writes). */
