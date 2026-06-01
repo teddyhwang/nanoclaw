@@ -181,6 +181,105 @@ describe('reply_to + quoted_message rendering', () => {
     expect(result).toContain('<quoted_message from="Bob">Anyone in?</quoted_message>');
     expect(result).not.toContain('mine="true"');
   });
+
+  // H-D2: deeper reply ancestors embedded in replyTo.ancestors render as
+  // stacked <quoted_message depth="N"> blocks, oldest-first, above the
+  // direct parent — so a multi-level thread reads top-down and survives
+  // session rotation (the chain is in the row, not the prompt window).
+  it('renders ancestors[] as stacked quoted_message depth blocks, oldest-first', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Carol',
+      text: 'so what do we do?',
+      replyTo: {
+        id: '7',
+        sender: 'Bob',
+        text: 'I think we should ship',
+        ancestors: [
+          { sender: 'Dave', text: 'the deadline is friday' }, // grandparent (depth 2)
+          { sender: 'Erin', text: 'who owns this?' }, // great-grand (depth 3)
+        ],
+      },
+    });
+    const result = formatMessages(getPendingMessages());
+    // Oldest ancestor first, deepest depth.
+    expect(result).toContain('<quoted_message from="Erin" depth="3">who owns this?</quoted_message>');
+    expect(result).toContain('<quoted_message from="Dave" depth="2">the deadline is friday</quoted_message>');
+    // Direct parent labelled depth 1 when ancestors are present.
+    expect(result).toContain('<quoted_message from="Bob" depth="1">I think we should ship</quoted_message>');
+    // Chronological top-down order: Erin (oldest) → Dave → Bob (parent).
+    const erinIdx = result.indexOf('who owns this?');
+    const daveIdx = result.indexOf('the deadline is friday');
+    const bobIdx = result.indexOf('I think we should ship');
+    expect(erinIdx).toBeGreaterThan(0);
+    expect(daveIdx).toBeGreaterThan(erinIdx);
+    expect(bobIdx).toBeGreaterThan(daveIdx);
+  });
+
+  it('does not add depth attribute when there are no ancestors (depth-1 unchanged)', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Alice',
+      text: 'ok',
+      replyTo: { id: '9', sender: 'Bob', text: 'ready?' },
+    });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('<quoted_message from="Bob">ready?</quoted_message>');
+    expect(result).not.toContain('depth=');
+  });
+
+  it('preserves mine="true" on the parent block alongside ancestors', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Teddy',
+      text: 'continue',
+      replyTo: {
+        id: '5',
+        sender: 'Optimus',
+        text: 'here is the plan',
+        toBot: true,
+        ancestors: [{ sender: 'Teddy', text: 'draft a plan' }],
+      },
+    });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('<quoted_message from="Teddy" depth="2">draft a plan</quoted_message>');
+    expect(result).toContain('<quoted_message from="Optimus" mine="true" depth="1">here is the plan</quoted_message>');
+  });
+
+  it('skips malformed ancestor entries (missing sender/text)', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Alice',
+      text: 'hm',
+      replyTo: {
+        id: '3',
+        sender: 'Bob',
+        text: 'parent',
+        ancestors: [
+          { sender: 'Dave' }, // no text
+          { text: 'orphan text' }, // no sender
+          { sender: 'Erin', text: 'valid one' },
+        ],
+      },
+    });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('valid one');
+    expect(result).not.toContain('orphan text');
+    // Only the one valid ancestor + the parent = 2 quoted_message blocks.
+    expect(result.match(/<quoted_message/g)?.length).toBe(2);
+  });
+
+  it('XML-escapes ancestor sender and text', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Alice',
+      text: 'x',
+      replyTo: {
+        id: '3',
+        sender: 'Bob',
+        text: 'parent',
+        ancestors: [{ sender: 'A&B', text: '<script>"hi"</script>' }],
+      },
+    });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('from="A&amp;B"');
+    expect(result).toContain('&lt;script&gt;&quot;hi&quot;&lt;/script&gt;');
+  });
 });
 
 describe('sender attribute precedence', () => {

@@ -59,6 +59,20 @@ export interface ReplyContext {
    * structured. Only meaningful in `mention` / `mention-sticky` modes.
    */
   botInChain?: boolean;
+  /**
+   * Reply-chain ancestors ABOVE the direct parent, nearest-first
+   * (`ancestors[0]` is the grandparent, `ancestors[1]` the
+   * great-grandparent, …). The direct parent stays in `text`/`sender`.
+   *
+   * Populated by chain-walking extractors (Discord's `fetchAncestor`
+   * loop) so multi-level reply threads keep their full context EMBEDDED
+   * in the inbound message. v2 serializes the parent's text into every
+   * message, so depth-1 context already survives session rotation; this
+   * extends that property to the whole chain (the H-D2 prompt-context
+   * gap — deeper ancestors used to be recoverable only if they happened
+   * to still be in the prompt window). Bounded by the walker's depth cap.
+   */
+  ancestors?: Array<{ sender: string; text: string }>;
 }
 
 /**

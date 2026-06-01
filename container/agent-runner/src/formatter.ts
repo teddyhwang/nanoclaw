@@ -466,6 +466,15 @@ function formatReactionMessage(msg: MessageInRow): string {
  * prior bot outbound for this agent (router.stampReplyToBot). Platform-uniform
  * signal: Discord / Telegram / WhatsApp all reach this branch the same way.
  *
+ * Deeper reply ancestors (H-D2): when a chain-walking extractor populated
+ * `replyTo.ancestors` (grandparent and up, nearest-first), render them as
+ * additional `<quoted_message depth="N">` blocks ABOVE the direct parent,
+ * oldest-first, so a multi-level reply thread reads top-down (oldest
+ * ancestor → … → direct parent → this message). The ancestors are embedded
+ * in the inbound row, so the chain survives session rotation by construction
+ * — no prompt-window resolution needed. `depth="1"` is the direct parent,
+ * `depth="2"` its parent, etc.
+ *
  * No truncation here (v1 didn't truncate).
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -475,7 +484,28 @@ function formatReplyContext(replyTo: any): string {
   const text = replyTo.text;
   if (!sender || !text) return '';
   const mineAttr = replyTo.toBot === true ? ' mine="true"' : '';
-  return `\n  <quoted_message from="${escapeXml(sender)}"${mineAttr}>${escapeXml(text)}</quoted_message>\n`;
+
+  // Ancestors above the direct parent, nearest-first in the source array.
+  // Render oldest-first so the rendered order is chronological top-down.
+  const ancestors = Array.isArray(replyTo.ancestors) ? replyTo.ancestors : [];
+  const ancestorBlocks: string[] = [];
+  for (let i = ancestors.length - 1; i >= 0; i--) {
+    const a = ancestors[i];
+    const aSender = a?.sender;
+    const aText = a?.text;
+    if (typeof aSender !== 'string' || typeof aText !== 'string') continue;
+    if (!aSender || !aText.trim()) continue;
+    // depth: nearest ancestor (ancestors[0], grandparent) is depth 2; the
+    // direct parent below is depth 1.
+    const depth = i + 2;
+    ancestorBlocks.push(
+      `  <quoted_message from="${escapeXml(aSender)}" depth="${depth}">${escapeXml(aText)}</quoted_message>`,
+    );
+  }
+
+  const parentBlock = `  <quoted_message from="${escapeXml(sender)}"${mineAttr}${ancestorBlocks.length > 0 ? ' depth="1"' : ''}>${escapeXml(text)}</quoted_message>`;
+
+  return `\n${[...ancestorBlocks, parentBlock].join('\n')}\n`;
 }
 
 /**
