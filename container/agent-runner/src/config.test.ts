@@ -70,3 +70,19 @@ describe('loadConfig — NANOCLAW_AGENT_MODEL override', () => {
     expect(cfg.model).toBe('gpt-5.5');
   });
 });
+
+describe('loadConfig — isDreamRun', () => {
+  it('is false on a normal (non-dream) spawn', () => {
+    expect(loadConfig().isDreamRun).toBe(false);
+  });
+
+  it('is true when NANOCLAW_DREAM_HARNESS is set', () => {
+    process.env.NANOCLAW_DREAM_HARNESS = 'codex';
+    expect(loadConfig().isDreamRun).toBe(true);
+  });
+
+  it('is false for a whitespace-only NANOCLAW_DREAM_HARNESS (matches provider fall-through)', () => {
+    process.env.NANOCLAW_DREAM_HARNESS = '   ';
+    expect(loadConfig().isDreamRun).toBe(false);
+  });
+});

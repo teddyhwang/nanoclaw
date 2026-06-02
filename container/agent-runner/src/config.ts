@@ -21,6 +21,20 @@ export interface RunnerConfig {
   mcpServers: Record<string, McpServerConfig>;
   model?: string;
   effort?: string;
+  /**
+   * True when this spawn is a Dream / maintenance pass — i.e. the host
+   * injected `NANOCLAW_DREAM_HARNESS`. The Dream's job is to consolidate
+   * the day and rotate the session (its final step calls `rotate_session`),
+   * so it must run on a FRESH provider thread, never resuming the group's
+   * standing continuation. Resuming is both semantically wrong (the dream
+   * is meant to clear that thread, not extend it) and the source of every
+   * observed dream failure: codex `thread/resume` deadlocks on a poisoned
+   * rollout, hangs `thread/start`, or crashes the rmcp stdio transport
+   * replaying a large stale thread — all of which produce a silent empty
+   * `task_fires.assistant_text`. The poll-loop reads this to skip the
+   * resume path entirely on dream spawns.
+   */
+  isDreamRun: boolean;
 }
 
 const DEFAULT_MAX_MESSAGES = 10;
@@ -80,6 +94,10 @@ export function loadConfig(): RunnerConfig {
     mcpServers: (raw.mcpServers as RunnerConfig['mcpServers']) || {},
     model,
     effort: (raw.effort as string) || undefined,
+    // A dream spawn is exactly one where the host injected a non-empty
+    // NANOCLAW_DREAM_HARNESS (same signal that drove the provider override
+    // above). Whitespace-only is treated as unset, matching `dreamHarness`.
+    isDreamRun: Boolean(dreamHarness),
   };
 
   return _config;

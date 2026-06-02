@@ -180,6 +180,32 @@ export function shouldDeferTaskFromChatTurn(activeSender: string | null, followu
   return followups.some((m) => m.kind === 'task' && m.trigger === 1);
 }
 
+/**
+ * Whether a spawn should resume a persisted continuation. Dream / maintenance
+ * spawns ALWAYS start fresh (return false) — resuming a stale or poisoned
+ * provider thread is the root cause of silent empty dream fires (codex
+ * `thread/resume` deadlock, hung `thread/start`, or rmcp transport crash on a
+ * large stale-thread replay; observed across Degenerates / Stanielle / Teddy
+ * DM 2026-05/06). A normal spawn resumes iff it actually has a continuation.
+ * Pure so the resume-gate decision is unit-testable without the poll loop.
+ */
+export function shouldResumeContinuation(continuation: string | undefined, isDreamRun: boolean): boolean {
+  if (!continuation) return false;
+  if (isDreamRun) return false;
+  return true;
+}
+
+/**
+ * Whether a freshly-adopted continuation should be DURABLY persisted back as
+ * the group's standing continuation. A dream's thread is ephemeral and must
+ * never overwrite the interactive session's thread (else the next user turn
+ * resumes the dream's one-shot maintenance context). Pure twin of
+ * `shouldResumeContinuation` for the write side.
+ */
+export function shouldPersistContinuation(isDreamRun: boolean): boolean {
+  return !isDreamRun;
+}
+
 export function pickPushScopedContext(pushes: TaskFireContext[][]): TaskFireContext | null {
   for (const push of pushes) {
     for (let i = push.length - 1; i >= 0; i--) {
@@ -266,6 +292,17 @@ export interface PollLoopConfig {
   systemContext?: {
     instructions?: string;
   };
+  /**
+   * True on a Dream / maintenance spawn (see RunnerConfig.isDreamRun). When
+   * set, the poll loop NEVER resumes a persisted continuation — the dream
+   * always runs on a fresh provider thread. This is the root-cause fix for
+   * silent empty dream fires: resuming a stale/poisoned codex thread is what
+   * deadlocks `thread/resume`, hangs `thread/start`, or crashes the rmcp
+   * stdio transport mid-replay, none of which emit an agentMessage. The
+   * dream's last step rotates the session anyway, so a fresh thread is also
+   * the semantically correct behavior.
+   */
+  isDreamRun?: boolean;
 }
 
 /**
@@ -285,6 +322,23 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   // other providers may reload a thread ID, etc.). Keyed per-provider so
   // a Codex thread id never gets handed to Claude or vice versa.
   let continuation: string | undefined = migrateLegacyContinuation(config.providerName);
+
+  // Dream / maintenance spawns ALWAYS start fresh — never resume. Resuming a
+  // stale or poisoned thread is the single root cause behind silent empty
+  // dream fires: codex `thread/resume` deadlocks on a poisoned rollout
+  // (Stanielle 2026-05-27), `thread/start` hangs unanswered after the resume
+  // attempt (Degenerates 2026-06-01/02), or the rmcp stdio transport crashes
+  // replaying a large stale thread (Teddy DM 2026-05-30) — each leaves
+  // `task_fires.assistant_text` empty. The dream consolidates and calls
+  // `rotate_session` as its final step, so a fresh thread is also exactly
+  // what the protocol intends. We deliberately do NOT clearContinuation()
+  // here: the standing continuation belongs to the group's interactive
+  // session and must survive the dream untouched (the dream's own
+  // rotate_session is what clears it when appropriate).
+  if (continuation && !shouldResumeContinuation(continuation, Boolean(config.isDreamRun))) {
+    log(`Dream pass — starting fresh ${config.providerName} thread (not resuming ${continuation})`);
+    continuation = undefined;
+  }
 
   // Before resuming, drop a session whose on-disk transcript has grown too
   // large/old to cold-resume within the host's idle ceiling. Without this a
@@ -587,14 +641,25 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       );
       if (result.continuation && result.continuation !== continuation) {
         const isNewThread = continuation === undefined;
+        // A dream's fresh thread is EPHEMERAL — it must never become the
+        // group's persisted continuation. Persisting it would clobber the
+        // interactive session's thread with the throwaway dream thread, so
+        // the next user turn would resume the dream's one-shot maintenance
+        // context instead of the conversation. The dream owns its own
+        // lifecycle (it calls rotate_session as its final step); the
+        // poll-loop just must not write its thread id back. Keep the local
+        // `continuation` var updated so any in-process follow-up dream turn
+        // stays on the same fresh thread, but skip the durable write.
         continuation = result.continuation;
-        setContinuation(config.providerName, continuation);
-        // Stamp the rotation-day this continuation started on. Only on a
-        // newly-adopted thread — resuming an existing one keeps the
-        // original stamp so the day-boundary check measures from when the
-        // thread truly began, not when this container happened to attach.
-        if (isNewThread) {
-          setContinuationStartedAt(config.providerName, computeRotationDate(new Date(), TIMEZONE));
+        if (shouldPersistContinuation(Boolean(config.isDreamRun))) {
+          setContinuation(config.providerName, continuation);
+          // Stamp the rotation-day this continuation started on. Only on a
+          // newly-adopted thread — resuming an existing one keeps the
+          // original stamp so the day-boundary check measures from when the
+          // thread truly began, not when this container happened to attach.
+          if (isNewThread) {
+            setContinuationStartedAt(config.providerName, computeRotationDate(new Date(), TIMEZONE));
+          }
         }
       }
     } catch (err) {
