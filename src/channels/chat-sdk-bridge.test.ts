@@ -4,6 +4,7 @@ import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
 
 import {
   createChatSdkBridge,
+  enrichAttachments,
   htmlToMarkdown,
   isSelfAuthoredChatSdkMessage,
   RECOVERY_PER_PAGE_MAX,
@@ -128,6 +129,34 @@ describe('htmlToMarkdown', () => {
 
   it('safe on empty input', () => {
     expect(htmlToMarkdown('')).toBe('');
+  });
+});
+
+describe('enrichAttachments', () => {
+  it('fetches attachment bytes through fetchData and preserves metadata', async () => {
+    const enriched = await enrichAttachments([
+      {
+        type: 'image',
+        name: 'quoted-receipt.jpg',
+        mimeType: 'image/jpeg',
+        size: 10,
+        width: 640,
+        height: 480,
+        fetchData: async () => Buffer.from('image-bytes'),
+      },
+    ]);
+
+    expect(enriched).toEqual([
+      {
+        type: 'image',
+        name: 'quoted-receipt.jpg',
+        mimeType: 'image/jpeg',
+        size: 10,
+        width: 640,
+        height: 480,
+        data: Buffer.from('image-bytes').toString('base64'),
+      },
+    ]);
   });
 });
 

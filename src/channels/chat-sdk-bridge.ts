@@ -13,6 +13,7 @@ import {
   Actions,
   Button,
   LinkButton,
+  type Attachment,
   type CardChild,
   type Adapter,
   type ConcurrencyStrategy,
@@ -73,6 +74,16 @@ export interface ReplyContext {
    * to still be in the prompt window). Bounded by the walker's depth cap.
    */
   ancestors?: Array<{ sender: string; text: string }>;
+  /**
+   * Optional attachments from the quoted parent message. Extractors should
+   * populate this when the platform embeds the parent raw message (Telegram
+   * `reply_to_message`, Discord `referenced_message`, etc.) and the parent
+   * carried media/files. The bridge fetches these through the same enrichment
+   * path as direct message attachments, appends them to `content.attachments`,
+   * and strips this field from `content.replyTo` so the prompt gets both the
+   * quote and the actual bytes without bloating the reply metadata object.
+   */
+  attachments?: Attachment[];
 }
 
 /**
@@ -371,6 +382,124 @@ export function isSelfAuthoredChatSdkMessage(author: { isMe?: boolean; isBot?: b
   return author?.isMe === true || author?.isBot === true;
 }
 
+export async function enrichAttachments(attachments: Attachment[]): Promise<Array<Record<string, unknown>>> {
+  const enriched: Array<Record<string, unknown>> = [];
+  for (const att of attachments) {
+    const entry: Record<string, unknown> = {
+      type: att.type,
+      name: att.name,
+      mimeType: att.mimeType,
+      size: att.size,
+      width: (att as unknown as Record<string, unknown>).width,
+      height: (att as unknown as Record<string, unknown>).height,
+      ...(typeof att.url === 'string' && { url: att.url }),
+    };
+    // Two paths to populate `data`:
+    //   (1) `fetchData()` — preferred when the adapter exposes it;
+    //       handles auth automatically (Slack private URLs etc.).
+    //   (2) `url` fallback — public CDN URLs (Discord attachments).
+    //       Discord's chat-adapter populates `url` but does NOT expose
+    //       `fetchData`, so without this fallback every Discord image
+    //       lands in the container with metadata only and the agent
+    //       sees no bytes ("I can't pull the screenshot in"). Observed
+    //       live on 2026-05-09 with Adrian's Google-reconnect
+    //       screenshot in boysnight.
+    let buffer: Buffer | null = null;
+    if (att.fetchData) {
+      try {
+        buffer = await att.fetchData();
+      } catch (err) {
+        log.warn('Failed to fetchData attachment', { type: att.type, name: att.name, err });
+      }
+    }
+    if (!buffer && att.url) {
+      try {
+        const res = await fetch(att.url);
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status} ${res.statusText}`);
+        }
+        buffer = Buffer.from(await res.arrayBuffer());
+      } catch (err) {
+        log.warn('Failed to fetch attachment by url', {
+          type: att.type,
+          name: att.name,
+          url: att.url,
+          err,
+        });
+      }
+    }
+    if (buffer) {
+      // Resize oversized images (>~3.5MB raw) so the base64 payload
+      // stays under Anthropic's 5MB per-image cap. Static formats
+      // (JPEG/PNG/WebP) get resized to 1024px-max + JPEG q85;
+      // animated formats need ffmpeg (next branch). Mirrors v1's
+      // `resizeToJpegBuffer` in apps/nanoclaw/src/shared/image-processing.ts.
+      if (att.type === 'image' && att.mimeType) {
+        const { maybeResizeImage } = await import('../media/image-processing.js');
+        buffer = await maybeResizeImage(buffer, att.mimeType);
+      }
+      // Animated content transcode — see media/image-processing.ts for
+      // the full rationale. Three cases land here:
+      //   1. Tenor/Giphy "gifv" embeds: att.type='video' mimeType='video/mp4'.
+      //      Discord serves animated content as MP4 even when the user
+      //      pasted a GIF; Anthropic rejects MP4 bytes with a 400.
+      //   2. WhatsApp "GIFs": att.type='image' mimeType='image/gif' but
+      //      the bytes are MP4-encoded video under Baileys. Same 400.
+      //   3. Oversize real GIFs: att.type='image' mimeType='image/gif',
+      //      >3.5 MB raw, sharp can't shrink while preserving motion.
+      // On success the attachment is rewritten as image/gif so the
+      // container's extractImageAttachments sees an accepted format;
+      // on failure (ffmpeg missing/failed/output oversize) we drop the
+      // bytes so the agent doesn't get an attachment reference pointing
+      // at content Anthropic will reject. v1 parity.
+      if (att.mimeType) {
+        const { shouldTranscodeAnimated, maybeTranscodeAnimated } = await import('../media/image-processing.js');
+        if (shouldTranscodeAnimated(att.type, att.mimeType, buffer.length)) {
+          const result = await maybeTranscodeAnimated(buffer, att.mimeType);
+          if (result.ok && result.buffer && result.mimeType) {
+            buffer = result.buffer;
+            entry.mimeType = result.mimeType;
+            entry.type = 'image';
+          } else {
+            log.warn('Animated attachment transcode failed; dropping bytes', {
+              name: att.name,
+              sourceType: att.type,
+              sourceMime: att.mimeType,
+              reason: result.reason,
+            });
+            // Skip the data payload. The bridge still emits the metadata
+            // entry below — but without `data`, the container poll-loop's
+            // image extractor passes over it and the agent sees nothing
+            // rather than a broken reference.
+            buffer = null;
+          }
+        }
+      }
+      if (buffer) entry.data = buffer.toString('base64');
+      // Audio transcription is no longer done here. The engine's
+      // session-manager.extractAttachmentFiles runs a single
+      // transcription pass for every adapter (chat-sdk channels +
+      // native WhatsApp). Doing it inline here would re-transcribe
+      // the same buffer; doing it host-side meant standalone
+      // NanoClaw silently skipped it for lack of host wiring. Both
+      // issues resolved by the engine-side single site.
+    } else if (att.type === 'image' || att.type === 'video' || att.type === 'audio') {
+      // Loud failure for media types — text/file we can fall through
+      // and the agent's formatter will render `[file: name]`. Media
+      // without bytes is silently broken from the agent's POV
+      // (the recurring "I can't pull the screenshot" failure mode).
+      log.error('Attachment media bytes unavailable — agent will see metadata only', {
+        type: att.type,
+        name: att.name,
+        hasFetchData: !!att.fetchData,
+        hasUrl: !!att.url,
+      });
+    }
+    enriched.push(entry);
+  }
+  return enriched;
+}
+
 export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter {
   const { adapter } = config;
   const transformText = (t: string): string => (config.transformOutboundText ? config.transformOutboundText(t) : t);
@@ -387,124 +516,11 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const serialized = message.toJSON() as Record<string, any>;
 
-    // Download attachment data before serialization loses fetchData()
-    if (message.attachments && message.attachments.length > 0) {
-      const enriched = [];
-      for (const att of message.attachments) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const entry: Record<string, any> = {
-          type: att.type,
-          name: att.name,
-          mimeType: att.mimeType,
-          size: att.size,
-          width: (att as unknown as Record<string, unknown>).width,
-          height: (att as unknown as Record<string, unknown>).height,
-          ...(typeof att.url === 'string' && { url: att.url }),
-        };
-        // Two paths to populate `data`:
-        //   (1) `fetchData()` — preferred when the adapter exposes it;
-        //       handles auth automatically (Slack private URLs etc.).
-        //   (2) `url` fallback — public CDN URLs (Discord attachments).
-        //       Discord's chat-adapter populates `url` but does NOT expose
-        //       `fetchData`, so without this fallback every Discord image
-        //       lands in the container with metadata only and the agent
-        //       sees no bytes ("I can't pull the screenshot in"). Observed
-        //       live on 2026-05-09 with Adrian's Google-reconnect
-        //       screenshot in boysnight.
-        let buffer: Buffer | null = null;
-        if (att.fetchData) {
-          try {
-            buffer = await att.fetchData();
-          } catch (err) {
-            log.warn('Failed to fetchData attachment', { type: att.type, name: att.name, err });
-          }
-        }
-        if (!buffer && att.url) {
-          try {
-            const res = await fetch(att.url);
-            if (!res.ok) {
-              throw new Error(`HTTP ${res.status} ${res.statusText}`);
-            }
-            buffer = Buffer.from(await res.arrayBuffer());
-          } catch (err) {
-            log.warn('Failed to fetch attachment by url', {
-              type: att.type,
-              name: att.name,
-              url: att.url,
-              err,
-            });
-          }
-        }
-        if (buffer) {
-          // Resize oversized images (>~3.5MB raw) so the base64 payload
-          // stays under Anthropic's 5MB per-image cap. Static formats
-          // (JPEG/PNG/WebP) get resized to 1024px-max + JPEG q85;
-          // animated formats need ffmpeg (next branch). Mirrors v1's
-          // `resizeToJpegBuffer` in apps/nanoclaw/src/shared/image-processing.ts.
-          if (att.type === 'image' && att.mimeType) {
-            const { maybeResizeImage } = await import('../media/image-processing.js');
-            buffer = await maybeResizeImage(buffer, att.mimeType);
-          }
-          // Animated content transcode — see media/image-processing.ts for
-          // the full rationale. Three cases land here:
-          //   1. Tenor/Giphy "gifv" embeds: att.type='video' mimeType='video/mp4'.
-          //      Discord serves animated content as MP4 even when the user
-          //      pasted a GIF; Anthropic rejects MP4 bytes with a 400.
-          //   2. WhatsApp "GIFs": att.type='image' mimeType='image/gif' but
-          //      the bytes are MP4-encoded video under Baileys. Same 400.
-          //   3. Oversize real GIFs: att.type='image' mimeType='image/gif',
-          //      >3.5 MB raw, sharp can't shrink while preserving motion.
-          // On success the attachment is rewritten as image/gif so the
-          // container's extractImageAttachments sees an accepted format;
-          // on failure (ffmpeg missing/failed/output oversize) we drop the
-          // bytes so the agent doesn't get an attachment reference pointing
-          // at content Anthropic will reject. v1 parity.
-          if (att.mimeType) {
-            const { shouldTranscodeAnimated, maybeTranscodeAnimated } = await import('../media/image-processing.js');
-            if (shouldTranscodeAnimated(att.type, att.mimeType, buffer.length)) {
-              const result = await maybeTranscodeAnimated(buffer, att.mimeType);
-              if (result.ok && result.buffer && result.mimeType) {
-                buffer = result.buffer;
-                entry.mimeType = result.mimeType;
-                entry.type = 'image';
-              } else {
-                log.warn('Animated attachment transcode failed; dropping bytes', {
-                  name: att.name,
-                  sourceType: att.type,
-                  sourceMime: att.mimeType,
-                  reason: result.reason,
-                });
-                // Skip the data payload. The bridge still emits the metadata
-                // entry below — but without `data`, the container poll-loop's
-                // image extractor passes over it and the agent sees nothing
-                // rather than a broken reference.
-                buffer = null;
-              }
-            }
-          }
-          if (buffer) entry.data = buffer.toString('base64');
-          // Audio transcription is no longer done here. The engine's
-          // session-manager.extractAttachmentFiles runs a single
-          // transcription pass for every adapter (chat-sdk channels +
-          // native WhatsApp). Doing it inline here would re-transcribe
-          // the same buffer; doing it host-side meant standalone
-          // NanoClaw silently skipped it for lack of host wiring. Both
-          // issues resolved by the engine-side single site.
-        } else if (att.type === 'image' || att.type === 'video' || att.type === 'audio') {
-          // Loud failure for media types — text/file we can fall through
-          // and the agent's formatter will render `[file: name]`. Media
-          // without bytes is silently broken from the agent's POV
-          // (the recurring "I can't pull the screenshot" failure mode).
-          log.error('Attachment media bytes unavailable — agent will see metadata only', {
-            type: att.type,
-            name: att.name,
-            hasFetchData: !!att.fetchData,
-            hasUrl: !!att.url,
-          });
-        }
-        enriched.push(entry);
-      }
-      serialized.attachments = enriched;
+    // Download attachment data before serialization loses fetchData().
+    const enrichedAttachments =
+      message.attachments && message.attachments.length > 0 ? await enrichAttachments(message.attachments) : [];
+    if (enrichedAttachments.length > 0) {
+      serialized.attachments = enrichedAttachments;
     }
 
     // Extract reply context via platform-specific hook. Awaited so async
@@ -513,7 +529,14 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     if (config.extractReplyContext && message.raw) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const replyTo = await config.extractReplyContext(message.raw as Record<string, any>);
-      if (replyTo) serialized.replyTo = replyTo;
+      if (replyTo) {
+        const { attachments, ...replyContext } = replyTo;
+        serialized.replyTo = replyContext;
+        if (attachments && attachments.length > 0) {
+          const quoted = await enrichAttachments(attachments);
+          serialized.attachments = [...enrichedAttachments, ...quoted];
+        }
+      }
     }
 
     // Project chat-sdk's nested author into the flat sender fields the router
