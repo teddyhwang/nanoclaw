@@ -264,6 +264,12 @@ export { routeInbound } from '../router.js';
 // knowledge/projects/sensitive-action-approvals.md.
 export {
   decideSensitiveGate,
+  // The single source of actor-id namespacing — host plugins that mint
+  // their own self-confirm cards (golf booking) MUST namespace the raw
+  // platform sender id with this before passing it to requestConfirmation,
+  // or clicker-auth (which compares the namespaced clicker id) rejects the
+  // actor's own Confirm. See apps/optimus/src/plugins/golf-confirm.ts.
+  namespaceActorId,
   type SensitiveGateInput,
   type SensitiveGateDecision,
 } from '../modules/approvals/sensitive-gate.js';
