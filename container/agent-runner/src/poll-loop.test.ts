@@ -860,6 +860,33 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(JSON.parse(out[1].content).text).toBe('Second, genuinely different reply.');
   });
 
+  it('dedupes a final <message> block that was already sent through a tool this turn', async () => {
+    insertChannelDestination('boys-night');
+    const { writeMessageOut } = await import('./db/messages-out.js');
+    const turnStartedAt = '2026-06-04 00:00:00';
+
+    writeMessageOut({
+      id: 'tool-sent-1',
+      kind: 'chat',
+      channel_type: ROUTING.channelType,
+      platform_id: ROUTING.platformId,
+      content: JSON.stringify({
+        text: '## Recap — last 24h\n\n- **One thing.** Already sent via send_message.',
+      }),
+    });
+
+    dispatchResultText(
+      '<message to="boys-night">## Recap — last 24h\n\n- **One thing.** Already sent via send_message.</message>',
+      ROUTING,
+      false,
+      turnStartedAt,
+    );
+
+    const out = getUndeliveredMessages().filter((m) => m.kind === 'chat');
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).text).toContain('Already sent via send_message');
+  });
+
   it('drops with log when routing has no origin channel (defensive)', () => {
     const blankRouting: RoutingContext = {
       platformId: null,

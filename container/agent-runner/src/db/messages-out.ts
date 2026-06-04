@@ -189,6 +189,46 @@ export function countChatMessagesSince(sinceIso: string): number {
   return row.n;
 }
 
+function normalizeMessageText(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * True when this turn already wrote the same chat text through an MCP tool.
+ *
+ * Some models call `send_message` and then return the same answer as final
+ * output. The tool row is already in outbound.db before the runner parses the
+ * final text; without this guard the same message is delivered twice.
+ *
+ * This intentionally uses `timestamp > sinceIso` rather than `>=`: SQLite
+ * timestamps are second-granularity, and a fast follow-up turn can start in the
+ * same second as the previous turn's final outbound row. Treating equality as
+ * in-scope would suppress a legitimate repeated answer in the next turn.
+ */
+export function hasChatMessageTextSince(sinceIso: string, text: string): boolean {
+  const normalized = normalizeMessageText(text);
+  if (!normalized) return false;
+
+  const rows = getOutboundDb()
+    .prepare(
+      `SELECT content FROM messages_out
+       WHERE kind = 'chat' AND timestamp > ?`,
+    )
+    .all(sinceIso) as Array<{ content: string }>;
+
+  for (const row of rows) {
+    try {
+      const content = JSON.parse(row.content) as { text?: unknown };
+      if (typeof content.text === 'string' && normalizeMessageText(content.text) === normalized) {
+        return true;
+      }
+    } catch {
+      continue;
+    }
+  }
+  return false;
+}
+
 /**
  * Current SQLite UTC timestamp string — matches `messages_out.timestamp`
  * formatting (`datetime('now')`) so `countChatMessagesSince` comparisons

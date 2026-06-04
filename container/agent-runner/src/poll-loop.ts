@@ -2,6 +2,7 @@ import { findByName, getAllDestinations, type DestinationEntry } from './destina
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
 import {
   countChatMessagesSince,
+  hasChatMessageTextSince,
   getReplyTargetMessageIdBySeq,
   getRoutingBySeq,
   outboundDbNow,
@@ -1811,6 +1812,10 @@ export function dispatchResultText(
     const dedupKey = `${toName} ${body.replace(/\s+/g, ' ')}`;
     if (seen.has(dedupKey)) {
       log(`Suppressing duplicate <message to="${toName}"> block within one turn`);
+      continue;
+    }
+    if (turnStartedAt && hasChatMessageTextSince(turnStartedAt, body)) {
+      log(`Suppressing duplicate final <message to="${toName}"> block already delivered via MCP tool`);
       continue;
     }
     seen.add(dedupKey);
