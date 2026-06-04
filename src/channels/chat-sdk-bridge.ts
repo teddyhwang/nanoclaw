@@ -556,6 +556,13 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     // gate drops it instead of self-triggering an empty "addressed" turn.
     // Full rationale + incident chain on isSelfAuthoredChatSdkMessage.
     const authoredBySelf = isSelfAuthoredChatSdkMessage(author);
+    // Narrower signal: THIS bot's own outbound (the connected client),
+    // distinct from any-bot (`authoredBySelf` also catches a *different*
+    // bot via author.isBot). Only this-bot self-echo is dropped from the
+    // store by the router — it is pure status spam with no self-context
+    // value, and unbounded it floods the dev-DM inbound queue (Teddy DM
+    // 2026-06-03). Other-bot messages still accumulate as channel context.
+    const authoredByThisBot = author?.isMe === true;
 
     // Stamp this bot's platform id into the row content so the
     // container-side isAddressedTurn can distinguish an @mention of THIS
@@ -580,6 +587,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       isMention,
       isGroup,
       ...(authoredBySelf && { isBotMessage: true }),
+      ...(authoredByThisBot && { isSelfMessage: true }),
     };
   }
 

@@ -97,6 +97,7 @@ export async function _bootForHost(opts: { managedSignals: boolean }): Promise<v
             isMention: message.isMention,
             isGroup: message.isGroup,
             isBotMessage: message.isBotMessage,
+            isSelfMessage: message.isSelfMessage,
             isBackfill: message.isBackfill,
           },
         }).catch((err) => {

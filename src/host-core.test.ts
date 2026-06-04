@@ -538,6 +538,85 @@ describe('router', () => {
     expect(wakeMock).not.toHaveBeenCalled();
   });
 
+  it('drops a self-echo (isSelfMessage) instead of storing it as accumulate context', async () => {
+    // The bot's own outbound bouncing back (chat-sdk author.isMe) is pure
+    // status spam. Unlike a generic loopback — which we store as silent
+    // self-context — a self-echo must be dropped from the store so it never
+    // accrues as a trigger=0 `pending` zombie (Teddy DM 2026-06-03: 98 of
+    // 100 pending inbound rows were the bot's own escalation/status lines,
+    // two weeks deep). Flip the wiring to accumulate so, absent this gate,
+    // the row WOULD land — that's what proves the gate fires.
+    const { routeInbound } = await import('./router.js');
+    const { wakeContainer } = await import('./container-runner.js');
+    const { updateMessagingGroupAgent } = await import('./db/messaging-groups.js');
+    const wakeMock = wakeContainer as ReturnType<typeof vi.fn>;
+    wakeMock.mockClear();
+    updateMessagingGroupAgent('mga-1', { ignored_message_policy: 'accumulate' });
+
+    await routeInbound({
+      channelType: 'discord',
+      platformId: 'chan-123',
+      threadId: null,
+      message: {
+        id: 'msg-self-echo',
+        kind: 'chat',
+        content: JSON.stringify({ sender: 'Optimus', text: '🤖 On it.' }),
+        timestamp: now(),
+        // Self-echo always carries isBotMessage too (the bridge sets both);
+        // isSelfMessage is the narrower this-bot signal that drops the store.
+        isBotMessage: true,
+        isSelfMessage: true,
+      },
+    });
+
+    expect(wakeMock).not.toHaveBeenCalled();
+    // No session row, and if a session exists no messages_in row landed.
+    const session = findSession('mg-1', null);
+    if (session) {
+      const db = new Database(inboundDbPath('ag-1', session.id));
+      const count = (db.prepare('SELECT COUNT(*) AS c FROM messages_in').get() as { c: number }).c;
+      db.close();
+      expect(count).toBe(0);
+    }
+  });
+
+  it('still stores a non-self bot loopback as accumulate context (other-bot in channel)', async () => {
+    // A *different* bot in the channel carries isBotMessage (engagement
+    // skipped) but NOT isSelfMessage — that is legitimate channel context
+    // and must still accumulate. This guards the self-echo gate from
+    // over-reaching into all-bot suppression.
+    const { routeInbound } = await import('./router.js');
+    const { wakeContainer } = await import('./container-runner.js');
+    const { updateMessagingGroupAgent } = await import('./db/messaging-groups.js');
+    const wakeMock = wakeContainer as ReturnType<typeof vi.fn>;
+    wakeMock.mockClear();
+    updateMessagingGroupAgent('mga-1', { ignored_message_policy: 'accumulate' });
+
+    await routeInbound({
+      channelType: 'discord',
+      platformId: 'chan-123',
+      threadId: null,
+      message: {
+        id: 'msg-other-bot',
+        kind: 'chat',
+        content: JSON.stringify({ sender: 'SomeOtherBot', text: 'beep boop' }),
+        timestamp: now(),
+        isBotMessage: true,
+      },
+    });
+
+    expect(wakeMock).not.toHaveBeenCalled();
+    const session = findSession('mg-1', null);
+    expect(session).toBeDefined();
+    const db = new Database(inboundDbPath('ag-1', session!.id));
+    const rows = db.prepare('SELECT id, trigger FROM messages_in').all() as Array<{ id: string; trigger: number }>;
+    db.close();
+    expect(rows).toHaveLength(1);
+    // Stored id is namespaced per-agent (msg-other-bot:ag-1).
+    expect(rows[0].id).toBe('msg-other-bot:ag-1');
+    expect(rows[0].trigger).toBe(0);
+  });
+
   it('skips auto-create when the unwired channel sees only a bot loopback', async () => {
     // A bot self-reply on an unknown channel should never spawn a row. v2
     // auto-creates messaging_groups on @mention; a loopback can carry the

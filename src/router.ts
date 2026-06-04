@@ -190,6 +190,20 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   // outbound came back as inbound.
   const isBotLoopback = event.message.isBotMessage === true;
 
+  // Self-echo gate. `isSelfMessage` is the narrower signal: THIS bot's own
+  // outbound bouncing back (chat-sdk author.isMe), as opposed to any-bot
+  // (`isBotMessage`, which also covers a *different* bot in the channel).
+  // The bot's own status/escalation spam carries zero useful self-context,
+  // so unlike a normal loopback (which we store as accumulate context) we
+  // drop it from the store entirely. Without this, a high-traffic channel
+  // — the dev-DM especially, which the dev-bridge floods with 🛎️/🤖/⚙️
+  // status lines — piles up unbounded trigger=0 self-echo rows that sit
+  // `pending` forever (Teddy DM 2026-06-03: 98 of 100 pending inbound were
+  // the bot's own messages, dating back two weeks). Engagement is already
+  // skipped via isBotLoopback below; this only suppresses the accumulate
+  // store. Other-bot context (isBotMessage && !isSelfMessage) is untouched.
+  const isSelfEcho = event.message.isSelfMessage === true;
+
   // Backfill short-circuit: deep-history replay (on-registration channel
   // sync, agent-requested gap heal) writes messages as accumulated context
   // only. Without this gate a year-old @-mention in the replay stream would
@@ -394,6 +408,16 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
           log.warn('adapter.subscribe failed', { channelType: event.channelType, threadId: event.threadId, err });
         });
       }
+    } else if (isSelfEcho) {
+      // The bot's own outbound bounced back. Engagement was already skipped
+      // (isBotLoopback), and unlike other accumulate context this carries no
+      // value worth storing — it's the bot's own status/escalation spam. Drop
+      // it so it never accrues as a trigger=0 `pending` zombie in the inbound
+      // queue. See `isSelfEcho` above for the incident.
+      log.debug('Self-echo dropped (not stored as accumulate context)', {
+        agentGroupId: agent.agent_group_id,
+        messageId: event.message.id,
+      });
     } else if (agent.ignored_message_policy === 'accumulate' && !(engages && (!accessOk || !scopeOk))) {
       // Accumulate stores the message as silent context. We allow it when
       // engagement simply didn't fire, but NOT when engagement fired and
@@ -425,17 +449,21 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   }
 
   if (engagedCount + accumulatedCount === 0) {
+    // Self-echo is dropped deliberately above (the bot's own outbound), not
+    // a "no agent engaged" miss — label it accurately so the drop telemetry
+    // doesn't read as lost human messages.
+    const dropReason = isSelfEcho ? 'self_echo' : 'no_agent_engaged';
     recordDroppedMessage({
       channel_type: event.channelType,
       platform_id: event.platformId,
       user_id: userId,
       sender_name: parsed.sender ?? null,
-      reason: 'no_agent_engaged',
+      reason: dropReason,
       messaging_group_id: mg.id,
       agent_group_id: null,
     });
     emitEngineEvent('inbound.dropped', {
-      reason: 'no_agent_engaged',
+      reason: dropReason,
       channelType: event.channelType,
       platformId: event.platformId,
       userId,

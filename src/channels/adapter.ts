@@ -84,6 +84,21 @@ export interface InboundEvent {
      */
     isBotMessage?: boolean;
     /**
+     * True when this inbound is *this bot's own outbound* bouncing back
+     * (the connected client identity — `isMe` on the chat-sdk author), as
+     * opposed to merely any-bot (`isBotMessage`, which also covers a
+     * *different* bot in the channel). Self-messages are pure status spam
+     * with zero useful self-context, so the router drops them entirely
+     * rather than storing them as accumulate context — unbounded
+     * self-echo otherwise piles up `pending` in the dev-DM inbound queue
+     * (Teddy DM 2026-06-03: 98 of 100 pending rows were the bot's own
+     * escalation/status messages). Engagement is still skipped via
+     * `isBotMessage` (set alongside this); `isSelfMessage` only governs
+     * the *store*. Other-bot messages (`isBotMessage && !isSelfMessage`)
+     * are still stored as legitimate channel context.
+     */
+    isSelfMessage?: boolean;
+    /**
      * True when this inbound is replayed historical context, not a live
      * arrival. Set by deep-backfill callers (e.g. on-registration channel
      * history sync) that want messages stored as accumulated context
@@ -136,6 +151,13 @@ export interface InboundMessage {
    * its own replies.
    */
   isBotMessage?: boolean;
+  /**
+   * True when this inbound is *this bot's own* outbound bouncing back (vs
+   * any-bot via `isBotMessage`). The router drops it instead of storing it
+   * as accumulate context. See `InboundEvent.message.isSelfMessage` for
+   * the full contract.
+   */
+  isSelfMessage?: boolean;
   /**
    * True when this inbound is replayed historical context, not a live
    * arrival. See `InboundEvent.message.isBackfill` for the full contract.
