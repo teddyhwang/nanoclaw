@@ -667,6 +667,26 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(out[0].in_reply_to).toBe('incident-start-platform-id');
   });
 
+  it('rejects explicit reply_to_message_id targeting an accumulated trigger=0 inbound row', () => {
+    insertChannelDestination('boys-night');
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (seq, id, channel_type, platform_id, thread_id, kind, trigger, status, timestamp, content)
+         VALUES (444, 'ambient-side-comment-platform-id', ?, ?, NULL, 'chat-sdk', 0, 'completed', '2026-06-04T14:15:24Z', '{}')`,
+      )
+      .run(ROUTING.channelType, ROUTING.platformId);
+
+    const result = dispatchResultText(
+      '<message to="boys-night" reply_to_message_id="#444">This should not reach chat.</message>',
+      ROUTING,
+    );
+
+    expect(result.sent).toBe(0);
+    expect(result.dispatched).toHaveLength(0);
+    const out = getUndeliveredMessages();
+    expect(out.every((row) => row.kind !== 'chat')).toBe(true);
+  });
+
   it('same-channel dispatch reply pill stays on the turn-authoritative target even when a NEWER trigger=1 inbound exists in the channel', () => {
     // 2026-05-23 New York Crew WhatsApp regression: while Optimus was
     // answering Jon's older hotel-name request, Nicole sent a new

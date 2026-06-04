@@ -120,7 +120,10 @@ export function getMessageIdBySeq(seq: number): string | null {
 export function getReplyTargetMessageIdBySeq(seq: number): string | null {
   const inbound = getInboundDb();
 
-  const inRow = inbound.prepare('SELECT id FROM messages_in WHERE seq = ?').get(seq) as { id: string } | undefined;
+  const inRow = inbound.prepare('SELECT id, trigger FROM messages_in WHERE seq = ?').get(seq) as
+    | { id: string; trigger: number }
+    | undefined;
+  if (inRow && inRow.trigger !== 1) return null;
   if (inRow) return inRow.id;
 
   const outRow = getOutboundDb().prepare('SELECT id FROM messages_out WHERE seq = ?').get(seq) as

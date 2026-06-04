@@ -1993,7 +1993,7 @@ function resolveDispatchReplyTarget(
 ): string | null {
   if (explicitReplyToSeq != null && explicitRouting) {
     const explicit = resolveExplicitReplyTarget(explicitReplyToSeq, explicitRouting);
-    if (explicit) return explicit;
+    if (explicit !== undefined) return explicit;
   }
   if (routing.inReplyTo == null) return null; // task / accumulate turn — never pill
   // Same-channel dispatch: routing.inReplyTo IS the authoritative target
@@ -2075,9 +2075,18 @@ function parseMessageSeq(value: string | null | undefined): number | null {
 function resolveExplicitReplyTarget(
   seq: number,
   routing: { channel_type: string; platform_id: string },
-): string | null {
+): string | null | undefined {
+  const inbound = getInboundDb();
+  const inRow = inbound
+    .prepare('SELECT id, trigger, channel_type, platform_id FROM messages_in WHERE seq = ?')
+    .get(seq) as { id: string; trigger: number; channel_type: string | null; platform_id: string | null } | undefined;
+  if (inRow) {
+    if (inRow.channel_type !== routing.channel_type || inRow.platform_id !== routing.platform_id) return null;
+    return inRow.trigger === 1 ? inRow.id : null;
+  }
+
   const targetRouting = getRoutingBySeq(seq);
-  if (!targetRouting) return null;
+  if (!targetRouting) return undefined;
   if (targetRouting.channel_type !== routing.channel_type || targetRouting.platform_id !== routing.platform_id) {
     return null;
   }
