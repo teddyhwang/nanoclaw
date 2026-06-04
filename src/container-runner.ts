@@ -244,10 +244,38 @@ async function spawnContainer(session: Session): Promise<void> {
   markContainerRunning(session.id);
   emitEngineEvent('container.spawn', { sessionId: session.id, agentGroupId: agentGroup.id });
 
+  // Optional per-container log capture. The agent-runner's own `log()`
+  // calls (provider cold-start, codex app-server init, keepalive, dream
+  // thread decisions) write to the container's STDOUT, which v2 otherwise
+  // discards (all functional IO is via the session DB). When a host sets
+  // NANOCLAW_CONTAINER_LOG_DIR, tee both streams to
+  // <dir>/container-<name>.log so a stalled/empty-fire spawn can be
+  // diagnosed after the fact without a live `docker logs` repro — the gap
+  // that made the 2026-06-04 codex dream startup-stall un-debuggable.
+  // Unset (the standalone default) ⇒ unchanged behavior.
+  const containerLogDir = process.env.NANOCLAW_CONTAINER_LOG_DIR;
+  let containerLogStream: fs.WriteStream | null = null;
+  if (containerLogDir) {
+    try {
+      fs.mkdirSync(containerLogDir, { recursive: true });
+      containerLogStream = fs.createWriteStream(path.join(containerLogDir, `container-${containerName}.log`), {
+        flags: 'a',
+      });
+      containerLogStream.write(`=== spawn ${new Date().toISOString()} session=${session.id} ===\n`);
+    } catch (err) {
+      // A logging-setup failure must never abort the spawn.
+      log.debug(`container log capture disabled: ${err instanceof Error ? err.message : String(err)}`, {
+        container: agentGroup.folder,
+      });
+      containerLogStream = null;
+    }
+  }
+
   // Stream stderr to debug as before, but also retain a bounded tail so a
   // crash exit can log WHY the container died without a manual `docker logs`
   // repro (the 2026-05-16 diagnostic gap).
   container.stderr?.on('data', (data) => {
+    containerLogStream?.write(data);
     for (const line of data.toString().trim().split('\n')) {
       if (!line) continue;
       log.debug(line, { container: agentGroup.folder });
@@ -256,8 +284,15 @@ async function spawnContainer(session: Session): Promise<void> {
     }
   });
 
-  // stdout is unused in v2 (all IO is via session DB)
-  container.stdout?.on('data', () => {});
+  // stdout is unused for functional IO in v2 (all IO is via session DB),
+  // but it carries the agent-runner's diagnostic log() output — capture it
+  // when NANOCLAW_CONTAINER_LOG_DIR is set, otherwise discard as before.
+  container.stdout?.on('data', (data) => {
+    containerLogStream?.write(data);
+  });
+  if (containerLogStream) {
+    container.on('close', () => containerLogStream?.end());
+  }
 
   // No host-side idle timeout. Stale/stuck detection is driven by the host
   // sweep reading heartbeat mtime + processing_ack claim age + container_state
