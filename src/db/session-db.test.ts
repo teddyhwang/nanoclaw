@@ -10,7 +10,13 @@ import fs from 'fs';
 import path from 'path';
 import { describe, it, expect, afterEach } from 'vitest';
 
-import { countDueMessages, getInboundSourceSessionId, insertMessage, migrateMessagesInTable } from './session-db.js';
+import {
+  countDueMessages,
+  gcStaleSystemRows,
+  getInboundSourceSessionId,
+  insertMessage,
+  migrateMessagesInTable,
+} from './session-db.js';
 import { INBOUND_SCHEMA } from './schema.js';
 
 const TEST_DIR = '/tmp/nanoclaw-session-db-test';
@@ -115,6 +121,45 @@ describe('countDueMessages', () => {
     ).run('chat-1', 6, 'chat', 1);
 
     expect(countDueMessages(db)).toBe(1);
+    db.close();
+  });
+});
+
+describe('gcStaleSystemRows', () => {
+  const now = Date.parse('2026-06-04T12:00:00.000Z');
+  const at = (msAgo: number) => new Date(now - msAgo).toISOString();
+
+  function seed(db: Database.Database, id: string, kind: string, status: string, ts: string): void {
+    db.prepare(
+      `INSERT INTO messages_in (id, seq, kind, timestamp, status, content, trigger)
+       VALUES (?, ?, ?, ?, ?, '{}', 1)`,
+    ).run(id, Math.floor(Math.random() * 1e9), kind, ts, status);
+  }
+
+  it('completes only stale pending system rows, leaving fresh ones and non-system rows alone', () => {
+    const db = new Database(':memory:');
+    db.exec(INBOUND_SCHEMA);
+    seed(db, 'sys-stale', 'system', 'pending', at(20 * 60 * 1000)); // 20m old → GC
+    seed(db, 'sys-fresh', 'system', 'pending', at(2 * 60 * 1000)); // 2m old → keep (live turn may await)
+    seed(db, 'sys-done', 'system', 'completed', at(60 * 60 * 1000)); // already done → untouched
+    seed(db, 'task-stale', 'task', 'pending', at(60 * 60 * 1000)); // not system → untouched
+
+    const changed = gcStaleSystemRows(db, now);
+    expect(changed).toBe(1);
+
+    const status = (id: string) =>
+      (db.prepare('SELECT status FROM messages_in WHERE id = ?').get(id) as { status: string }).status;
+    expect(status('sys-stale')).toBe('completed');
+    expect(status('sys-fresh')).toBe('pending');
+    expect(status('task-stale')).toBe('pending');
+    db.close();
+  });
+
+  it('is a no-op when nothing is stale', () => {
+    const db = new Database(':memory:');
+    db.exec(INBOUND_SCHEMA);
+    seed(db, 'sys-fresh', 'system', 'pending', at(60 * 1000));
+    expect(gcStaleSystemRows(db, now)).toBe(0);
     db.close();
   });
 });

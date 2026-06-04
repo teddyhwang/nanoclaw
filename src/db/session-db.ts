@@ -280,6 +280,34 @@ export function syncProcessingAcks(inDb: Database.Database, outDb: Database.Data
   })();
 }
 
+/**
+ * Garbage-collect stranded `kind='system'` rows.
+ *
+ * System rows are MCP-tool round-trip responses (search_conversations,
+ * ask_user_question, generate_image) the host writes into messages_in for
+ * the in-container tool to consume and then ack via processing_ack. If the
+ * consumer hits its poll timeout in the gap before the (slow) host response
+ * lands — or throws mid-poll — it returns without acking and the row
+ * strands as pending forever. `countDueMessages` excludes kind='system' so
+ * these never trigger a wake, but they accumulate unbounded (observed
+ * 2026-06-04: 136 stranded across 32 sessions) and pollute debugging.
+ *
+ * The robust fix is structural and lives here, not in each tool's timeout
+ * path: any system row still pending past a grace window longer than the
+ * longest consumer timeout (ask_user_question polls 300s) cannot still be
+ * awaited by a live turn, so mark it completed. Self-healing for current
+ * and future system-row producers alike.
+ */
+const STALE_SYSTEM_ROW_MS = 15 * 60 * 1000;
+export function gcStaleSystemRows(inDb: Database.Database, now: number = Date.now()): number {
+  const cutoff = new Date(now - STALE_SYSTEM_ROW_MS).toISOString();
+  return inDb
+    .prepare(
+      "UPDATE messages_in SET status = 'completed' WHERE kind = 'system' AND status = 'pending' AND timestamp <= ?",
+    )
+    .run(cutoff).changes;
+}
+
 export function getStuckProcessingIds(outDb: Database.Database): string[] {
   return (
     outDb.prepare("SELECT message_id FROM processing_ack WHERE status = 'processing'").all() as Array<{

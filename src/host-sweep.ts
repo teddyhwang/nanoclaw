@@ -42,6 +42,7 @@ import {
   markMessageFailed,
   retryWithBackoff,
   syncProcessingAcks,
+  gcStaleSystemRows,
   type ContainerState,
 } from './db/session-db.js';
 import { ACTIVE_CONVERSATION_WINDOW_MS, ACTIVE_IDLE_TIMEOUT, IDLE_TIMEOUT } from './config.js';
@@ -374,6 +375,16 @@ async function sweepSession(session: Session): Promise<void> {
     // 1. Sync processing_ack → messages_in status
     if (outDb) {
       syncProcessingAcks(inDb, outDb);
+    }
+
+    // 1b. GC stranded kind='system' MCP round-trip rows whose consumer
+    // timed out before acking (search_conversations / ask_user_question /
+    // generate_image). Past the grace window no live turn can still be
+    // awaiting them; left pending they accumulate unbounded. Cheap UPDATE,
+    // independent of outDb so it runs even before a container has started.
+    const gcd = gcStaleSystemRows(inDb);
+    if (gcd > 0) {
+      log.debug('GC stranded system rows', { sessionId: session.id, count: gcd });
     }
 
     // 2. Wake a container if work is due and nothing is running. Ordered
