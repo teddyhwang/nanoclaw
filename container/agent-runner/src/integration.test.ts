@@ -449,6 +449,47 @@ describe('poll loop integration', () => {
 
     await loopPromise.catch(() => {});
   });
+
+  it('retryable provider error with no result leaves the task row pending for host retry', async () => {
+    // Repro: degenerates dream empty-fire 2026-06-05. codex's MCP-init
+    // transport died (`rmcp ... session expired 404 on send initialized
+    // notification`) → codex exited 0 before any turn → the driver emitted a
+    // retryable `error` event with NO result. The OLD poll-loop logged it and
+    // marked the task completed anyway, so the dream silently did nothing and
+    // never re-ran. The fix: a retryable-with-no-result failure leaves the
+    // row pending so the host re-fires it.
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, trigger, platform_id, channel_type, content)
+         VALUES ('t-dream', 'task', datetime('now'), 'pending', 1, 'chan-1', 'discord', ?)`,
+      )
+      .run(JSON.stringify({ prompt: 'silent maintenance' }));
+
+    const provider = new MockProvider({}, undefined, {
+      retryableErrorNoResult:
+        'codex exited (0): ERROR rmcp::transport::worker: worker quit with fatal: ' +
+        'Client error: streamable HTTP session expired with 404 Not Found',
+    });
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
+
+    await sleep(1200);
+    controller.abort();
+
+    // The container tracks task lifecycle via processing_ack in outbound.db
+    // (the inbound.db row stays host-owned 'pending'). The invariant: the
+    // task must NOT be acked 'completed' — that's the empty-fire bug. It is
+    // either re-claimed 'processing' (a retry is mid-flight) or has no ack at
+    // all (cleared for re-pickup); never 'completed'.
+    const ack = getOutboundDb().prepare("SELECT status FROM processing_ack WHERE message_id = 't-dream'").get() as
+      | { status: string }
+      | undefined;
+    expect(ack?.status).not.toBe('completed');
+    // And it produced no outbound (it genuinely did nothing).
+    expect(getUndeliveredMessages()).toHaveLength(0);
+
+    await loopPromise.catch(() => {});
+  });
 });
 
 // Helper: run poll loop until aborted or timeout

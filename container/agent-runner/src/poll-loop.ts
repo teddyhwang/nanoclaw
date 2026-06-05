@@ -644,6 +644,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // setCurrentBatchReplyTarget's docstring for the full incident chain.
     setCurrentInReplyTo(routing.inReplyTo);
     setCurrentBatchReplyTarget(routing.inReplyTo);
+    // Set when processQuery threw a retryable-with-no-result failure; guards
+    // the markCompleted below so the host re-fires the task instead of the
+    // run silently completing (codex MCP-init empty-fire, 2026-06-05).
+    let retryableBatchFailure = false;
     try {
       const result = await processQuery(
         query,
@@ -680,6 +684,16 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       log(`Query error: ${errMsg}`);
+
+      // A retryable provider failure with no result (processQuery's
+      // `retryable provider error, no result:` throw) must NOT be marked
+      // completed — leaving the row pending lets the host re-fire it.
+      // Everything else still completes: a non-retryable error is terminal
+      // (re-running would just fail again), so we record the error fire and
+      // move on as before.
+      if (errMsg.startsWith('retryable provider error, no result:')) {
+        retryableBatchFailure = true;
+      }
 
       // Stale/corrupt continuation recovery: ask the provider whether
       // this error means the stored continuation is unusable, and clear
@@ -740,9 +754,15 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     }
 
     // Ensure completed even if processQuery ended without a result event
-    // (e.g. stream closed unexpectedly).
-    markCompleted(processingIds);
-    log(`Completed ${ids.length} message(s)`);
+    // (e.g. stream closed unexpectedly). EXCEPT a retryable-with-no-result
+    // failure: leaving those rows pending is what lets the host re-fire the
+    // task rather than silently completing a run that did nothing.
+    if (retryableBatchFailure) {
+      log(`Leaving ${processingIds.length} message(s) pending for host retry (retryable provider failure)`);
+    } else {
+      markCompleted(processingIds);
+      log(`Completed ${ids.length} message(s)`);
+    }
   }
 }
 
@@ -883,6 +903,16 @@ async function processQuery(
   // stream are follow-up-push continuations. Only the first is gated on
   // `addressed` (see the result-event handler for why).
   let firstResultSeen = false;
+  // A retryable provider error that arrived with no result this turn. The
+  // provider emits `error` as a stream event (not a throw), so without this
+  // the stream just closes and the finally + caller mark the batch
+  // completed — silently finishing a task that did nothing. The canonical
+  // case is codex's MCP-init transport failure (rmcp worker quit on the
+  // `initialized` notification → codex exits 0 before any turn), which used
+  // to empty-fire the degenerates dream (2026-06-05). When set and no
+  // result was seen, we throw at stream end so the caller's catch writes an
+  // `error` fire and leaves the row pending for the host to retry.
+  let retryableErrorWithoutResult: string | null = null;
   // SQLite-UTC stamp captured before the agent runs, so the addressed-
   // silent safety net can tell whether the agent delivered a chat
   // message via an MCP tool (send_file/send_message) during this turn —
@@ -1613,7 +1643,21 @@ async function processQuery(
             endedForCommand = true;
             query.end();
           }
+        } else if (event.type === 'error' && event.retryable && !firstResultSeen) {
+          // Remember the most recent retryable error that arrived without a
+          // result. Don't throw mid-stream — let the provider drain any
+          // trailing events (and a late result would clear this by setting
+          // firstResultSeen). Resolved after the for-await closes.
+          retryableErrorWithoutResult = event.message;
         }
+      }
+      // The stream closed with a retryable error and never produced a
+      // result — surface it as a throw so the caller's catch path records an
+      // `error` fire and leaves the task row pending for a host retry,
+      // instead of the finally/caller silently marking it completed.
+      if (retryableErrorWithoutResult && !firstResultSeen) {
+        streamErrored = true;
+        throw new Error(`retryable provider error, no result: ${retryableErrorWithoutResult}`);
       }
     } catch (err) {
       streamErrored = true;
