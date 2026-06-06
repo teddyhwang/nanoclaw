@@ -1060,6 +1060,11 @@ async function processQuery(
   // will kill the container and messages get reset to pending.
   let pollInFlight = false;
   let endedForCommand = false;
+  // One-shot: the accumulate-only "holding open for an in-flight task turn"
+  // log fires once per held turn, not on every poll tick (it would
+  // otherwise spam ~once/second for the whole dream — 255 lines observed
+  // 2026-06-06). Reset implicitly by the query ending (the closure dies).
+  let loggedHoldingForTask = false;
   // Wall-clock of the last SDK event consumed on the events for-await
   // below. Initialized at stream open (a half-open stream that never
   // emits anything would otherwise leave this at 0 and let the
@@ -1155,10 +1160,13 @@ async function processQuery(
           // complete; once it emits its result, the same gate will
           // unwind cleanly on a later poll.
           if (!mayEndQueryForAccumulateOnly({ activeSender, firstResultSeen })) {
-            log(
-              `Holding active query open — ${newMessages.length} accumulate-only ` +
-                `follow-up(s) pending but a task turn is still in flight (no result yet)`,
-            );
+            if (!loggedHoldingForTask) {
+              loggedHoldingForTask = true;
+              log(
+                `Holding active query open — ${newMessages.length} accumulate-only ` +
+                  `follow-up(s) pending but a task turn is still in flight (no result yet)`,
+              );
+            }
             return;
           }
           // End the active query so the outer loop can unwind. Without
