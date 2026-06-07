@@ -987,6 +987,31 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     });
   });
 
+  it('addressed + compacted + internal-only output: notifies after an earlier progress acknowledgement', async () => {
+    insertChannelDestination('boys-night');
+    const { writeMessageOut } = await import('./db/messages-out.js');
+    const turnStartedAt = '2026-06-07 20:04:00';
+    writeMessageOut({
+      id: 'progress-ack',
+      kind: 'chat',
+      channel_type: ROUTING.channelType,
+      platform_id: ROUTING.platformId,
+      content: JSON.stringify({ text: 'On it — checking now.' }),
+    });
+
+    dispatchResultText(
+      '<internal>Resumed after compaction; the requested action may have completed.</internal>',
+      ROUTING,
+      true,
+      turnStartedAt,
+      true,
+    );
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(2);
+    expect(JSON.parse(out[1].content).text).toContain('compacted before I could send a final status update');
+  });
+
   it('NOT addressed + zero output: keeps silent_turn_complete (ambient/maintenance unchanged)', () => {
     insertChannelDestination('boys-night');
 

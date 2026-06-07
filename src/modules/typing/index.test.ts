@@ -92,6 +92,18 @@ describe('classifyWakeCause', () => {
     });
   });
 
+  it('pattern-routed dedicated group request is addressed without an @mention', () => {
+    expect(
+      classifyWakeCause(
+        {
+          kind: 'chat-sdk',
+          content: JSON.stringify({ text: 'send the courier request', engageMode: 'pattern' }),
+        },
+        false,
+      ),
+    ).toEqual({ wakeCause: 'pattern', addressed: true });
+  });
+
   it('reply-to-bot in a group (no mention token) → reply-to-bot + addressed', () => {
     expect(
       classifyWakeCause({ kind: 'chat-sdk', content: msg('and the other thing?', 'plat-msg-123') }, false),

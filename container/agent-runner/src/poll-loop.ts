@@ -1,4 +1,4 @@
-import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
+import { findByName, findByRouting, getAllDestinations, type DestinationEntry } from './destinations.js';
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
 import {
   countChatMessagesSince,
@@ -691,6 +691,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         config.providerName,
         activeSender,
         addressed,
+        assistantName,
         taskFireContexts,
       );
       if (result.continuation && result.continuation !== continuation) {
@@ -915,13 +916,11 @@ async function processQuery(
   initialBatchIds: string[],
   providerName: string,
   activeSender: string | null,
-  // True when the initial batch @mentioned this agent or replied to it.
-  // Forwarded to dispatchResultText so a zero-output addressed turn
-  // delivers an explicit fallback rather than silent_turn_complete.
-  // Note: only the initial-turn dispatch is gated on this — follow-up
-  // pushes within a long-lived query keep the prior behavior (the
-  // follow-up path is ambient continuation, not a fresh direct address).
+  // True when the initial batch directly addressed this agent.
+  // Follow-up pushes compute and queue their own addressed bit below;
+  // a warm query can receive a completely new direct request.
   addressed: boolean,
+  assistantName: string,
   // Shared by reference with the follow-up poll closure so a follow-up
   // task that survives its pre-task script can register its own fire
   // context (see the scheduling-pre-task-followup hook). Pre-bug this was
@@ -933,11 +932,15 @@ async function processQuery(
   let queryContinuation: string | undefined;
   let done = false;
   let unwrappedNudged = false;
-  // Flips on the first `result` event. The initial @mention/reply-to-bot
-  // batch's response is the first result; later results in the same
-  // stream are follow-up-push continuations. Only the first is gated on
-  // `addressed` (see the result-event handler for why).
-  let firstResultSeen = false;
+  // Results arrive in push order. Preserve whether each push was directly
+  // addressed so a new request pushed into a warm query is not mistaken
+  // for ambient continuation (Nook 2026-06-07).
+  const pushAddressed: boolean[] = [addressed];
+  let resultIndex = 0;
+  // Claude compaction is normally transparent. If the resumed turn then
+  // ends without a final deliverable, surface a narrow user-facing notice
+  // instead of silently ending after an earlier progress acknowledgement.
+  let compactedSinceLastResult = false;
   // A retryable provider error that arrived with no result this turn. The
   // provider emits `error` as a stream event (not a throw), so without this
   // the stream just closes and the finally + caller mark the batch
@@ -1159,7 +1162,7 @@ async function processQuery(
           // accumulate-only rows pending and let the in-flight task
           // complete; once it emits its result, the same gate will
           // unwind cleanly on a later poll.
-          if (!mayEndQueryForAccumulateOnly({ activeSender, firstResultSeen })) {
+          if (!mayEndQueryForAccumulateOnly({ activeSender, firstResultSeen: resultIndex > 0 })) {
             if (!loggedHoldingForTask) {
               loggedHoldingForTask = true;
               log(
@@ -1519,6 +1522,7 @@ async function processQuery(
           .map((m) => taskFireContexts.find((c) => c.taskId === m.id))
           .filter((c): c is TaskFireContext => c !== undefined);
         registerPushContexts(pushTaskContexts);
+        pushAddressed.push(isAddressedTurn(keep, assistantName));
         query.push(prompt, followupImageBlocks.length > 0 ? followupImageBlocks : undefined);
         markCompleted(keptIds);
         // Refresh routing.inReplyTo so subsequent outbound rows reply to the
@@ -1628,16 +1632,8 @@ async function processQuery(
           // (send_message) mid-turn, or the message may not need a response
           // at all — either way the turn is finished.
           //
-          // `addressed` only gates the FIRST result: that's the response
-          // to the initial @mention/reply-to-bot batch. Subsequent
-          // results in this same stream come from follow-up pushes
-          // (ambient continuation within an already-active container) —
-          // those keep the prior silent-turn behavior so a long-lived
-          // warm container doesn't spam degraded fallbacks on every
-          // ambient lull. `initialBatchIds` is only completed once, on
-          // this same first result, so they move together.
-          const isFirstResult = !firstResultSeen;
-          firstResultSeen = true;
+          const resultAddressed = pushAddressed[resultIndex] ?? false;
+          resultIndex++;
           markCompleted(initialBatchIds);
           if (event.text) {
             // Attribute this result push-scoped: the newest unwritten
@@ -1650,8 +1646,9 @@ async function processQuery(
             const { hasUnwrapped, dispatched } = dispatchResultText(
               event.text,
               routing,
-              isFirstResult && addressed,
+              resultAddressed,
               turnStartedAt,
+              compactedSinceLastResult,
             );
             if (fireCtx && dispatched.length > 0) {
               fireCtx.dispatched.push(...dispatched);
@@ -1666,8 +1663,12 @@ async function processQuery(
                   `Your destinations: ${names}. ` +
                   `Please re-send your response with the correct wrapping.</system>`,
               );
+              pushAddressed.push(resultAddressed);
             }
+          } else if (resultAddressed && compactedSinceLastResult) {
+            dispatchResultText('', routing, true, turnStartedAt, true);
           }
+          compactedSinceLastResult = false;
           // Eager flush: a `result` means the turn finished. Write the
           // fire(s) now instead of waiting for the stream to close —
           // a warm agent-shared container holds the query open for many
@@ -1706,11 +1707,12 @@ async function processQuery(
             endedForCommand = true;
             query.end();
           }
-        } else if (event.type === 'error' && event.retryable && !firstResultSeen) {
+        } else if (event.type === 'progress' && event.message.startsWith('Context compacted')) {
+          compactedSinceLastResult = true;
+        } else if (event.type === 'error' && event.retryable && resultIndex === 0) {
           // Remember the most recent retryable error that arrived without a
           // result. Don't throw mid-stream — let the provider drain any
-          // trailing events (and a late result would clear this by setting
-          // firstResultSeen). Resolved after the for-await closes.
+          // trailing events. Resolved after the for-await closes.
           retryableErrorWithoutResult = event.message;
         }
       }
@@ -1718,7 +1720,7 @@ async function processQuery(
       // result — surface it as a throw so the caller's catch path records an
       // `error` fire and leaves the task row pending for a host retry,
       // instead of the finally/caller silently marking it completed.
-      if (retryableErrorWithoutResult && !firstResultSeen) {
+      if (retryableErrorWithoutResult && resultIndex === 0) {
         streamErrored = true;
         throw new Error(`retryable provider error, no result: ${retryableErrorWithoutResult}`);
       }
@@ -1852,6 +1854,7 @@ export function dispatchResultText(
   // Teddy DM landed fine, then got a bogus "produced no output" note).
   // Undefined for callers that don't track it — they keep prior behavior.
   turnStartedAt?: string,
+  compactedDuringTurn = false,
 ): { sent: number; hasUnwrapped: boolean; dispatched: DispatchedMessage[] } {
   const MESSAGE_RE = /<message\s+([^>]*)>([\s\S]*?)<\/message>/g;
 
@@ -1966,6 +1969,19 @@ export function dispatchResultText(
   // (e.g. agent emitted only `<internal>...</internal>`, or returned an
   // empty result).
   if (sent === 0) {
+    if (addressed && compactedDuringTurn) {
+      const dest = findByRouting(routing.channelType, routing.platformId);
+      if (dest) {
+        const body =
+          'My session compacted before I could send a final status update. ' +
+          'I may have completed the work; please ask me to confirm the result before relying on it.';
+        if (sendToDestination(dest, body, routing)) {
+          dispatched.push({ destination: dest.name, body });
+          sent++;
+          return { sent, hasUnwrapped, dispatched };
+        }
+      }
+    }
     if (addressed && isAwaitingSensitiveConfirmation(text)) {
       // EXPECTED pause, NOT a failure: the agent hit the sensitive-action
       // gate and is waiting for the user's in-chat Confirm tap. The gate

@@ -349,7 +349,14 @@ export function stopTypingRefresh(sessionId: string): void {
  * the suspicious ones; grep `Silent turn classified` + `addressed=true`
  * to surface them fleet-wide instead of guessing.
  */
-export type SilentWakeCause = 'task' | 'dm' | 'group-mention' | 'reply-to-bot' | 'group-ambient' | 'unknown';
+export type SilentWakeCause =
+  | 'task'
+  | 'dm'
+  | 'pattern'
+  | 'group-mention'
+  | 'reply-to-bot'
+  | 'group-ambient'
+  | 'unknown';
 
 /**
  * Pure classification of why a silent turn ended, split out so the rule
@@ -385,13 +392,20 @@ export function classifyWakeCause(
   let hasMentionToken = false;
   let isReply = false;
   try {
-    const parsed = JSON.parse(triggerRow.content) as { text?: string; replyTo?: { messageId?: string } };
+    const parsed = JSON.parse(triggerRow.content) as {
+      text?: string;
+      engageMode?: string;
+      replyTo?: { messageId?: string };
+    };
     const text = typeof parsed.text === 'string' ? parsed.text : '';
     // Discord <@id> / <@!id>, Slack <@U…>, Telegram @name — any platform
     // mention token. Coarse on purpose: this is a telemetry signal, not
     // an auth gate, and false-positives here only over-flag.
     hasMentionToken = /<@!?\w+>|(^|\s)@\w/.test(text);
     isReply = typeof parsed.replyTo?.messageId === 'string';
+    if (parsed.engageMode === 'pattern') {
+      return { wakeCause: 'pattern', addressed: true };
+    }
   } catch {
     // Non-JSON / unexpected shape — fall through with both false.
   }
