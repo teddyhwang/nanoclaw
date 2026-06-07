@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { formatVideoMarker, pickFrameCount, pickFrameTimestamps, processVideo } from './video.js';
+import {
+  formatVideoMarker,
+  parseGeminiVideoOutput,
+  pickFrameCount,
+  pickFrameTimestamps,
+  processVideo,
+} from './video.js';
 
 describe('pickFrameCount', () => {
   it('uses duration tiers', () => {
@@ -85,5 +91,37 @@ describe('processVideo guards', () => {
       },
     });
     expect(out).toBeNull();
+  });
+});
+
+describe('parseGeminiVideoOutput', () => {
+  it('parses well-formed structured JSON', () => {
+    const out = parseGeminiVideoOutput('{"transcript":"hello there","summary":"a person waves"}');
+    expect(out).toEqual({ transcript: 'hello there', summary: 'a person waves' });
+  });
+
+  it('strips ```json fences before parsing', () => {
+    const out = parseGeminiVideoOutput('```json\n{"transcript":"hi","summary":"s"}\n```');
+    expect(out).toEqual({ transcript: 'hi', summary: 's' });
+  });
+
+  it('recovers a leading transcript when a later field breaks JSON', () => {
+    // A malformed object: transcript is a valid JSON string literal but the
+    // summary value is unquoted, so JSON.parse throws. The leading
+    // transcript must still be recovered rather than the whole thing lost.
+    const malformed = '{"transcript":"I have loops that are running.","summary":broken}';
+    const out = parseGeminiVideoOutput(malformed);
+    expect(out?.transcript).toBe('I have loops that are running.');
+  });
+
+  it('un-escapes embedded quotes in a recovered transcript', () => {
+    const malformed = '{"transcript":"he said \\"hi\\" to me","summary":oops}';
+    const out = parseGeminiVideoOutput(malformed);
+    expect(out?.transcript).toBe('he said "hi" to me');
+  });
+
+  it('returns null for empty / unrecoverable input', () => {
+    expect(parseGeminiVideoOutput('')).toBeNull();
+    expect(parseGeminiVideoOutput('not json at all, no fields')).toBeNull();
   });
 });

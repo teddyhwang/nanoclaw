@@ -175,6 +175,20 @@ export {
   type SeriesStatus,
 } from '../modules/scheduling/schedule-store.js';
 
+// Host-side video processing. The engine already runs this internally on
+// inbound video *attachments* (session-manager.extractAttachmentFiles).
+// Re-exported so a host plugin can feed it a video fetched from a *URL*
+// (the Optimus watch-video plugin: yt-dlp → processVideo) and reuse the
+// single ffmpeg-frames + Gemini transcript/summary implementation rather
+// than forking a second copy host-side.
+export {
+  processVideo,
+  formatVideoMarker,
+  type ProcessVideoOpts,
+  type ProcessVideoResult,
+  type ProcessVideoFrame,
+} from '../media/video.js';
+
 // Messaging group queries for plugins that need to enumerate which
 // platforms the host owns (e.g. channel-bots driving startup-time
 // recoverMissedMessages over every wired chat). Read-only — write

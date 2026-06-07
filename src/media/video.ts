@@ -193,6 +193,53 @@ interface GeminiVideoOutput {
   summary: string;
 }
 
+/**
+ * Parse Gemini's response into `{ transcript, summary }`. With
+ * `responseSchema` the response is guaranteed-valid JSON, but this stays
+ * defensive in two ways so a long transcript is never silently lost (the
+ * failure that motivated the structured-output switch):
+ *   1. strip stray ```json fences if a model/route ignores responseMimeType;
+ *   2. if JSON.parse still throws, fall back to a lenient field extraction
+ *      so we recover whatever transcript/summary text we can rather than
+ *      returning null and dropping the whole analysis.
+ */
+export function parseGeminiVideoOutput(text: string): GeminiVideoOutput | null {
+  const stripped = text
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```\s*$/, '')
+    .trim();
+  if (!stripped) return null;
+
+  try {
+    const parsed = JSON.parse(stripped) as Partial<GeminiVideoOutput>;
+    return {
+      transcript: typeof parsed.transcript === 'string' ? parsed.transcript : '',
+      summary: typeof parsed.summary === 'string' ? parsed.summary : '',
+    };
+  } catch {
+    // Lenient recovery: pull the first string value for each key. Matches a
+    // JSON string literal (handling escaped quotes) so a malformed trailing
+    // field can't lose a well-formed leading transcript.
+    const grab = (key: string): string => {
+      const m = new RegExp(`"${key}"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"`).exec(stripped);
+      if (!m) return '';
+      try {
+        return JSON.parse(`"${m[1]}"`) as string;
+      } catch {
+        return m[1];
+      }
+    };
+    const transcript = grab('transcript');
+    const summary = grab('summary');
+    if (!transcript && !summary) return null;
+    log.warn('video: Gemini output was not valid JSON, recovered fields', {
+      recoveredTranscript: transcript.length,
+      recoveredSummary: summary.length,
+    });
+    return { transcript, summary };
+  }
+}
+
 async function analyseWithGemini(
   videoBytes: Buffer,
   mimeType: string,
@@ -204,6 +251,23 @@ async function analyseWithGemini(
 
     const result = await genai.models.generateContent({
       model: 'gemini-2.5-flash',
+      // Force structured JSON output. Without this the model hand-writes a
+      // JSON string, and a long transcript containing quotes/newlines
+      // routinely produces malformed JSON that `JSON.parse` rejects —
+      // observed live on a ~30-min interview clip where the whole
+      // transcript was lost to a parse error. `responseSchema` makes the
+      // API emit guaranteed-valid JSON for these two fields.
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: 'object',
+          properties: {
+            transcript: { type: 'string' },
+            summary: { type: 'string' },
+          },
+          required: ['transcript', 'summary'],
+        },
+      },
       contents: [
         {
           role: 'user',
@@ -216,10 +280,9 @@ async function analyseWithGemini(
             },
             {
               text:
-                'You are processing a short video shared in a chat. Return a JSON object with two keys:\n' +
+                'You are processing a video shared in a chat. Return a JSON object with two keys:\n' +
                 '  - "transcript": verbatim transcription of any spoken content (empty string if there is no speech)\n' +
-                '  - "summary": a 1–3 sentence description of what is visually happening — motion, on-screen text changes, scene transitions, anything a few static frames would miss. Be specific, no preamble.\n' +
-                'Output ONLY the JSON, no markdown fences, no commentary.',
+                '  - "summary": a 1–3 sentence description of what is visually happening — motion, on-screen text changes, scene transitions, anything a few static frames would miss. Be specific, no preamble.',
             },
           ],
         },
@@ -229,18 +292,7 @@ async function analyseWithGemini(
     const text = (result.text ?? '').trim();
     if (!text) return null;
 
-    // The model occasionally wraps in ```json fences despite the prompt;
-    // strip them defensively.
-    const stripped = text
-      .replace(/^```(?:json)?\s*/i, '')
-      .replace(/\s*```\s*$/, '')
-      .trim();
-
-    const parsed = JSON.parse(stripped) as Partial<GeminiVideoOutput>;
-    return {
-      transcript: typeof parsed.transcript === 'string' ? parsed.transcript : '',
-      summary: typeof parsed.summary === 'string' ? parsed.summary : '',
-    };
+    return parseGeminiVideoOutput(text);
   } catch (err) {
     log.error('video: Gemini analysis failed', {
       err: err instanceof Error ? err.message : String(err),
