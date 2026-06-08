@@ -119,6 +119,17 @@ export interface ChatSdkBridgeConfig {
   /** Platform-specific reply context extraction. */
   extractReplyContext?: ReplyContextExtractor;
   /**
+   * Platform-specific poll serialization. Discord delivers a native poll as a
+   * structured `poll` object on the raw payload with NO text body — without
+   * this hook the agent sees a blank message (v2 regression; v1 rendered polls
+   * via formatPollSummary). When set, the bridge calls it with the raw payload
+   * and appends the returned summary to the message text so the container agent
+   * can read the poll's question, options, and vote counts. Returns null when
+   * the raw payload carries no poll. Discord wires this; other platforms leave
+   * it undefined.
+   */
+  extractPollSummary?: (raw: Record<string, unknown>) => string | null;
+  /**
    * Whether this platform uses threads as the primary conversation unit.
    * See `ChannelAdapter.supportsThreads`. Declared by the calling channel
    * skill, not inferred, because some platforms (Discord) can be used either
@@ -575,6 +586,27 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     // isAddressedTurn keeps its permissive isMention behavior.
     if (config.botUserId) serialized.botUserId = config.botUserId;
     if (authoredBySelf) serialized.isBotMessage = true;
+
+    // Serialize a native poll into the message text. Discord delivers a poll
+    // as a structured object on `raw.poll` with an EMPTY text body, so without
+    // this the agent receives a blank message (v1 rendered it via
+    // formatPollSummary; the v2 chat-sdk path dropped it). Append the summary
+    // to whatever text exists (normally none) so the agent can read and reason
+    // about the poll. Best-effort: a formatter throw must not drop the message.
+    if (config.extractPollSummary && message.raw) {
+      try {
+        const pollSummary = config.extractPollSummary(message.raw as Record<string, unknown>);
+        if (pollSummary) {
+          const existing = typeof serialized.text === 'string' ? serialized.text.trim() : '';
+          serialized.text = existing ? `${existing}\n\n${pollSummary}` : pollSummary;
+        }
+      } catch (err) {
+        log.warn('extractPollSummary failed; message kept without poll text', {
+          messageId: message.id,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
 
     // Drop raw to save DB space (can be very large)
     serialized.raw = undefined;
