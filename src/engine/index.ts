@@ -299,9 +299,11 @@ export {
 // and an approval handler that fires on the actor's Confirm. See
 // knowledge/projects/sensitive-action-approvals.md (Phase 3).
 export {
+  requestApproval,
   requestConfirmation,
   registerApprovalHandler,
   notifyAgent,
+  type RequestApprovalOptions,
   type RequestConfirmationOptions,
   type ApprovalHandlerContext,
 } from '../modules/approvals/primitive.js';
