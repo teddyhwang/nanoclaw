@@ -12,9 +12,14 @@ import {
 import { computeRotationDate, evaluateRotation } from './session-rotation.js';
 import { TIMEZONE } from './timezone.js';
 import { MockProvider } from './providers/mock.js';
-import { runPollLoop } from './poll-loop.js';
+import { runPollLoop, requestGracefulShutdown, _resetShutdownStateForTests } from './poll-loop.js';
 
 beforeEach(() => {
+  // Clear any shutdown latch leaked by a prior test whose loop hadn't fully
+  // unwound (the abort()+catch pattern leaves runPollLoop running until a DB
+  // error breaks it). Without this, a graceful-shutdown test's latch can make
+  // the next test's loop exit immediately.
+  _resetShutdownStateForTests();
   initTestSessionDb();
   // Seed a destination so output parsing can resolve "discord-test" → routing
   getInboundDb()
@@ -27,6 +32,7 @@ beforeEach(() => {
 
 afterEach(() => {
   closeSessionDb();
+  _resetShutdownStateForTests();
 });
 
 function insertMessage(
@@ -489,6 +495,51 @@ describe('poll loop integration', () => {
     expect(getUndeliveredMessages()).toHaveLength(0);
 
     await loopPromise.catch(() => {});
+  });
+
+  it('SIGTERM mid-turn before any result leaves the row pending and exits the loop', async () => {
+    // Repro: Degenerates AI-Friends 2026-06-08. The host idle-timeout reaper
+    // SIGTERM'd the container while the codex turn was still in flight (no
+    // result yet). The OLD path had no SIGTERM handler, so the process was
+    // SIGKILLed mid-turn and the batched messages (incl. Teddy's @mention)
+    // were consumed with zero output. The fix: SIGTERM ends the active query
+    // cleanly; a turn cut short before any result leaves its rows PENDING for
+    // the next container, and the loop exits on its own.
+    insertMessage(
+      'm-cut',
+      { sender: 'Teddy', text: '@bot summarize this' },
+      { platformId: 'chan-1', channelType: 'discord', threadId: 'thread-1' },
+    );
+
+    // Provider blocks (no result) until end() is called, then closes empty.
+    const provider = new MockProvider({}, undefined, { blockUntilEndNoResult: true });
+
+    // The loop runs unbounded; graceful shutdown is what makes it return.
+    const loopPromise = runPollLoop({ provider, providerName: 'mock', cwd: '/tmp' });
+
+    // Wait until the turn is in flight (row claimed 'processing'), then reap.
+    await waitFor(() => {
+      const ack = getOutboundDb().prepare("SELECT status FROM processing_ack WHERE message_id = 'm-cut'").get() as
+        | { status: string }
+        | undefined;
+      return ack?.status === 'processing';
+    }, 2000);
+
+    requestGracefulShutdown();
+
+    // The loop must return on its own (no abort/timeout race needed).
+    await Promise.race([
+      loopPromise,
+      new Promise<void>((_, reject) => setTimeout(() => reject(new Error('loop did not exit on shutdown')), 2000)),
+    ]);
+
+    // The cut-short turn produced nothing and must NOT be marked completed —
+    // the next container re-processes it.
+    const ack = getOutboundDb().prepare("SELECT status FROM processing_ack WHERE message_id = 'm-cut'").get() as
+      | { status: string }
+      | undefined;
+    expect(ack?.status).not.toBe('completed');
+    expect(getUndeliveredMessages()).toHaveLength(0);
   });
 });
 

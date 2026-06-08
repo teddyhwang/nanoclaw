@@ -25,12 +25,29 @@ export function readonlyMountArgs(hostPath: string, containerPath: string): stri
   return ['-v', `${hostPath}:${containerPath}:ro`];
 }
 
-/** Stop a container by name. Uses execFileSync to avoid shell injection. */
-export function stopContainer(name: string): void {
+/**
+ * Stop a container by name. Name is regex-validated against shell injection.
+ *
+ * `gracePeriodSec` is the SIGTERM→SIGKILL window passed to `docker stop -t`.
+ * The default of 1s is fine for an idle container with no in-flight work, but
+ * an idle-timeout reap of a container whose agent is mid-turn needs a real
+ * grace window: `docker stop -t 1` sends SIGTERM, waits 1s, then SIGKILLs.
+ * The codex `app-server` (and the agent-runner that drives it) cannot finish
+ * or checkpoint a turn in 1s, so it dies mid-turn (exit 137) — which leaves
+ * codex's CODEX_HOME turn-state with a dangling/interrupted turn that the
+ * NEXT container inherits and aborts (`<turn_aborted>` on a brand-new thread),
+ * producing zero output and getting re-killed: a self-perpetuating poison on
+ * busy groups (Degenerates AI-Friends, 2026-06-08 — Teddy's mention batched
+ * into a fresh codex thread with tokens_used=0 and never answered). Callers
+ * that reap a possibly-active container pass a longer grace so the
+ * agent-runner's SIGTERM handler can wind the current turn down cleanly.
+ */
+export function stopContainer(name: string, gracePeriodSec = 1): void {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name)) {
     throw new Error(`Invalid container name: ${name}`);
   }
-  execSync(`${CONTAINER_RUNTIME_BIN} stop -t 1 ${name}`, { stdio: 'pipe' });
+  const grace = Number.isInteger(gracePeriodSec) && gracePeriodSec >= 0 ? gracePeriodSec : 1;
+  execSync(`${CONTAINER_RUNTIME_BIN} stop -t ${grace} ${name}`, { stdio: 'pipe' });
 }
 
 /** Ensure the container runtime is running, starting it if needed. */

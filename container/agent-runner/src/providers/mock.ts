@@ -13,6 +13,14 @@ export interface MockProviderBehavior {
    * for a host retry instead of marking it completed.
    */
   retryableErrorNoResult?: string;
+  /**
+   * After `init`, block WITHOUT emitting any `result` until `end()` is called,
+   * then close with no result — models a turn cut short by a SIGTERM-driven
+   * graceful shutdown (host reap) before the agent produced output. Used to
+   * assert the poll-loop leaves the row pending for the next container rather
+   * than silently completing it.
+   */
+  blockUntilEndNoResult?: boolean;
 }
 
 export class MockProvider implements AgentProvider {
@@ -50,6 +58,18 @@ export class MockProvider implements AgentProvider {
         // Failure mode: a retryable error with no result, then close.
         if (behavior.retryableErrorNoResult) {
           yield { type: 'error', message: behavior.retryableErrorNoResult, retryable: true };
+          return;
+        }
+
+        // Shutdown mode: block (no result) until end() is called, then close
+        // with no result — a turn cut short by a host reap mid-turn.
+        if (behavior.blockUntilEndNoResult) {
+          while (!ended && !aborted) {
+            await new Promise<void>((resolve) => {
+              waiting = resolve;
+            });
+            waiting = null;
+          }
           return;
         }
 

@@ -284,6 +284,50 @@ function generateId(): string {
   return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+// ── Graceful shutdown ─────────────────────────────────────────────────────
+//
+// The host reaps an idle (or ceiling-exceeded) container via `docker stop`,
+// which SIGTERMs the agent-runner (PID-child under tini) before SIGKILLing it
+// after the grace window. Without a handler, SIGTERM kills the runner — and
+// the codex `app-server` it drives — mid-turn, leaving codex's CODEX_HOME
+// turn-state with a dangling/interrupted turn that the next container inherits
+// and aborts, producing zero output and getting re-killed: a self-perpetuating
+// poison on busy groups (Degenerates AI-Friends, 2026-06-08). Trapping SIGTERM
+// and ending the active query lets the provider finish/checkpoint the current
+// turn cleanly. `query.end()` (NOT abort) is deliberate: for codex it ends the
+// stdin stream so the in-flight turn drains to `turn/completed` rather than
+// being `turn/interrupt`ed; for claude it closes the SDK input iterator the
+// same way. The loop then exits at its next top-of-loop check.
+let shuttingDown = false;
+let activeQueryForShutdown: { end(): void } | null = null;
+
+export function isShuttingDown(): boolean {
+  return shuttingDown;
+}
+
+/**
+ * Begin a graceful wind-down: stop accepting new turns and end the active
+ * query so the current turn drains cleanly. Idempotent. Exported for the
+ * entrypoint's SIGTERM handler and for tests; the poll loop also consults
+ * `shuttingDown` at the top of each iteration to break out.
+ */
+export function requestGracefulShutdown(): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log('SIGTERM — graceful shutdown requested; ending active query so the current turn drains');
+  try {
+    activeQueryForShutdown?.end();
+  } catch (err) {
+    log(`graceful shutdown: query.end() failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/** Test-only: reset the module shutdown latch between cases. */
+export function _resetShutdownStateForTests(): void {
+  shuttingDown = false;
+  activeQueryForShutdown = null;
+}
+
 /**
  * Read inbound image attachments off disk and convert to Anthropic
  * vision content blocks. The host writes raw bytes to
@@ -401,6 +445,14 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   let pollCount = 0;
   let isFirstPoll = true;
   while (true) {
+    // Graceful shutdown: a SIGTERM (host reap) ends the active query and sets
+    // this latch. Break BEFORE dequeuing more work so we don't start a turn
+    // we can't finish before docker's SIGKILL — leaving its rows pending for
+    // the next container instead of consuming them with no output.
+    if (shuttingDown) {
+      log('Shutdown latch set — exiting poll loop without starting a new turn');
+      break;
+    }
     // Skip system messages — they're responses for MCP tools (e.g., ask_user_question)
     const messages = getPendingMessages(isFirstPoll).filter((m) => m.kind !== 'system');
     isFirstPoll = false;
@@ -662,6 +714,12 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       systemContext: config.systemContext,
       imageBlocks: imageBlocks.length > 0 ? imageBlocks : undefined,
     });
+    // Expose the active query to the SIGTERM handler so a host reap can end
+    // it cleanly mid-turn (drain to completion) instead of the process being
+    // SIGKILLed with the turn still open. If shutdown was requested in the
+    // window between the loop-top check and here, end immediately.
+    activeQueryForShutdown = query;
+    if (shuttingDown) query.end();
 
     // Process the query while concurrently polling for new messages
     const skippedSet = new Set(skipped);
@@ -683,6 +741,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // the markCompleted below so the host re-fires the task instead of the
     // run silently completing (codex MCP-init empty-fire, 2026-06-05).
     let retryableBatchFailure = false;
+    // Whether this turn produced at least one result event. Read after the
+    // try/finally to decide, on a shutdown-cut-short turn, between completing
+    // the rows (work happened) and leaving them pending (work didn't).
+    let sawResult = false;
     try {
       const result = await processQuery(
         query,
@@ -694,6 +756,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         assistantName,
         taskFireContexts,
       );
+      sawResult = Boolean(result.sawResult);
       if (result.continuation && result.continuation !== continuation) {
         const isNewThread = continuation === undefined;
         // A dream's fresh thread is EPHEMERAL — it must never become the
@@ -781,6 +844,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         }
       }
     } finally {
+      // The turn is over (success, error, or shutdown-drain) — stop exposing
+      // this query to the SIGTERM handler so a late reap can't call .end() on
+      // an already-settled query.
+      activeQueryForShutdown = null;
       clearCurrentInReplyTo();
       // Drop the DB-published target too. Once the key is absent the MCP
       // subprocess falls back to its legacy heuristic — correct for any
@@ -795,6 +862,16 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // task rather than silently completing a run that did nothing.
     if (retryableBatchFailure) {
       log(`Leaving ${processingIds.length} message(s) pending for host retry (retryable provider failure)`);
+    } else if (shuttingDown && !sawResult) {
+      // SIGTERM ended the query before it produced any result — the turn was
+      // cut short by the host reap, not finished. Leave the rows pending so
+      // the next container actually answers them (Teddy's AI-Friends mention,
+      // 2026-06-08, was consumed with zero output exactly because a cut-short
+      // turn still marked its rows completed). A drain that DID produce a
+      // result falls through to markCompleted below — that work really happened.
+      log(
+        `Shutdown mid-turn before any result — leaving ${processingIds.length} message(s) pending for next container`,
+      );
     } else {
       markCompleted(processingIds);
       log(`Completed ${ids.length} message(s)`);
@@ -842,6 +919,12 @@ function formatMessagesWithCommands(messages: MessageInRow[], nativeSlashCommand
 
 interface QueryResult {
   continuation?: string;
+  // True if at least one `result` event arrived before the stream settled.
+  // Lets the caller distinguish a turn that actually produced output from one
+  // that was cut short (e.g. a SIGTERM-driven `query.end()` mid-turn), so the
+  // latter leaves its rows pending for the next container instead of silently
+  // completing them.
+  sawResult?: boolean;
 }
 
 /**
@@ -1746,7 +1829,7 @@ async function processQuery(
     flushUnwrittenTaskFires();
   }
 
-  return { continuation: queryContinuation };
+  return { continuation: queryContinuation, sawResult: resultIndex > 0 };
 }
 
 function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {

@@ -41,16 +41,35 @@ describe('readonlyMountArgs', () => {
 });
 
 describe('stopContainer', () => {
-  it('calls docker stop for valid container names', () => {
+  it('calls docker stop with the default 1s grace for valid container names', () => {
     stopContainer('nanoclaw-test-123');
     expect(mockExecSync).toHaveBeenCalledWith(`${CONTAINER_RUNTIME_BIN} stop -t 1 nanoclaw-test-123`, {
       stdio: 'pipe',
     });
   });
 
-  it('rejects names with shell metacharacters', () => {
+  it('passes a custom SIGTERM grace window through to docker stop -t', () => {
+    stopContainer('nanoclaw-test-123', 12);
+    expect(mockExecSync).toHaveBeenCalledWith(`${CONTAINER_RUNTIME_BIN} stop -t 12 nanoclaw-test-123`, {
+      stdio: 'pipe',
+    });
+  });
+
+  it('falls back to a 1s grace for a non-integer or negative grace', () => {
+    stopContainer('nanoclaw-test-123', -5);
+    expect(mockExecSync).toHaveBeenCalledWith(`${CONTAINER_RUNTIME_BIN} stop -t 1 nanoclaw-test-123`, {
+      stdio: 'pipe',
+    });
+    mockExecSync.mockClear();
+    stopContainer('nanoclaw-test-123', 2.5);
+    expect(mockExecSync).toHaveBeenCalledWith(`${CONTAINER_RUNTIME_BIN} stop -t 1 nanoclaw-test-123`, {
+      stdio: 'pipe',
+    });
+  });
+
+  it('rejects names with shell metacharacters (even with a grace arg)', () => {
     expect(() => stopContainer('foo; rm -rf /')).toThrow('Invalid container name');
-    expect(() => stopContainer('foo$(whoami)')).toThrow('Invalid container name');
+    expect(() => stopContainer('foo$(whoami)', 12)).toThrow('Invalid container name');
     expect(() => stopContainer('foo`id`')).toThrow('Invalid container name');
     expect(mockExecSync).not.toHaveBeenCalled();
   });

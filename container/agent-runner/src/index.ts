@@ -35,13 +35,27 @@ import './providers/index.js';
 import { createProvider, type ProviderName } from './providers/factory.js';
 import type { McpServerConfig } from './providers/types.js';
 import { loadProviderPlugins } from './engine/provider-plugins.js';
-import { runPollLoop } from './poll-loop.js';
+import { runPollLoop, requestGracefulShutdown } from './poll-loop.js';
 
 function log(msg: string): void {
   console.error(`[agent-runner] ${msg}`);
 }
 
 const CWD = '/workspace/agent';
+
+// Graceful shutdown on host reap. `docker stop` SIGTERMs the runner (tini
+// forwards it) before SIGKILLing after the grace window (killContainer's
+// REAP_GRACE_SEC). Without this handler the default SIGTERM disposition kills
+// the process — and the codex app-server it drives — mid-turn, poisoning
+// codex's CODEX_HOME turn-state for the next container (Degenerates
+// AI-Friends empty-fire, 2026-06-08). requestGracefulShutdown() ends the
+// active query so the in-flight turn drains cleanly, then the poll loop exits.
+// Registered at module load so a SIGTERM during early boot (before main()'s
+// loop) is still caught and latched. Idempotent across repeated signals.
+process.on('SIGTERM', () => {
+  log('SIGTERM received — requesting graceful shutdown');
+  requestGracefulShutdown();
+});
 
 async function main(): Promise<void> {
   const config = loadConfig();

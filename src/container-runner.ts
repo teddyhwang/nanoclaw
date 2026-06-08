@@ -362,6 +362,19 @@ function cleanupSeededDream(agentGroup: AgentGroup): void {
   }
 }
 
+/**
+ * SIGTERM→SIGKILL grace (seconds) for a reaped container that may have an
+ * agent mid-turn. `docker stop -t <grace>` gives the agent-runner's SIGTERM
+ * handler time to wind the current turn down cleanly (so the provider — codex
+ * especially — finishes/checkpoints instead of dying mid-turn and poisoning
+ * its CODEX_HOME state for the next run; see stopContainer's note). Sized to
+ * cover a normal turn's tail (a tool call + final generation), not an
+ * arbitrarily long turn — the absolute-ceiling reaper still bounds the worst
+ * case. The agent-runner's own SIGTERM drain is capped below this so the
+ * process exits before docker's SIGKILL fires in the common case.
+ */
+const REAP_GRACE_SEC = 12;
+
 /** Kill a container for a session. */
 export function killContainer(sessionId: string, reason: string, onExit?: () => void): void {
   const entry = activeContainers.get(sessionId);
@@ -377,7 +390,7 @@ export function killContainer(sessionId: string, reason: string, onExit?: () => 
 
   log.info('Killing container', { sessionId, reason, containerName: entry.containerName });
   try {
-    stopContainer(entry.containerName);
+    stopContainer(entry.containerName, REAP_GRACE_SEC);
   } catch {
     entry.process.kill('SIGKILL');
   }
