@@ -307,3 +307,9 @@ export {
   type RequestConfirmationOptions,
   type ApprovalHandlerContext,
 } from '../modules/approvals/primitive.js';
+// Owner/admin role reads. Re-exported so a host plugin can target the
+// install owner specifically (e.g. the auto-escalation gate, which must
+// route approval to the owner rather than the standard pickApprover
+// precedence that also includes group admins).
+export { getOwners, getGlobalAdmins } from '../modules/permissions/db/user-roles.js';
+export type { UserRole } from '../types.js';
