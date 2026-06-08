@@ -130,6 +130,21 @@ export interface ChatSdkBridgeConfig {
    */
   extractPollSummary?: (raw: Record<string, unknown>) => string | null;
   /**
+   * Last-resort visibility for platform content the bridge has NO handler for.
+   * Runs only when a message would otherwise reach the agent with EMPTY text
+   * (every known extractor — text, attachments, poll — produced nothing) yet the
+   * raw payload carries a recognizable-but-unhandled element (interactive
+   * components/buttons, an unknown embed type, a sticker, …). Returns a short
+   * human-legible stub like "[unsupported content: poll]" so the agent SEES that
+   * something arrived it can't read — the precondition for it to escalate via
+   * report_unfulfillable. Without this, a silently-dropped feature produces a
+   * blank message the agent can't perceive as a gap (the 2026-06-08 Discord-poll
+   * blind spot). Returns null when there's genuinely nothing unhandled (an
+   * ordinarily-empty message — e.g. an attachment-only post already covered
+   * above — must NOT be stubbed). Discord wires this; other platforms may.
+   */
+  describeUnsupportedContent?: (raw: Record<string, unknown>) => string | null;
+  /**
    * Whether this platform uses threads as the primary conversation unit.
    * See `ChannelAdapter.supportsThreads`. Declared by the calling channel
    * skill, not inferred, because some platforms (Discord) can be used either
@@ -602,6 +617,33 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         }
       } catch (err) {
         log.warn('extractPollSummary failed; message kept without poll text', {
+          messageId: message.id,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    // Last-resort visibility for unhandled content. If, after every extractor
+    // above, the message STILL has no text AND no usable attachments, but the
+    // raw payload carries something we don't render (interactive components, an
+    // unknown embed type, …), surface a stub so the agent perceives the gap and
+    // can escalate via report_unfulfillable. Gated on genuinely-empty so a
+    // normal attachment-only post (already represented via content.attachments)
+    // is never stubbed. Best-effort: a describer throw must not drop the message.
+    const hasText = typeof serialized.text === 'string' && serialized.text.trim().length > 0;
+    const hasAttachments = Array.isArray(serialized.attachments) && serialized.attachments.length > 0;
+    if (config.describeUnsupportedContent && message.raw && !hasText && !hasAttachments) {
+      try {
+        const stub = config.describeUnsupportedContent(message.raw as Record<string, unknown>);
+        if (stub) {
+          serialized.text = stub;
+          log.info('Surfaced unsupported content as a stub for agent visibility', {
+            messageId: message.id,
+            stub,
+          });
+        }
+      } catch (err) {
+        log.warn('describeUnsupportedContent failed; message kept as-is', {
           messageId: message.id,
           err: err instanceof Error ? err.message : String(err),
         });
