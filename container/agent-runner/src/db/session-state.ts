@@ -180,3 +180,29 @@ export function clearAllSessionTrackingState(): number {
     .run();
   return result.changes;
 }
+
+/**
+ * One-shot rotation notice for the NEXT fresh thread's first prompt.
+ *
+ * Written at rotation time (pressure-driven consolidate-then-rotate and the
+ * lazy drift/cold-resume rotations in the poll-loop) and consumed exactly
+ * once when the poll-loop builds the first prompt of a new thread — so the
+ * fresh thread learns that context was rotated and where the handoff note /
+ * archived transcripts live, instead of silently knowing nothing.
+ *
+ * Deliberately a SEPARATE key from the `continuation:%` shapes:
+ * `clearAllSessionTrackingState()` must wipe the thread state without
+ * destroying the notice that explains the wipe.
+ */
+const ROTATION_NOTICE_KEY = 'rotation_notice';
+
+export function setRotationNotice(notice: string): void {
+  setValue(ROTATION_NOTICE_KEY, notice);
+}
+
+/** Read-and-delete: a notice is only ever delivered to one fresh thread. */
+export function consumeRotationNotice(): string | undefined {
+  const v = getValue(ROTATION_NOTICE_KEY);
+  if (v !== undefined) deleteValue(ROTATION_NOTICE_KEY);
+  return v;
+}

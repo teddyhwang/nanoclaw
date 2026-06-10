@@ -29,6 +29,16 @@ export interface AgentProvider {
    * before it ever replies. Providers without an on-disk transcript omit this.
    */
   maybeRotateContinuation?(continuation: string, cwd: string): string | null;
+
+  /**
+   * Optional proactive-rotation threshold (tokens). When the provider can
+   * report live context usage on `result` events (`tokensUsed`), return the
+   * context size at which the poll-loop should run a consolidate-then-rotate
+   * handoff BEFORE the provider's own auto-compaction fires (see
+   * `pressure-rotation.ts`). Return null (or omit) to disable — providers
+   * without a usage signal degrade to day-boundary/drift rotation only.
+   */
+  pressureRotationTokens?(): number | null;
 }
 
 /**
@@ -152,7 +162,12 @@ export interface AgentQuery {
 
 export type ProviderEvent =
   | { type: 'init'; continuation: string }
-  | { type: 'result'; text: string | null }
+  /**
+   * Turn finished. `tokensUsed`, when the provider can supply it, is the
+   * total context size (input + cache + output tokens of the turn's last
+   * model call) — the signal the poll-loop's pressure-rotation check reads.
+   */
+  | { type: 'result'; text: string | null; tokensUsed?: number }
   | { type: 'error'; message: string; retryable: boolean; classification?: string }
   | { type: 'progress'; message: string }
   /**

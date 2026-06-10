@@ -11,14 +11,23 @@ import {
 import { writeTaskFire, type TaskFireDispatch } from './db/task-fires.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import {
+  clearAllSessionTrackingState,
   clearContinuation,
   clearContinuationStartedAt,
   clearCurrentBatchReplyTarget,
+  consumeRotationNotice,
   migrateLegacyContinuation,
   setContinuation,
   setContinuationStartedAt,
   setCurrentBatchReplyTarget,
+  setRotationNotice,
 } from './db/session-state.js';
+import {
+  buildPressureHandoffPrompt,
+  buildRotationNotice,
+  shouldRequestPressureHandoff,
+  type PressureState,
+} from './pressure-rotation.js';
 import { computeRotationDate } from './session-rotation.js';
 import { TIMEZONE } from './timezone.js';
 import { clearCurrentInReplyTo, setCurrentInReplyTo } from './current-batch.js';
@@ -430,6 +439,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     if (rotateReason) {
       log(`Rotating session — ${rotateReason}; starting fresh`);
       clearContinuation(config.providerName);
+      setRotationNotice(buildRotationNotice(rotateReason));
       continuation = undefined;
     }
   }
@@ -703,12 +713,27 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       if (reason) {
         log(`Rotating session before query: ${reason} (previous continuation: ${continuation})`);
         clearContinuation(config.providerName);
+        setRotationNotice(buildRotationNotice(reason));
         continuation = undefined;
       }
     }
 
+    // A fresh thread that follows a rotation gets a one-shot pointer to the
+    // handoff note / archived transcripts, so it doesn't silently start with
+    // zero knowledge of an in-flight conversation (the "it compacted and
+    // then forgot everything" experience). Dream runs skip it — their fresh
+    // thread is ephemeral maintenance, not the conversation's successor.
+    let promptForQuery = prompt;
+    if (continuation === undefined && !config.isDreamRun) {
+      const notice = consumeRotationNotice();
+      if (notice) {
+        log('Prepending rotation notice to fresh-thread prompt');
+        promptForQuery = `<system>${notice}</system>\n\n${prompt}`;
+      }
+    }
+
     const query = config.provider.query({
-      prompt,
+      prompt: promptForQuery,
       continuation,
       cwd: config.cwd,
       systemContext: config.systemContext,
@@ -755,9 +780,18 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         addressed,
         assistantName,
         taskFireContexts,
+        // Proactive pressure rotation is for the persistent interactive
+        // thread only — a dream's fresh thread is ephemeral by design.
+        config.isDreamRun ? null : (config.provider.pressureRotationTokens?.() ?? null),
       );
       sawResult = Boolean(result.sawResult);
-      if (result.continuation && result.continuation !== continuation) {
+      if (result.pressureRotated) {
+        // processQuery already cleared the persisted continuation rows and
+        // wrote the rotation notice; drop the in-memory id too, or the next
+        // warm dequeue would resume — and re-persist — the retired thread.
+        log('Pressure rotation completed — next turn starts a fresh thread');
+        continuation = undefined;
+      } else if (result.continuation && result.continuation !== continuation) {
         const isNewThread = continuation === undefined;
         // A dream's fresh thread is EPHEMERAL — it must never become the
         // group's persisted continuation. Persisting it would clobber the
@@ -925,6 +959,11 @@ interface QueryResult {
   // latter leaves its rows pending for the next container instead of silently
   // completing them.
   sawResult?: boolean;
+  // True when a context-pressure handoff ran and the persisted continuation
+  // rows were cleared inside this stream (see pressure-rotation.ts). The
+  // caller must drop its in-memory continuation so the next dequeue starts
+  // a fresh thread instead of resuming — and re-persisting — the retired one.
+  pressureRotated?: boolean;
 }
 
 /**
@@ -1011,6 +1050,11 @@ async function processQuery(
   // every follow-up task fire (the dream/maintenance common case, since
   // those agents are usually already-active) was silently never recorded.
   taskFireContexts: TaskFireContext[],
+  // Context-pressure threshold (tokens) above which a consolidate-then-
+  // rotate handoff runs before the provider's own auto-compaction can fire
+  // (see pressure-rotation.ts). Null disables: dream runs (ephemeral
+  // thread) and providers without a `tokensUsed` signal.
+  pressureThresholdTokens: number | null = null,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
@@ -1020,6 +1064,17 @@ async function processQuery(
   // for ambient continuation (Nook 2026-06-07).
   const pushAddressed: boolean[] = [addressed];
   let resultIndex = 0;
+  // Pressure-rotation state machine: 'idle' until a result reports context
+  // tokens above the threshold → push ONE handoff turn ('handoff-requested')
+  // → when that turn's result arrives, clear the persisted continuation
+  // state, stamp the rotation notice, and end the query ('rotated').
+  let pressureState: PressureState = 'idle';
+  // Index into pushAddressed of the handoff push, so the rotation step only
+  // fires on the handoff turn's own result (a user follow-up that slipped in
+  // ahead of it keeps its result attribution untouched).
+  let pressureHandoffPushIndex = -1;
+  // Reported to the caller so it drops its in-memory continuation.
+  let pressureRotated = false;
   // Claude compaction is normally transparent. If the resumed turn then
   // ends without a final deliverable, surface a narrow user-facing notice
   // instead of silently ending after an earlier progress acknowledgement.
@@ -1766,6 +1821,39 @@ async function processQuery(
           // remains as a backstop for contexts that never see a result.
           flushUnwrittenTaskFires();
 
+          // ── Context-pressure consolidate-then-rotate ──
+          // (pressure-rotation.ts). Runs BEFORE the task-only stream-end
+          // below so a handoff requested on a task-only result keeps the
+          // query open long enough to execute.
+          const thisResultPushIndex = resultIndex - 1;
+          if (pressureState === 'handoff-requested' && thisResultPushIndex >= pressureHandoffPushIndex) {
+            // The handoff turn finished — its durable note is written (or
+            // the agent flubbed it; either way the markdown archive from
+            // maybeRotateContinuation's next pass and memory/ still exist).
+            // Rotation is poll-loop-owned and deterministic: clear the
+            // persisted thread state, leave a one-shot notice for the
+            // fresh thread, and end the stream so the next dequeue starts
+            // clean.
+            const cleared = clearAllSessionTrackingState();
+            setRotationNotice(buildRotationNotice('context pressure — proactive pre-compaction rotation'));
+            pressureState = 'rotated';
+            pressureRotated = true;
+            log(`Pressure rotation: handoff turn complete — cleared ${cleared} session-tracking row(s), ending stream`);
+            if (!endedForCommand) {
+              endedForCommand = true;
+              query.end();
+            }
+          } else if (shouldRequestPressureHandoff(pressureState, event.tokensUsed, pressureThresholdTokens)) {
+            pressureState = 'handoff-requested';
+            pressureHandoffPushIndex = pushAddressed.length;
+            log(
+              `Context pressure: ${event.tokensUsed} tokens >= ${pressureThresholdTokens} — ` +
+                `pushing consolidate-then-rotate handoff turn`,
+            );
+            query.push(buildPressureHandoffPrompt(event.tokensUsed as number, pressureThresholdTokens as number));
+            pushAddressed.push(false);
+          }
+
           // Bug 6 (telegram_dm_teddy 23folg, 2026-05-16): end the stream
           // after a task-only turn's result. `activeSender` is null when
           // the trigger was a task row (tasks have no chat sender — the
@@ -1785,7 +1873,12 @@ async function processQuery(
           // accumulate-only / cross-sender stream-ends below. A chat
           // turn (activeSender set) is left open as before so a human
           // can follow up without re-spawning the SDK.
-          if (!activeSender && taskFireContexts.length > 0 && !endedForCommand) {
+          if (
+            !activeSender &&
+            taskFireContexts.length > 0 &&
+            !endedForCommand &&
+            pressureState !== 'handoff-requested'
+          ) {
             log('Task-only turn complete — ending stream so the container can idle-kill');
             endedForCommand = true;
             query.end();
@@ -1829,7 +1922,7 @@ async function processQuery(
     flushUnwrittenTaskFires();
   }
 
-  return { continuation: queryContinuation, sawResult: resultIndex > 0 };
+  return { continuation: queryContinuation, sawResult: resultIndex > 0, pressureRotated };
 }
 
 function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {

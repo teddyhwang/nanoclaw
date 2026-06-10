@@ -6,6 +6,7 @@ import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '
 
 import { clearContainerToolInFlight, setContainerToolInFlight, touchHeartbeat } from '../db/connection.js';
 import { clearContinuationStartedAt, getContinuationStartedAt } from '../db/session-state.js';
+import { resolvePressureThresholdTokens } from '../pressure-rotation.js';
 import { evaluateRotation } from '../session-rotation.js';
 import { EMPTY_STATS, type SessionStats } from '../session-stats.js';
 import { TIMEZONE } from '../timezone.js';
@@ -519,6 +520,34 @@ function readClaudeSessionStats(continuation: string): SessionStats {
   return stats;
 }
 
+/**
+ * Anthropic API usage block shape (the fields we read). Every assistant
+ * message in the SDK stream carries one for its underlying model call.
+ */
+export interface ApiUsageShape {
+  input_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_read_input_tokens?: number;
+  output_tokens?: number;
+}
+
+/**
+ * Current context footprint of a model call: prompt tokens (fresh + both
+ * cache classes) plus the output appended to the thread. Undefined when
+ * the usage block is absent or carries no numeric fields.
+ */
+export function contextTokensFromUsage(usage: ApiUsageShape | undefined): number | undefined {
+  if (!usage) return undefined;
+  const parts = [
+    usage.input_tokens,
+    usage.cache_creation_input_tokens,
+    usage.cache_read_input_tokens,
+    usage.output_tokens,
+  ].filter((n): n is number => typeof n === 'number' && Number.isFinite(n));
+  if (parts.length === 0) return undefined;
+  return parts.reduce((a, b) => a + b, 0);
+}
+
 export class ClaudeProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = true;
 
@@ -547,6 +576,16 @@ export class ClaudeProvider implements AgentProvider {
   isSessionInvalid(err: unknown): boolean {
     const msg = err instanceof Error ? err.message : String(err);
     return STALE_SESSION_RE.test(msg);
+  }
+
+  /**
+   * Proactive-rotation threshold for the poll-loop's pressure check:
+   * default 70% of the auto-compact window (so the consolidate-then-rotate
+   * handoff runs well before the SDK's own mid-turn compaction), operator-
+   * overridable via PRESSURE_ROTATION_TOKENS / PRESSURE_ROTATION_RATIO.
+   */
+  pressureRotationTokens(): number | null {
+    return resolvePressureThresholdTokens(process.env, Number(CLAUDE_CODE_AUTO_COMPACT_WINDOW));
   }
 
   /**
@@ -700,6 +739,12 @@ export class ClaudeProvider implements AgentProvider {
     async function* translateEvents(): AsyncGenerator<ProviderEvent> {
       let messageCount = 0;
       let lastAssistantTextWithMessage: string | null = null;
+      // Live context size, refreshed from each assistant message's API
+      // usage block. The LAST assistant call's prompt+output tokens are
+      // the thread's current context footprint — attached to `result`
+      // events so the poll-loop's pressure-rotation check can fire
+      // BEFORE the SDK's own auto-compaction does.
+      let lastContextTokens: number | undefined;
       for await (const message of sdkResult) {
         if (aborted) return;
         messageCount++;
@@ -710,6 +755,9 @@ export class ClaudeProvider implements AgentProvider {
         if (message.type === 'system' && message.subtype === 'init') {
           yield { type: 'init', continuation: message.session_id };
         } else if (message.type === 'assistant') {
+          const usage = (message as { message?: { usage?: ApiUsageShape } }).message?.usage;
+          const contextTokens = contextTokensFromUsage(usage);
+          if (contextTokens !== undefined) lastContextTokens = contextTokens;
           const assistantText = extractAssistantText(message);
           if (assistantText && MESSAGE_BLOCK_RE.test(assistantText)) {
             lastAssistantTextWithMessage = assistantText;
@@ -718,7 +766,7 @@ export class ClaudeProvider implements AgentProvider {
           const rawText = 'result' in message ? ((message as { result?: string }).result ?? null) : null;
           const text = selectResultTextForDelivery(rawText, lastAssistantTextWithMessage);
           lastAssistantTextWithMessage = null;
-          yield { type: 'result', text };
+          yield { type: 'result', text, tokensUsed: lastContextTokens };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'rate_limit_event') {
