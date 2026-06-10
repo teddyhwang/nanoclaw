@@ -932,6 +932,9 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         // context (see pollUpdateInbound for id/dedupe semantics).
         if (config.fetchPollUpdate) {
           const fetchPollUpdate = config.fetchPollUpdate;
+          // Defensive: a re-entrant setup() must not strand the previous
+          // instance's pending timers.
+          pollVoteDebouncer?.clear();
           pollVoteDebouncer = createPollVoteDebouncer(POLL_UPDATE_DEBOUNCE_MS, async (vote) => {
             const update = await fetchPollUpdate(vote);
             if (!update || !update.text.trim()) return;

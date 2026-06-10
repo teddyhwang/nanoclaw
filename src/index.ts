@@ -105,6 +105,11 @@ async function main(): Promise<void> {
             isGroup: message.isGroup,
             isBotMessage: message.isBotMessage,
             isSelfMessage: message.isSelfMessage,
+            // Accumulate-only contract: without this passthrough an
+            // InboundMessage stamped isBackfill (poll-update refreshes,
+            // history replay) reaches evaluateEngage and a pattern-mode
+            // always-on wiring would WAKE on ambient context.
+            isBackfill: message.isBackfill,
           },
         }).catch((err) => {
           log.error('Failed to route inbound message', { channelType: adapter.channelType, err });
