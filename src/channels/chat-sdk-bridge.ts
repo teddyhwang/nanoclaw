@@ -98,6 +98,33 @@ export type ReplyContextExtractor = (
   raw: Record<string, any>,
 ) => ReplyContext | null | Promise<ReplyContext | null>;
 
+/**
+ * A MESSAGE_POLL_VOTE_ADD / MESSAGE_POLL_VOTE_REMOVE gateway event, parsed
+ * from the forwarded Discord payload. `guildId` is absent for DM polls —
+ * the bridge ignores those (the DirectMessagePolls intent is not requested
+ * and the DM thread encoding differs).
+ */
+export interface PollVoteEvent {
+  guildId?: string;
+  channelId: string;
+  messageId: string;
+  userId: string;
+  answerId?: number;
+  added: boolean;
+}
+
+/**
+ * Freshly rendered poll state returned by `fetchPollUpdate`. `text` is the
+ * full re-rendered summary (question, per-option counts, voter names);
+ * `sender`/`senderId` optionally attribute the update to the poll's author
+ * so the container formatter has a sender to display.
+ */
+export interface PollUpdateContent {
+  text: string;
+  sender?: string;
+  senderId?: string;
+}
+
 export interface ChatSdkBridgeConfig {
   adapter: Adapter;
   concurrency?: ConcurrencyStrategy;
@@ -126,9 +153,25 @@ export interface ChatSdkBridgeConfig {
    * and appends the returned summary to the message text so the container agent
    * can read the poll's question, options, and vote counts. Returns null when
    * the raw payload carries no poll. Discord wires this; other platforms leave
-   * it undefined.
+   * it undefined. May return a Promise — extractors that need an authenticated
+   * REST round-trip (voter names, a referenced poll message's final results)
+   * are awaited, mirroring `extractReplyContext`.
    */
-  extractPollSummary?: (raw: Record<string, unknown>) => string | null;
+  extractPollSummary?: (raw: Record<string, unknown>) => string | null | Promise<string | null>;
+  /**
+   * Live poll vote-count refresh. When set, the bridge consumes forwarded
+   * MESSAGE_POLL_VOTE_ADD / MESSAGE_POLL_VOTE_REMOVE gateway events (which
+   * reach the local webhook server only when the platform adapter requests
+   * the GuildMessagePolls intent), debounces them per poll message, and calls
+   * this hook to re-fetch and re-render the poll's current state. The result
+   * is injected as an accumulate-only inbound row (`isBackfill: true` — never
+   * wakes the agent) whose id is content-addressed, so an unchanged re-render
+   * dedupes against the session DB's ON CONFLICT(id) DO NOTHING insert instead
+   * of stacking duplicate context. Return null to suppress (e.g. message no
+   * longer exists, has no poll, or fetch failed). Guild polls only — DM vote
+   * events carry no guild_id and are dropped before this hook runs.
+   */
+  fetchPollUpdate?: (event: PollVoteEvent) => Promise<PollUpdateContent | null>;
   /**
    * Last-resort visibility for platform content the bridge has NO handler for.
    * Runs only when a message would otherwise reach the agent with EMPTY text
@@ -533,6 +576,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
   let state: SqliteStateAdapter;
   let setupConfig: ChannelSetup;
   let gatewayAbort: AbortController | null = null;
+  let pollVoteDebouncer: PollVoteDebouncer | null = null;
 
   async function messageToInbound(
     message: ChatMessage,
@@ -610,7 +654,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     // about the poll. Best-effort: a formatter throw must not drop the message.
     if (config.extractPollSummary && message.raw) {
       try {
-        const pollSummary = config.extractPollSummary(message.raw as Record<string, unknown>);
+        const pollSummary = await config.extractPollSummary(message.raw as Record<string, unknown>);
         if (pollSummary) {
           const existing = typeof serialized.text === 'string' ? serialized.text.trim() : '';
           serialized.text = existing ? `${existing}\n\n${pollSummary}` : pollSummary;
@@ -882,8 +926,32 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       if (gatewayAdapter.startGatewayListener) {
         gatewayAbort = new AbortController();
 
+        // Live poll vote refresh — one debouncer per bridge instance so each
+        // Discord workspace keeps its own timer map. The flush asks the host
+        // to re-render current poll state and injects it as accumulate-only
+        // context (see pollUpdateInbound for id/dedupe semantics).
+        if (config.fetchPollUpdate) {
+          const fetchPollUpdate = config.fetchPollUpdate;
+          pollVoteDebouncer = createPollVoteDebouncer(POLL_UPDATE_DEBOUNCE_MS, async (vote) => {
+            const update = await fetchPollUpdate(vote);
+            if (!update || !update.text.trim()) return;
+            const { channelThreadId, inbound } = pollUpdateInbound(
+              adapter.name,
+              vote,
+              update,
+              new Date().toISOString(),
+            );
+            await setupConfig.onInbound(adapter.channelIdFromThreadId(channelThreadId), channelThreadId, inbound);
+          });
+        }
+
         // Start local HTTP server to receive forwarded Gateway events (including interactions)
-        const webhookUrl = await startLocalWebhookServer(gatewayAdapter, setupConfig, config.botToken);
+        const webhookUrl = await startLocalWebhookServer(
+          gatewayAdapter,
+          setupConfig,
+          config.botToken,
+          pollVoteDebouncer ?? undefined,
+        );
 
         // Exponential backoff capped at 1h. Without this, an unrecoverable
         // failure (e.g., TokenInvalid) restarts ~10×/sec and Discord's
@@ -1118,6 +1186,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
 
     async teardown() {
       gatewayAbort?.abort();
+      pollVoteDebouncer?.clear();
       await chat.shutdown();
       log.info('Chat SDK bridge shut down', { adapter: adapter.name });
     },
@@ -1264,6 +1333,126 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
 }
 
 /**
+ * Trailing debounce for poll vote bursts. A flurry of votes (poll just
+ * posted, everyone answering at once) collapses into one refresh 30s after
+ * the last vote, instead of one REST fetch + one context row per click.
+ */
+const POLL_UPDATE_DEBOUNCE_MS = 30_000;
+
+export interface PollVoteDebouncer {
+  onVote(vote: PollVoteEvent): void;
+  clear(): void;
+}
+
+/**
+ * Parse a forwarded MESSAGE_POLL_VOTE_ADD / MESSAGE_POLL_VOTE_REMOVE gateway
+ * payload. Returns null when the payload is missing the fields we need or
+ * the event type isn't a poll vote.
+ */
+export function parsePollVoteGatewayEvent(type: string, data: Record<string, unknown>): PollVoteEvent | null {
+  const added = type === 'GATEWAY_MESSAGE_POLL_VOTE_ADD';
+  if (!added && type !== 'GATEWAY_MESSAGE_POLL_VOTE_REMOVE') return null;
+  if (typeof data.channel_id !== 'string' || typeof data.message_id !== 'string') return null;
+  return {
+    guildId: typeof data.guild_id === 'string' ? data.guild_id : undefined,
+    channelId: data.channel_id,
+    messageId: data.message_id,
+    userId: typeof data.user_id === 'string' ? data.user_id : '',
+    answerId: typeof data.answer_id === 'number' ? data.answer_id : undefined,
+    added,
+  };
+}
+
+/** FNV-1a over the rendered text — stable id component for state-identical re-renders. */
+export function pollVoteContentHash(text: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
+}
+
+/**
+ * Build the synthetic inbound row for a refreshed poll state.
+ *
+ * - The id is content-addressed (`<pollMsgId>:pollupdate:<hash(text)>`): the
+ *   session DB inserts with ON CONFLICT(id) DO NOTHING, so re-rendering an
+ *   unchanged poll (vote added then removed, host restart replay) silently
+ *   dedupes instead of stacking identical context rows. There is no
+ *   inbound-edit path — each state change is a NEW row by design.
+ * - `isBackfill: true` is the router contract for accumulate-only: store with
+ *   trigger=0, never run engagement. A vote is ambient context, not a wake.
+ * - The thread id mirrors the Discord adapter's `encodeThreadId` guild form
+ *   (`<adapter>:<guildId>:<channelId>`). Polls inside a Discord thread will
+ *   address the thread id in the channel slot — accepted: the REST fetch
+ *   works either way and threaded polls are rare.
+ */
+export function pollUpdateInbound(
+  adapterName: string,
+  vote: PollVoteEvent,
+  update: PollUpdateContent,
+  timestamp: string,
+): { channelThreadId: string; inbound: InboundMessage } {
+  const channelThreadId = `${adapterName}:${vote.guildId}:${vote.channelId}`;
+  return {
+    channelThreadId,
+    inbound: {
+      id: `${vote.messageId}:pollupdate:${pollVoteContentHash(update.text)}`,
+      kind: 'chat-sdk',
+      content: {
+        text: update.text,
+        sender: update.sender,
+        senderName: update.sender,
+        senderId: update.senderId,
+      },
+      timestamp,
+      isMention: false,
+      isGroup: true,
+      isBackfill: true,
+    },
+  };
+}
+
+/**
+ * Per-poll trailing debounce. Guild polls only — DM vote events have no
+ * guild_id (and would need the DirectMessagePolls intent anyway). The flush
+ * callback re-fetches current state, so only the LATEST vote event per poll
+ * is kept. Flush errors are contained here: a failed REST fetch must never
+ * become an unhandled rejection inside the webhook server.
+ */
+export function createPollVoteDebouncer(
+  delayMs: number,
+  flush: (vote: PollVoteEvent) => Promise<void>,
+): PollVoteDebouncer {
+  const timers = new Map<string, ReturnType<typeof setTimeout>>();
+  return {
+    onVote(vote: PollVoteEvent) {
+      if (!vote.guildId) return;
+      const key = `${vote.channelId}:${vote.messageId}`;
+      const existing = timers.get(key);
+      if (existing) clearTimeout(existing);
+      timers.set(
+        key,
+        setTimeout(() => {
+          timers.delete(key);
+          flush(vote).catch((err) => {
+            log.warn('Poll update flush failed', {
+              messageId: vote.messageId,
+              err: err instanceof Error ? err.message : String(err),
+            });
+          });
+        }, delayMs),
+      );
+    },
+    clear() {
+      for (const t of timers.values()) clearTimeout(t);
+      timers.clear();
+    },
+  };
+}
+
+/**
  * Start a local HTTP server to receive forwarded Gateway events.
  * This is needed because the Gateway listener in webhook-forwarding mode
  * sends ALL raw events (including INTERACTION_CREATE for button clicks)
@@ -1273,6 +1462,7 @@ function startLocalWebhookServer(
   adapter: GatewayAdapter,
   setupConfig: ChannelSetup,
   botToken?: string,
+  pollVotes?: PollVoteDebouncer,
 ): Promise<string> {
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
@@ -1280,7 +1470,7 @@ function startLocalWebhookServer(
       req.on('data', (chunk: Buffer) => chunks.push(chunk));
       req.on('end', () => {
         const body = Buffer.concat(chunks).toString();
-        handleForwardedEvent(body, adapter, setupConfig, botToken)
+        handleForwardedEvent(body, adapter, setupConfig, botToken, pollVotes)
           .then(() => {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end('{"ok":true}');
@@ -1307,11 +1497,24 @@ async function handleForwardedEvent(
   adapter: GatewayAdapter,
   setupConfig: ChannelSetup,
   botToken?: string,
+  pollVotes?: PollVoteDebouncer,
 ): Promise<void> {
   let event: { type: string; data: Record<string, unknown> };
   try {
     event = JSON.parse(body);
   } catch {
+    return;
+  }
+
+  // Live poll vote events (arrive only when the adapter requests the
+  // GuildMessagePolls intent). Consumed here — the adapter's handleWebhook
+  // has no handler for them, and the debounce keeps a vote burst from
+  // becoming one REST fetch per click.
+  if (event.type === 'GATEWAY_MESSAGE_POLL_VOTE_ADD' || event.type === 'GATEWAY_MESSAGE_POLL_VOTE_REMOVE') {
+    if (pollVotes && event.data) {
+      const vote = parsePollVoteGatewayEvent(event.type, event.data);
+      if (vote) pollVotes.onVote(vote);
+    }
     return;
   }
 

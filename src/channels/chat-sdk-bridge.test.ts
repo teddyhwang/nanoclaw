@@ -1,12 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
 
 import {
   createChatSdkBridge,
+  createPollVoteDebouncer,
   enrichAttachments,
   htmlToMarkdown,
   isSelfAuthoredChatSdkMessage,
+  parsePollVoteGatewayEvent,
+  pollUpdateInbound,
   RECOVERY_PER_PAGE_MAX,
   recoveryPageBudget,
   splitForLimit,
@@ -489,5 +492,162 @@ describe('isSelfAuthoredChatSdkMessage', () => {
   it('is false (never silently drops) when the marker is absent', () => {
     expect(isSelfAuthoredChatSdkMessage(undefined)).toBe(false);
     expect(isSelfAuthoredChatSdkMessage(null)).toBe(false);
+  });
+});
+
+describe('parsePollVoteGatewayEvent', () => {
+  const data = {
+    user_id: 'u1',
+    channel_id: 'c1',
+    message_id: 'm1',
+    guild_id: 'g1',
+    answer_id: 2,
+  };
+
+  it('parses a vote-add event', () => {
+    expect(parsePollVoteGatewayEvent('GATEWAY_MESSAGE_POLL_VOTE_ADD', data)).toEqual({
+      guildId: 'g1',
+      channelId: 'c1',
+      messageId: 'm1',
+      userId: 'u1',
+      answerId: 2,
+      added: true,
+    });
+  });
+
+  it('parses a vote-remove event', () => {
+    const vote = parsePollVoteGatewayEvent('GATEWAY_MESSAGE_POLL_VOTE_REMOVE', data);
+    expect(vote?.added).toBe(false);
+  });
+
+  it('returns null for non-poll-vote event types', () => {
+    expect(parsePollVoteGatewayEvent('GATEWAY_MESSAGE_CREATE', data)).toBeNull();
+    expect(parsePollVoteGatewayEvent('GATEWAY_INTERACTION_CREATE', data)).toBeNull();
+  });
+
+  it('returns null when channel or message id is missing', () => {
+    expect(parsePollVoteGatewayEvent('GATEWAY_MESSAGE_POLL_VOTE_ADD', { user_id: 'u1' })).toBeNull();
+  });
+
+  it('leaves guildId undefined for DM votes', () => {
+    const vote = parsePollVoteGatewayEvent('GATEWAY_MESSAGE_POLL_VOTE_ADD', {
+      user_id: 'u1',
+      channel_id: 'c1',
+      message_id: 'm1',
+    });
+    expect(vote?.guildId).toBeUndefined();
+  });
+});
+
+describe('pollUpdateInbound', () => {
+  const vote = { guildId: 'g1', channelId: 'c1', messageId: 'm1', userId: 'u1', answerId: 1, added: true };
+
+  it('builds an accumulate-only inbound with a content-addressed id', () => {
+    const { channelThreadId, inbound } = pollUpdateInbound(
+      'discord',
+      vote,
+      { text: '📊 Poll: lunch?\n- pizza: 2 votes', sender: 'Teddy', senderId: 'u9' },
+      '2026-06-09T12:00:00.000Z',
+    );
+    expect(channelThreadId).toBe('discord:g1:c1');
+    expect(inbound.kind).toBe('chat-sdk');
+    expect(inbound.isBackfill).toBe(true);
+    expect(inbound.isMention).toBe(false);
+    expect(inbound.id.startsWith('m1:pollupdate:')).toBe(true);
+    const content = inbound.content as Record<string, unknown>;
+    expect(content.text).toContain('pizza');
+    expect(content.sender).toBe('Teddy');
+    expect(content.senderName).toBe('Teddy');
+    expect(content.senderId).toBe('u9');
+  });
+
+  it('produces the SAME id for identical poll state and a different id when state changes', () => {
+    const a = pollUpdateInbound('discord', vote, { text: 'state A' }, 't1').inbound.id;
+    const b = pollUpdateInbound('discord', vote, { text: 'state A' }, 't2').inbound.id;
+    const c = pollUpdateInbound('discord', vote, { text: 'state B' }, 't1').inbound.id;
+    expect(a).toBe(b);
+    expect(a).not.toBe(c);
+  });
+});
+
+describe('createPollVoteDebouncer', () => {
+  const guildVote = (messageId: string) => ({
+    guildId: 'g1',
+    channelId: 'c1',
+    messageId,
+    userId: 'u1',
+    answerId: 1,
+    added: true,
+  });
+
+  it('collapses a burst of votes on one poll into a single trailing flush', async () => {
+    vi.useFakeTimers();
+    try {
+      const flushed: string[] = [];
+      const d = createPollVoteDebouncer(1000, async (v) => {
+        flushed.push(v.messageId);
+      });
+      d.onVote(guildVote('m1'));
+      d.onVote(guildVote('m1'));
+      d.onVote(guildVote('m1'));
+      await vi.advanceTimersByTimeAsync(999);
+      expect(flushed).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(flushed).toEqual(['m1']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('debounces per poll message — two polls flush independently', async () => {
+    vi.useFakeTimers();
+    try {
+      const flushed: string[] = [];
+      const d = createPollVoteDebouncer(1000, async (v) => {
+        flushed.push(v.messageId);
+      });
+      d.onVote(guildVote('m1'));
+      d.onVote(guildVote('m2'));
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(flushed.sort()).toEqual(['m1', 'm2']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('drops DM votes (no guildId)', async () => {
+    vi.useFakeTimers();
+    try {
+      const flushed: string[] = [];
+      const d = createPollVoteDebouncer(1000, async (v) => {
+        flushed.push(v.messageId);
+      });
+      d.onVote({ channelId: 'c1', messageId: 'm1', userId: 'u1', added: true });
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(flushed).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('contains flush rejections (no unhandled rejection) and clear() cancels pending timers', async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      const d = createPollVoteDebouncer(1000, async () => {
+        calls++;
+        throw new Error('rest fetch failed');
+      });
+      d.onVote(guildVote('m1'));
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(calls).toBe(1);
+
+      d.onVote(guildVote('m2'));
+      d.clear();
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(calls).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
