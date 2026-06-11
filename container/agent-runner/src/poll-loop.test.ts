@@ -974,6 +974,87 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(control).toHaveLength(1);
   });
 
+  it('task turn: suppresses a final <message> summary to a destination already delivered mid-turn (2026-06-10 AI Friends recap double-post)', async () => {
+    // Daily-recap shape: the task agent sent the recap mid-turn via
+    // send_message (a kind='chat' row to ai-friends), then appended a final
+    // <message to="ai-friends">Recap sent (#29021).</message>. The body text
+    // differs from the recap, so the exact-text dedup (hasChatMessageTextSince)
+    // misses it and the channel gets a SECOND message. On a task turn we
+    // suppress any final block to a destination that already received a
+    // tool-sent chat row this turn (one-message task contract).
+    insertChannelDestination('ai-friends');
+    const { writeMessageOut } = await import('./db/messages-out.js');
+    const turnStartedAt = '2026-06-10T00:00:00';
+    // Simulate send_message's outbound row — the actual recap, written mid-turn.
+    writeMessageOut({
+      id: 'recap-out-1',
+      kind: 'chat',
+      channel_type: ROUTING.channelType,
+      platform_id: ROUTING.platformId,
+      content: JSON.stringify({ text: 'Daily recap: lots happened today across the channels.' }),
+    });
+
+    // Final response: a DIFFERENT-text summary block to the same destination.
+    dispatchResultText(
+      '<message to="ai-friends">Recap sent (#29021).</message>',
+      ROUTING,
+      /* addressed */ false,
+      turnStartedAt,
+      /* compactedDuringTurn */ false,
+      /* taskTurn */ true,
+    );
+
+    const out = getUndeliveredMessages();
+    // The mid-turn recap row, plus a silent_turn_complete control row — and
+    // crucially NO second 'Recap sent' chat row to the channel.
+    const summaryRows = out.filter((m) => {
+      try {
+        return JSON.parse(m.content).text?.includes?.('Recap sent');
+      } catch {
+        return false;
+      }
+    });
+    expect(summaryRows).toHaveLength(0);
+    const control = out.filter((m) => JSON.parse(m.content).action === 'silent_turn_complete');
+    expect(control).toHaveLength(1);
+  });
+
+  it('chat turn (not task): a final <message> after a mid-turn tool send to the same destination is NOT suppressed', async () => {
+    // The task-turn suppression must NOT bleed into chat turns: an addressed
+    // chat turn may legitimately send a file/message via a tool and then a
+    // separate follow-up <message> to the same channel. Only task turns owe
+    // "exactly one message".
+    insertChannelDestination('boys-night');
+    const { writeMessageOut } = await import('./db/messages-out.js');
+    const turnStartedAt = '2026-06-10T00:00:00';
+    writeMessageOut({
+      id: 'tool-out-1',
+      kind: 'chat',
+      channel_type: ROUTING.channelType,
+      platform_id: ROUTING.platformId,
+      content: JSON.stringify({ text: 'Here is the file.', files: ['x.pdf'] }),
+    });
+
+    dispatchResultText(
+      '<message to="boys-night">And here is the follow-up note.</message>',
+      ROUTING,
+      /* addressed */ true,
+      turnStartedAt,
+      /* compactedDuringTurn */ false,
+      /* taskTurn */ false,
+    );
+
+    const out = getUndeliveredMessages();
+    const followup = out.filter((m) => {
+      try {
+        return JSON.parse(m.content).text === 'And here is the follow-up note.';
+      } catch {
+        return false;
+      }
+    });
+    expect(followup).toHaveLength(1);
+  });
+
   it('addressed + <internal>-only output: suppresses degraded fallback', () => {
     insertChannelDestination('boys-night');
 

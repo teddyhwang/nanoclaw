@@ -233,6 +233,39 @@ export function hasChatMessageTextSince(sinceIso: string, text: string): boolean
 }
 
 /**
+ * True when this turn already delivered a chat message to the given
+ * destination (channel_type + platform_id + thread_id), regardless of text.
+ *
+ * Unlike `hasChatMessageTextSince`, this matches on destination alone. It
+ * exists for task turns, where the contract is "exactly one message": the
+ * agent is expected to deliver its content mid-turn via `send_message` /
+ * `send_file`, then end silently. Models nonetheless often append a final
+ * `<message to="X">…</message>` summary/ack ("Recap sent (#29021).") to the
+ * SAME destination — different text, so the exact-text dedup misses it, and
+ * the channel gets a second, unwanted message (AI Friends daily recap,
+ * 2026-06-10). On a task turn we suppress any final block to a destination
+ * that already received a tool-sent chat row this turn.
+ *
+ * Uses `timestamp > sinceIso` (not `>=`) for the same second-granularity
+ * reason as `hasChatMessageTextSince`.
+ */
+export function hasChatMessageToDestinationSince(
+  sinceIso: string,
+  dest: { channel_type: string; platform_id: string },
+): boolean {
+  const row = getOutboundDb()
+    .prepare(
+      `SELECT 1 FROM messages_out
+       WHERE kind = 'chat' AND timestamp > ?
+         AND channel_type = ? AND platform_id = ?
+       LIMIT 1`,
+    )
+    .get(sinceIso, dest.channel_type, dest.platform_id);
+  // bun:sqlite returns null (not undefined) when no row matches.
+  return row != null;
+}
+
+/**
  * Current SQLite UTC timestamp string — matches `messages_out.timestamp`
  * formatting (`datetime('now')`) so `countChatMessagesSince` comparisons
  * are exact. Capture this at turn start.

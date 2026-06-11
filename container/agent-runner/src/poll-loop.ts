@@ -3,6 +3,7 @@ import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } 
 import {
   countChatMessagesSince,
   hasChatMessageTextSince,
+  hasChatMessageToDestinationSince,
   getReplyTargetMessageIdBySeq,
   getRoutingBySeq,
   outboundDbNow,
@@ -1153,6 +1154,11 @@ async function processQuery(
   registerPushContexts([...taskFireContexts]);
   const mostRecentTaskContext = (): TaskFireContext | null => pickPushScopedContext(pushes);
   let streamErrored = false;
+  // Lower bound for the task-turn destination dedup, advanced after each
+  // result so the dedup only ever sees tool-sends from the CURRENT result's
+  // turn — never an earlier turn's legitimate send in the same processQuery.
+  // See dispatchResultText's `taskTurnDedupSince` param.
+  let resultBoundaryAt = turnStartedAt;
 
   // Write a fire row for every still-unwritten task context. Called at
   // the `result` event (eager — a result means the turn is done) AND in
@@ -1781,12 +1787,19 @@ async function processQuery(
             // note for why this beats the prior overall-most-recent walk.
             const fireCtx = mostRecentTaskContext();
             if (fireCtx) fireCtx.assistantText = event.text;
+            // A task turn = this result push is attributed to a task fire and
+            // no human addressed it. Such turns owe "exactly one message" and
+            // must not append a final summary block to a destination they
+            // already delivered to mid-turn via send_message/send_file.
+            const isTaskTurn = !!fireCtx && !resultAddressed;
             const { hasUnwrapped, dispatched } = dispatchResultText(
               event.text,
               routing,
               resultAddressed,
               turnStartedAt,
               compactedSinceLastResult,
+              isTaskTurn,
+              resultBoundaryAt,
             );
             if (fireCtx && dispatched.length > 0) {
               fireCtx.dispatched.push(...dispatched);
@@ -1807,6 +1820,15 @@ async function processQuery(
             dispatchResultText('', routing, true, turnStartedAt, true);
           }
           compactedSinceLastResult = false;
+          // Advance the per-result dedup boundary. A single processQuery can
+          // service multiple result pushes (task fire + deferred chat
+          // follow-up); turnStartedAt is captured once and would let an
+          // EARLIER push's legit send to a destination suppress a LATER,
+          // distinct push's message to the same destination (cross-turn
+          // bleed — broke `mixed task + chat batch` integration test).
+          // Scoping the task-turn destination dedup to "since the previous
+          // result boundary" confines it to this push's own mid-turn sends.
+          resultBoundaryAt = outboundDbNow();
           // Eager flush: a `result` means the turn finished. Write the
           // fire(s) now instead of waiting for the stream to close —
           // a warm agent-shared container holds the query open for many
@@ -2031,6 +2053,27 @@ export function dispatchResultText(
   // Undefined for callers that don't track it — they keep prior behavior.
   turnStartedAt?: string,
   compactedDuringTurn = false,
+  // True when this result belongs to a scheduled-task turn (no human in the
+  // loop this turn). Task turns follow a "deliver mid-turn, end silent"
+  // contract: the agent sends its content via `send_message` / `send_file`,
+  // then the final response should be `<internal>` or nothing. Models often
+  // append a final `<message to="X">` summary/ack to a destination they
+  // already delivered to this turn (different text, so the exact-text dedup
+  // misses it) → a second, unwanted channel message (AI Friends daily recap
+  // 2026-06-10). On a task turn we suppress any final block to a destination
+  // that already received a tool-sent chat row SINCE `taskTurnDedupSince`.
+  // Scoped to task turns so legitimate chat-turn follow-ups (file + separate
+  // text) are unaffected.
+  taskTurn = false,
+  // Lower bound for the task-turn destination dedup. MUST be the boundary of
+  // THIS result's turn (the outbound-DB stamp just before this result's
+  // provider turn began), not the whole-query `turnStartedAt`. A single
+  // `processQuery` handles multiple result pushes (task turn, then a deferred
+  // chat follow-up) sharing one `turnStartedAt`; scanning from `turnStartedAt`
+  // would let an EARLIER turn's legitimate send to the same channel suppress
+  // a LATER turn's distinct message (integration `mixed task + chat batch`
+  // regression). Defaults to `turnStartedAt` for callers with a single turn.
+  taskTurnDedupSince = turnStartedAt,
 ): { sent: number; hasUnwrapped: boolean; dispatched: DispatchedMessage[] } {
   const MESSAGE_RE = /<message\s+([^>]*)>([\s\S]*?)<\/message>/g;
 
@@ -2103,6 +2146,23 @@ export function dispatchResultText(
     if (turnStartedAt && hasChatMessageTextSince(turnStartedAt, body)) {
       log(`Suppressing duplicate final <message to="${toName}"> block already delivered via MCP tool`);
       continue;
+    }
+    if (taskTurn && taskTurnDedupSince) {
+      const destChannelType = dest.type === 'channel' ? dest.channelType : 'agent';
+      const destPlatformId = dest.type === 'channel' ? dest.platformId : dest.agentGroupId;
+      if (
+        destChannelType &&
+        destPlatformId &&
+        hasChatMessageToDestinationSince(taskTurnDedupSince, {
+          channel_type: destChannelType,
+          platform_id: destPlatformId,
+        })
+      ) {
+        log(
+          `Suppressing final <message to="${toName}"> on task turn — destination already delivered a message this turn (one-message task contract)`,
+        );
+        continue;
+      }
     }
     seen.add(dedupKey);
     const sentOk = sendToDestination(dest, body, routing, block.replyToSeq);
