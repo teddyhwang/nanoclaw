@@ -304,3 +304,86 @@ describe('Phase 5 — admin-controlled per-agent gate disable', () => {
     expect(delivered).toHaveLength(1);
   });
 });
+
+describe('source-chat card routing — merged agent-shared groups (2026-06-15)', () => {
+  // A second, SIBLING channel in the same agent group — the chat the trigger
+  // actually came from. The shared session is pinned to MG_PUBLIC (the
+  // canonical channel), so without the source-coords stamp the card would
+  // misroute to MG_PUBLIC's platform id (the boys-night → ai-friends bug).
+  const SOURCE_CHANNEL = 'discord';
+  const SOURCE_PLATFORM = 'chan-source';
+
+  function seedSiblingSource(): void {
+    createMessagingGroup({
+      id: 'mg-source',
+      channel_type: SOURCE_CHANNEL,
+      platform_id: SOURCE_PLATFORM,
+      name: 'Source',
+      is_group: 1,
+      unknown_sender_policy: 'public',
+      created_at: now(),
+    });
+  }
+
+  const base = {
+    groupFolder: FOLDER,
+    integration: 'google',
+    tool: 'google_call', // unmapped ⇒ require_confirmation
+    args: {},
+    rawSenderId: '777',
+    senderDisplayName: 'JCho',
+  };
+
+  it('delivers the card to the SOURCE chat, not the session canonical chat', async () => {
+    seedGroupAndSession(1); // session pinned to MG_PUBLIC (platform 'chan-x')
+    seedSiblingSource();
+    const r = await decideSensitiveGate({
+      ...base,
+      sourceChannelType: SOURCE_CHANNEL,
+      sourcePlatformId: SOURCE_PLATFORM,
+    });
+    expect(r.decision).toBe('confirm');
+    expect(delivered).toHaveLength(1);
+    // The card lands on the SOURCE channel, not the session's 'chan-x'.
+    expect(delivered[0].platformId).toBe(SOURCE_PLATFORM);
+    expect(delivered[0].platformId).not.toBe('chan-x');
+  });
+
+  it('falls back to the session chat when no source coords are supplied', async () => {
+    seedGroupAndSession(1);
+    seedSiblingSource();
+    const r = await decideSensitiveGate(base); // no source coords
+    expect(r.decision).toBe('confirm');
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0].platformId).toBe('chan-x'); // session canonical
+  });
+
+  it('falls back to the session chat when source coords resolve to no group', async () => {
+    seedGroupAndSession(1);
+    // No sibling seeded — the source coords point at an unregistered chat.
+    const r = await decideSensitiveGate({
+      ...base,
+      sourceChannelType: SOURCE_CHANNEL,
+      sourcePlatformId: 'totally-unregistered',
+    });
+    expect(r.decision).toBe('confirm');
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0].platformId).toBe('chan-x'); // safe fallback
+  });
+
+  it('namespaces the actor with the SOURCE channel (grant keyed to source chat)', async () => {
+    seedGroupAndSession(1);
+    seedSiblingSource();
+    // Pre-seed a live grant keyed by the SOURCE-namespaced actor id; the gate
+    // must find it (proving it namespaced via the source channel), short-
+    // circuiting to allow with NO card.
+    upsertConfirmationGrant(SESSION, namespaceActorId(SOURCE_CHANNEL, '777'), now());
+    const r = await decideSensitiveGate({
+      ...base,
+      sourceChannelType: SOURCE_CHANNEL,
+      sourcePlatformId: SOURCE_PLATFORM,
+    });
+    expect(r).toEqual({ decision: 'allow', reason: 'live_grant' });
+    expect(delivered).toHaveLength(0);
+  });
+});

@@ -251,6 +251,17 @@ export interface RequestConfirmationOptions {
   title: string;
   /** Card body. */
   question: string;
+  /**
+   * Optional explicit delivery target. When set, the confirmation card is
+   * delivered to THIS messaging group instead of the session's
+   * `messaging_group_id`. Required for merged `agent-shared` agent groups:
+   * the shared session's `messaging_group_id` is a single canonical channel,
+   * so a trigger from a sibling channel would otherwise deliver the card to
+   * the wrong chat (boys-night → ai-friends, 2026-06-15). The caller resolves
+   * the source chat from the triggering message and passes it here. Falls
+   * back to the session group when omitted (legacy single-channel path).
+   */
+  deliverTo?: { channel_type: string; platform_id: string };
 }
 
 /**
@@ -273,9 +284,15 @@ export interface RequestConfirmationOptions {
  * `action` via the response dispatcher.
  */
 export async function requestConfirmation(opts: RequestConfirmationOptions): Promise<void> {
-  const { session, action, actorId, actorName, payload, title, question, agentName } = opts;
+  const { session, action, actorId, actorName, payload, title, question, agentName, deliverTo } = opts;
 
-  const messagingGroup = session.messaging_group_id ? getMessagingGroup(session.messaging_group_id) : undefined;
+  // Prefer the caller-supplied source chat (merged agent-shared groups); fall
+  // back to the session's canonical group for the legacy single-channel path.
+  const messagingGroup = deliverTo
+    ? { channel_type: deliverTo.channel_type, platform_id: deliverTo.platform_id }
+    : session.messaging_group_id
+      ? getMessagingGroup(session.messaging_group_id)
+      : undefined;
   if (!messagingGroup) {
     // No originating chat to deliver into — self-confirm is in-channel only,
     // there is no DM fallback by design. Tell the agent so the held-back

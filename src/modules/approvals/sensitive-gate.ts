@@ -44,7 +44,7 @@
  */
 import { getAgentGroupByFolder } from '../../db/agent-groups.js';
 import { getSensitiveGateMode } from '../../db/container-configs.js';
-import { getMessagingGroup } from '../../db/messaging-groups.js';
+import { getMessagingGroup, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
 import { findSessionByAgentGroup, getConfirmationGrant, touchConfirmationGrant } from '../../db/sessions.js';
 import { log } from '../../log.js';
 import type { Session } from '../../types.js';
@@ -287,6 +287,20 @@ export interface SensitiveGateInput {
   rawSenderId: string;
   /** Optional human label for the @-mention on the card. */
   senderDisplayName?: string | null;
+  /**
+   * Source-chat coordinates of the triggering message, stamped by the host
+   * from the inbound event (`sender-identity.json`). For a merged
+   * `agent-shared` agent group, the shared session's `messaging_group_id` is
+   * a single canonical channel, so resolving the confirmation-card target
+   * from the session alone delivers the card to the wrong chat when the
+   * trigger came from a sibling channel (boys-night → ai-friends, 2026-06-15).
+   * When these resolve to a registered messaging group, the gate scopes the
+   * card AND the actor-id namespacing to that source chat. Absent/unresolvable
+   * ⇒ fall back to the session's group (legacy single-channel path). Mirrors
+   * the search-conversations / escalation `d49e2fdd` source-coords stamp.
+   */
+  sourceChannelType?: string | null;
+  sourcePlatformId?: string | null;
 }
 
 export type SensitiveGateDecision =
@@ -307,7 +321,8 @@ export type SensitiveGateDecision =
  * NEVER a silent allow. A security gate that fails open is not a gate.
  */
 export async function decideSensitiveGate(input: SensitiveGateInput): Promise<SensitiveGateDecision> {
-  const { groupFolder, integration, tool, args, rawSenderId, senderDisplayName } = input;
+  const { groupFolder, integration, tool, args, rawSenderId, senderDisplayName, sourceChannelType, sourcePlatformId } =
+    input;
 
   const agentGroup = getAgentGroupByFolder(groupFolder);
   if (!agentGroup) {
@@ -342,7 +357,23 @@ export async function decideSensitiveGate(input: SensitiveGateInput): Promise<Se
     // chat has nowhere to deliver the card, so it cannot be confirmed.
     return { decision: 'fail_closed', reason: `session ${session.id} has no originating chat` };
   }
-  const mg = getMessagingGroup(session.messaging_group_id);
+  // Resolve the chat this confirmation belongs to. Prefer the SOURCE chat the
+  // triggering message came from (stamped by the host) so a merged
+  // `agent-shared` agent group delivers the card to the channel the user
+  // actually messaged in — not the shared session's single canonical channel
+  // (the boys-night → ai-friends misroute, 2026-06-15). The source coords are
+  // only honored when they resolve to a real registered messaging group;
+  // anything else falls back to the session's group. The same chat is the
+  // single source for BOTH actor-id namespacing AND card delivery, so
+  // clicker-auth can never drift from where the card was posted — and because
+  // both the confirm-issuing pass and the re-issued post-Confirm call run
+  // through here with the same source coords, the `(session, actorId)` grant
+  // key stays stable across the round-trip.
+  const sourceMg =
+    sourceChannelType && sourcePlatformId
+      ? getMessagingGroupByPlatform(sourceChannelType, sourcePlatformId)
+      : undefined;
+  const mg = sourceMg ?? getMessagingGroup(session.messaging_group_id);
   if (!mg) {
     return {
       decision: 'fail_closed',
@@ -350,9 +381,9 @@ export async function decideSensitiveGate(input: SensitiveGateInput): Promise<Se
     };
   }
 
-  // Channel comes from the session's messaging group, NOT from the
-  // caller — so the actor-id namespacing is single-sourced here and can
-  // never drift from clicker-auth via a wrong caller-supplied channel.
+  // Channel comes from the resolved (source-preferred) messaging group, NOT
+  // from a free caller-supplied value — so the actor-id namespacing is
+  // single-sourced here and can never drift from clicker-auth.
   const actorId = namespaceActorId(mg.channel_type, rawSenderId);
   const isPublicChannel = mg.is_group === 1;
   const nowMs = Date.now();
@@ -389,6 +420,8 @@ export async function decideSensitiveGate(input: SensitiveGateInput): Promise<Se
       `wants to run ${what}` +
       (isPublicChannel ? ' in this channel' : '') +
       `. Confirm to allow it (and all further sensitive actions you trigger this session, for up to 30 minutes), or Cancel to block it.`,
+    // Deliver the card to the resolved chat (source chat for merged groups).
+    deliverTo: { channel_type: mg.channel_type, platform_id: mg.platform_id },
   });
   log.info('sensitive-gate: confirmation required', {
     sessionId: session.id,
