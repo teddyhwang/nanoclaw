@@ -5,6 +5,7 @@ import {
   isRetryableClaudeApiRateLimitResult,
   mcpTimeoutEnv,
   selectResultTextForDelivery,
+  shouldDeliverAssistantTextForRetryableResult,
 } from './claude.js';
 
 describe('ClaudeProvider result delivery helpers', () => {
@@ -68,6 +69,24 @@ describe('ClaudeProvider result delivery helpers', () => {
   it('does not classify ordinary unwrapped public text as a rate limit', () => {
     expect(isRetryableClaudeApiRateLimitResult('Please rate limit the invite list to 10 customers.')).toBe(false);
     expect(isRetryableClaudeApiRateLimitResult('Done but forgot the wrapper.')).toBe(false);
+  });
+
+  it('preserves wrapped assistant output when the SDK final result is a retryable rate-limit string', () => {
+    expect(
+      shouldDeliverAssistantTextForRetryableResult(
+        "API Error: Request rejected (429) · This request would exceed your account's rate limit.",
+        '<message to="chat">The answer already streamed.</message>',
+      ),
+    ).toBe(true);
+  });
+
+  it('does not invent output for retryable rate-limit strings without wrapped assistant text', () => {
+    expect(
+      shouldDeliverAssistantTextForRetryableResult(
+        "API Error: Request rejected (429) · This request would exceed your account's rate limit.",
+        null,
+      ),
+    ).toBe(false);
   });
 });
 

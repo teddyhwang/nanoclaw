@@ -76,6 +76,13 @@ export function isRetryableClaudeApiRateLimitResult(resultText: string | null): 
   );
 }
 
+export function shouldDeliverAssistantTextForRetryableResult(
+  resultText: string | null,
+  lastAssistantTextWithMessage: string | null,
+): boolean {
+  return Boolean(lastAssistantTextWithMessage && isRetryableClaudeApiRateLimitResult(resultText));
+}
+
 // Deferred SDK builtins that either sidestep nanoclaw's own scheduling or
 // don't fit our async message-passing model (they're designed for Claude
 // Code's interactive UI and would hang here).
@@ -777,6 +784,12 @@ export class ClaudeProvider implements AgentProvider {
           }
         } else if (message.type === 'result') {
           const rawText = 'result' in message ? ((message as { result?: string }).result ?? null) : null;
+          if (shouldDeliverAssistantTextForRetryableResult(rawText, lastAssistantTextWithMessage)) {
+            const text = lastAssistantTextWithMessage;
+            lastAssistantTextWithMessage = null;
+            yield { type: 'result', text, tokensUsed: lastContextTokens };
+            continue;
+          }
           if (isRetryableClaudeApiRateLimitResult(rawText)) {
             yield {
               type: 'error',

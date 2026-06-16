@@ -497,6 +497,32 @@ describe('poll loop integration', () => {
     await loopPromise.catch(() => {});
   });
 
+  it('retryable provider error with no result leaves chat pending without leaking the error to outbound', async () => {
+    insertMessage(
+      'm-retry-chat',
+      { sender: 'Alice', text: 'summarize spending' },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
+
+    const provider = new MockProvider({}, undefined, {
+      retryableErrorNoResult:
+        'codex exited (0): <message to="discord-test">This should not be delivered wrapped or prefixed.</message>',
+    });
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
+
+    await sleep(1200);
+    controller.abort();
+
+    const ack = getOutboundDb().prepare("SELECT status FROM processing_ack WHERE message_id = 'm-retry-chat'").get() as
+      | { status: string }
+      | undefined;
+    expect(ack?.status).not.toBe('completed');
+    expect(getUndeliveredMessages()).toHaveLength(0);
+
+    await loopPromise.catch(() => {});
+  });
+
   it('SIGTERM mid-turn before any result leaves the row pending and exits the loop', async () => {
     // Repro: Degenerates AI-Friends 2026-06-08. The host idle-timeout reaper
     // SIGTERM'd the container while the codex turn was still in flight (no

@@ -839,7 +839,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         clearContinuationStartedAt(config.providerName);
       }
 
-      if (shouldSendErrorResponseForBatch(keep)) {
+      if (retryableBatchFailure) {
+        log(`Suppressing user-visible retryable provider error for pending retry: ${errMsg}`);
+      } else if (shouldSendErrorResponseForBatch(keep)) {
         // Write error response so the user knows something went wrong.
         // Task-only failures stay in logs: scheduled maintenance prompts are
         // often explicitly silent and should not leak raw runtime errors to chat.
