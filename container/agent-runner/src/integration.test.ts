@@ -571,10 +571,10 @@ function sleep(ms: number): Promise<void> {
 }
 
 describe('poll loop — provider error recovery', () => {
-  it('writes error to outbound and continues loop on provider throw', async () => {
+  it('writes error to outbound and completes terminal provider throws', async () => {
     insertMessage('m1', { sender: 'Alice', text: 'trigger error' }, { platformId: 'chan-1', channelType: 'discord' });
 
-    const provider = new ThrowingProvider('API rate limit exceeded');
+    const provider = new ThrowingProvider('permission denied');
     const controller = new AbortController();
     const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 2000);
 
@@ -584,7 +584,7 @@ describe('poll loop — provider error recovery', () => {
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
     expect(JSON.parse(out[0].content).text).toContain('Error:');
-    expect(JSON.parse(out[0].content).text).toContain('API rate limit exceeded');
+    expect(JSON.parse(out[0].content).text).toContain('permission denied');
 
     // Input message should be marked completed despite the error
     const pending = getPendingMessages();

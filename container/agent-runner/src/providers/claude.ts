@@ -63,6 +63,19 @@ export function selectResultTextForDelivery(
   return resultText;
 }
 
+export function isRetryableClaudeApiRateLimitResult(resultText: string | null): boolean {
+  if (!resultText) return false;
+  const text = resultText.toLowerCase();
+  if (!/\b(api error|request rejected|429|quota|exceeded)\b/.test(text)) return false;
+  return (
+    /\b429\b/.test(text) ||
+    text.includes("exceed your account's rate limit") ||
+    text.includes('exceeded your current quota') ||
+    text.includes('quota exceeded') ||
+    text.includes('request rejected')
+  );
+}
+
 // Deferred SDK builtins that either sidestep nanoclaw's own scheduling or
 // don't fit our async message-passing model (they're designed for Claude
 // Code's interactive UI and would hang here).
@@ -764,13 +777,22 @@ export class ClaudeProvider implements AgentProvider {
           }
         } else if (message.type === 'result') {
           const rawText = 'result' in message ? ((message as { result?: string }).result ?? null) : null;
+          if (isRetryableClaudeApiRateLimitResult(rawText)) {
+            yield {
+              type: 'error',
+              message: rawText ?? 'Claude API rate limit',
+              retryable: true,
+              classification: 'quota',
+            };
+            continue;
+          }
           const text = selectResultTextForDelivery(rawText, lastAssistantTextWithMessage);
           lastAssistantTextWithMessage = null;
           yield { type: 'result', text, tokensUsed: lastContextTokens };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'rate_limit_event') {
-          yield { type: 'error', message: 'Rate limit', retryable: false, classification: 'quota' };
+          yield { type: 'error', message: 'Rate limit', retryable: true, classification: 'quota' };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'compact_boundary') {
           const meta = (message as { compact_metadata?: { pre_tokens?: number } }).compact_metadata;
           const detail = meta?.pre_tokens ? ` (${meta.pre_tokens.toLocaleString()} tokens compacted)` : '';

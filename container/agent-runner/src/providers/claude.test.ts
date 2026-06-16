@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'bun:test';
 
-import { extractAssistantText, mcpTimeoutEnv, selectResultTextForDelivery } from './claude.js';
+import {
+  extractAssistantText,
+  isRetryableClaudeApiRateLimitResult,
+  mcpTimeoutEnv,
+  selectResultTextForDelivery,
+} from './claude.js';
 
 describe('ClaudeProvider result delivery helpers', () => {
   it('extracts text from SDK assistant message content blocks', () => {
@@ -49,6 +54,20 @@ describe('ClaudeProvider result delivery helpers', () => {
     const text = selectResultTextForDelivery('Done but forgot the wrapper.', '<message to="chat">Working.</message>');
 
     expect(text).toBe('Done but forgot the wrapper.');
+  });
+
+  it('classifies Claude SDK API rate-limit results as retryable', () => {
+    expect(
+      isRetryableClaudeApiRateLimitResult(
+        "API Error: Request rejected (429) · This request would exceed your account's rate limit. Please try again later.",
+      ),
+    ).toBe(true);
+    expect(isRetryableClaudeApiRateLimitResult('API Error: Quota exceeded for this model.')).toBe(true);
+  });
+
+  it('does not classify ordinary unwrapped public text as a rate limit', () => {
+    expect(isRetryableClaudeApiRateLimitResult('Please rate limit the invite list to 10 customers.')).toBe(false);
+    expect(isRetryableClaudeApiRateLimitResult('Done but forgot the wrapper.')).toBe(false);
   });
 });
 
