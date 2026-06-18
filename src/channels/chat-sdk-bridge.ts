@@ -73,7 +73,7 @@ export interface ReplyContext {
    * gap — deeper ancestors used to be recoverable only if they happened
    * to still be in the prompt window). Bounded by the walker's depth cap.
    */
-  ancestors?: Array<{ sender: string; text: string }>;
+  ancestors?: Array<{ sender: string; text: string; messageId?: string }>;
   /**
    * Optional attachments from the quoted parent message. Extractors should
    * populate this when the platform embeds the parent raw message (Telegram

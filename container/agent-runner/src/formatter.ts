@@ -14,7 +14,15 @@ import { TIMEZONE, formatLocalTime } from './timezone.js';
  */
 export type CommandCategory = 'admin' | 'filtered' | 'passthrough' | 'none';
 
-const ADMIN_COMMANDS = new Set(['/remote-control', '/clear', '/compact', '/context', '/cost', '/files', '/upload-trace']);
+const ADMIN_COMMANDS = new Set([
+  '/remote-control',
+  '/clear',
+  '/compact',
+  '/context',
+  '/cost',
+  '/files',
+  '/upload-trace',
+]);
 const FILTERED_COMMANDS = new Set(['/help', '/login', '/logout', '/doctor', '/config', '/start']);
 
 export interface CommandInfo {
@@ -382,7 +390,8 @@ function formatSingleChat(msg: MessageInRow): string {
   const time = formatLocalTime(msg.timestamp, TIMEZONE);
   const text = content.text || '';
   const idAttr = msg.seq != null ? ` id="${msg.seq}"` : '';
-  const replyAttr = content.replyTo?.id ? ` reply_to="${escapeXml(String(content.replyTo.id))}"` : '';
+  const replyId = replyMessageId(content.replyTo);
+  const replyAttr = replyId ? ` reply_to="${escapeXml(replyId)}"` : '';
   const replyPrefix = formatReplyContext(content.replyTo);
   const attachmentsSuffix = formatAttachments(content.attachments);
 
@@ -478,12 +487,22 @@ function formatReactionMessage(msg: MessageInRow): string {
  * No truncation here (v1 didn't truncate).
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
+function replyMessageId(replyTo: any): string | null {
+  const value = replyTo?.id ?? replyTo?.messageId;
+  if (typeof value === 'string' && value.length > 0) return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  return null;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function formatReplyContext(replyTo: any): string {
   if (!replyTo) return '';
   const sender = replyTo.sender;
   const text = replyTo.text;
   if (!sender || !text) return '';
   const mineAttr = replyTo.toBot === true ? ' mine="true"' : '';
+  const parentMessageId = replyMessageId(replyTo);
+  const parentMessageIdAttr = parentMessageId ? ` message_id="${escapeXml(parentMessageId)}"` : '';
 
   // Ancestors above the direct parent, nearest-first in the source array.
   // Render oldest-first so the rendered order is chronological top-down.
@@ -495,15 +514,17 @@ function formatReplyContext(replyTo: any): string {
     const aText = a?.text;
     if (typeof aSender !== 'string' || typeof aText !== 'string') continue;
     if (!aSender || !aText.trim()) continue;
+    const ancestorMessageId = replyMessageId(a);
+    const ancestorMessageIdAttr = ancestorMessageId ? ` message_id="${escapeXml(ancestorMessageId)}"` : '';
     // depth: nearest ancestor (ancestors[0], grandparent) is depth 2; the
     // direct parent below is depth 1.
     const depth = i + 2;
     ancestorBlocks.push(
-      `  <quoted_message from="${escapeXml(aSender)}" depth="${depth}">${escapeXml(aText)}</quoted_message>`,
+      `  <quoted_message from="${escapeXml(aSender)}"${ancestorMessageIdAttr} depth="${depth}">${escapeXml(aText)}</quoted_message>`,
     );
   }
 
-  const parentBlock = `  <quoted_message from="${escapeXml(sender)}"${mineAttr}${ancestorBlocks.length > 0 ? ' depth="1"' : ''}>${escapeXml(text)}</quoted_message>`;
+  const parentBlock = `  <quoted_message from="${escapeXml(sender)}"${parentMessageIdAttr}${mineAttr}${ancestorBlocks.length > 0 ? ' depth="1"' : ''}>${escapeXml(text)}</quoted_message>`;
 
   return `\n${[...ancestorBlocks, parentBlock].join('\n')}\n`;
 }

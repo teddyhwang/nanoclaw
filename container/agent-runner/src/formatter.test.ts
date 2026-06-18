@@ -122,8 +122,25 @@ describe('reply_to + quoted_message rendering', () => {
     });
     const result = formatMessages(getPendingMessages());
     expect(result).toContain('reply_to="42"');
-    expect(result).toContain('<quoted_message from="Bob">Are you coming tonight?</quoted_message>');
+    expect(result).toContain('<quoted_message from="Bob" message_id="42">Are you coming tonight?</quoted_message>');
     expect(result).toContain('Yes, on my way!</message>');
+  });
+
+  it('uses replyTo.messageId when the host stores Discord reply IDs there', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Teddy',
+      text: 'track that headcount',
+      replyTo: {
+        messageId: '1511352887429693580',
+        sender: 'William Yoo',
+        text: 'Thumbs up if you in',
+      },
+    });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('reply_to="1511352887429693580"');
+    expect(result).toContain(
+      '<quoted_message from="William Yoo" message_id="1511352887429693580">Thumbs up if you in</quoted_message>',
+    );
   });
 
   it('omits reply_to and quoted_message when no reply context', () => {
@@ -168,7 +185,9 @@ describe('reply_to + quoted_message rendering', () => {
       },
     });
     const result = formatMessages(getPendingMessages());
-    expect(result).toContain('<quoted_message from="Optimus" mine="true">Hey Teddy — I searched...</quoted_message>');
+    expect(result).toContain(
+      '<quoted_message from="Optimus" message_id="42" mine="true">Hey Teddy — I searched...</quoted_message>',
+    );
   });
 
   it('omits mine attribute when replyTo.toBot is not set (regular pill-reply to a peer)', () => {
@@ -178,7 +197,7 @@ describe('reply_to + quoted_message rendering', () => {
       replyTo: { id: '42', sender: 'Bob', text: 'Anyone in?' },
     });
     const result = formatMessages(getPendingMessages());
-    expect(result).toContain('<quoted_message from="Bob">Anyone in?</quoted_message>');
+    expect(result).toContain('<quoted_message from="Bob" message_id="42">Anyone in?</quoted_message>');
     expect(result).not.toContain('mine="true"');
   });
 
@@ -195,17 +214,21 @@ describe('reply_to + quoted_message rendering', () => {
         sender: 'Bob',
         text: 'I think we should ship',
         ancestors: [
-          { sender: 'Dave', text: 'the deadline is friday' }, // grandparent (depth 2)
-          { sender: 'Erin', text: 'who owns this?' }, // great-grand (depth 3)
+          { messageId: '6', sender: 'Dave', text: 'the deadline is friday' }, // grandparent (depth 2)
+          { messageId: '5', sender: 'Erin', text: 'who owns this?' }, // great-grand (depth 3)
         ],
       },
     });
     const result = formatMessages(getPendingMessages());
     // Oldest ancestor first, deepest depth.
-    expect(result).toContain('<quoted_message from="Erin" depth="3">who owns this?</quoted_message>');
-    expect(result).toContain('<quoted_message from="Dave" depth="2">the deadline is friday</quoted_message>');
+    expect(result).toContain('<quoted_message from="Erin" message_id="5" depth="3">who owns this?</quoted_message>');
+    expect(result).toContain(
+      '<quoted_message from="Dave" message_id="6" depth="2">the deadline is friday</quoted_message>',
+    );
     // Direct parent labelled depth 1 when ancestors are present.
-    expect(result).toContain('<quoted_message from="Bob" depth="1">I think we should ship</quoted_message>');
+    expect(result).toContain(
+      '<quoted_message from="Bob" message_id="7" depth="1">I think we should ship</quoted_message>',
+    );
     // Chronological top-down order: Erin (oldest) → Dave → Bob (parent).
     const erinIdx = result.indexOf('who owns this?');
     const daveIdx = result.indexOf('the deadline is friday');
@@ -222,7 +245,7 @@ describe('reply_to + quoted_message rendering', () => {
       replyTo: { id: '9', sender: 'Bob', text: 'ready?' },
     });
     const result = formatMessages(getPendingMessages());
-    expect(result).toContain('<quoted_message from="Bob">ready?</quoted_message>');
+    expect(result).toContain('<quoted_message from="Bob" message_id="9">ready?</quoted_message>');
     expect(result).not.toContain('depth=');
   });
 
@@ -240,7 +263,9 @@ describe('reply_to + quoted_message rendering', () => {
     });
     const result = formatMessages(getPendingMessages());
     expect(result).toContain('<quoted_message from="Teddy" depth="2">draft a plan</quoted_message>');
-    expect(result).toContain('<quoted_message from="Optimus" mine="true" depth="1">here is the plan</quoted_message>');
+    expect(result).toContain(
+      '<quoted_message from="Optimus" message_id="5" mine="true" depth="1">here is the plan</quoted_message>',
+    );
   });
 
   it('skips malformed ancestor entries (missing sender/text)', () => {
