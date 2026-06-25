@@ -62,20 +62,35 @@ export async function transcribeAudio(audioBuffer: Buffer, opts: TranscribeOpts 
 
   const mimeType = opts.mimeType ?? 'audio/ogg';
 
-  if (effective === 'gemini') {
-    return transcribeWithGemini(audioBuffer, {
-      apiKey: geminiKey!,
-      mimeType,
-      model: opts.model ?? 'gemini-2.5-flash',
-    });
-  }
+  const transcribeWithBackend = async (backend: TranscriptionBackend): Promise<string> => {
+    if (backend === 'gemini') {
+      return transcribeWithGemini(audioBuffer, {
+        apiKey: geminiKey!,
+        mimeType,
+        model: opts.model ?? 'gemini-2.5-flash',
+      });
+    }
 
-  return transcribeWithOpenAI(audioBuffer, {
-    apiKey: openaiKey!,
-    filename: opts.filename ?? 'voice.ogg',
-    mimeType,
-    model: opts.model ?? 'whisper-1',
+    return transcribeWithOpenAI(audioBuffer, {
+      apiKey: openaiKey!,
+      filename: opts.filename ?? 'voice.ogg',
+      mimeType,
+      model: opts.model ?? 'whisper-1',
+    });
+  };
+
+  const first = await transcribeWithBackend(effective);
+  if (first !== VOICE_TRANSCRIPTION_FAILED) return first;
+
+  const fallback: TranscriptionBackend = effective === 'gemini' ? 'openai' : 'gemini';
+  const fallbackKey = fallback === 'gemini' ? geminiKey : openaiKey;
+  if (!fallbackKey) return first;
+
+  log.error(`Voice transcription backend "${effective}" returned no transcript — retrying with "${fallback}"`, {
+    requested: effective,
+    fallback,
   });
+  return transcribeWithBackend(fallback);
 }
 
 function resolveBackend(

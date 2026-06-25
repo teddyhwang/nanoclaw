@@ -48,6 +48,34 @@ describe('transcribeAudio', () => {
     expect(out).toBe('mocked transcript');
   });
 
+  it('retries with openai when gemini returns an empty transcript', async () => {
+    process.env.GEMINI_API_KEY = 'g-test';
+    process.env.OPENAI_API_KEY = 'sk-test';
+    process.env.VOICE_TRANSCRIPTION_BACKEND = 'gemini';
+    vi.doMock('@google/genai', () => ({
+      GoogleGenAI: class {
+        models = {
+          generateContent: async () => ({ text: '' }),
+        };
+        constructor(_: unknown) {}
+      },
+    }));
+    vi.doMock('openai', () => ({
+      default: class {
+        audio = {
+          transcriptions: {
+            create: async () => 'fallback transcript',
+          },
+        };
+        constructor(_: unknown) {}
+      },
+      toFile: async (b: Buffer) => b,
+    }));
+
+    const out = await transcribeAudio(Buffer.from('a'));
+    expect(out).toBe('fallback transcript');
+  });
+
   it('uses opts.getCredential before falling back to env (Optimus posture)', async () => {
     // No env keys — only the injected reader has one.
     vi.doMock('openai', () => ({
