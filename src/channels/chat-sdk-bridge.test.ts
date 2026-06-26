@@ -10,6 +10,7 @@ import {
   isSelfAuthoredChatSdkMessage,
   parsePollVoteGatewayEvent,
   pollUpdateInbound,
+  rawAttachmentsToSdkAttachments,
   RECOVERY_PER_PAGE_MAX,
   recoveryPageBudget,
   splitForLimit,
@@ -160,6 +161,39 @@ describe('enrichAttachments', () => {
         data: Buffer.from('image-bytes').toString('base64'),
       },
     ]);
+  });
+});
+
+describe('rawAttachmentsToSdkAttachments', () => {
+  it('normalizes Discord raw voice attachments into audio attachments', () => {
+    const out = rawAttachmentsToSdkAttachments({
+      attachments: [
+        {
+          filename: 'voice-message.ogg',
+          content_type: 'audio/ogg',
+          size: 2447,
+          url: 'https://cdn.discordapp.com/attachments/c/m/voice-message.ogg',
+          duration_secs: 1.48,
+          waveform: 'base64-waveform',
+        },
+      ],
+    });
+
+    expect(out).toEqual([
+      {
+        type: 'audio',
+        name: 'voice-message.ogg',
+        mimeType: 'audio/ogg',
+        size: 2447,
+        url: 'https://cdn.discordapp.com/attachments/c/m/voice-message.ogg',
+      },
+    ]);
+  });
+
+  it('returns no attachments for empty or malformed raw payloads', () => {
+    expect(rawAttachmentsToSdkAttachments(undefined)).toEqual([]);
+    expect(rawAttachmentsToSdkAttachments({ attachments: [] })).toEqual([]);
+    expect(rawAttachmentsToSdkAttachments({ attachments: [null] })).toEqual([]);
   });
 });
 

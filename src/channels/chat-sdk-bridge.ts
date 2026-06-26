@@ -98,6 +98,53 @@ export type ReplyContextExtractor = (
   raw: Record<string, any>,
 ) => ReplyContext | null | Promise<ReplyContext | null>;
 
+interface RawAttachmentLike {
+  filename?: unknown;
+  content_type?: unknown;
+  size?: unknown;
+  url?: unknown;
+  width?: unknown;
+  height?: unknown;
+}
+
+function attachmentTypeForMime(mimeType: string | undefined): string {
+  if (!mimeType) return 'file';
+  if (mimeType.startsWith('image/')) return 'image';
+  if (mimeType.startsWith('video/')) return 'video';
+  if (mimeType.startsWith('audio/')) return 'audio';
+  return 'file';
+}
+
+/**
+ * Some Discord Gateway MESSAGE_CREATE payloads, including voice messages, carry
+ * `raw.attachments[]` even when the Chat SDK adapter fails to materialize
+ * `message.attachments`. Normalize that raw shape into the same attachment
+ * contract the rest of the bridge already enriches.
+ */
+export function rawAttachmentsToSdkAttachments(raw: Record<string, unknown> | undefined): Attachment[] {
+  const rawAttachments = raw?.attachments;
+  if (!Array.isArray(rawAttachments) || rawAttachments.length === 0) return [];
+
+  return rawAttachments
+    .map((att): Attachment | null => {
+      if (!att || typeof att !== 'object') return null;
+      const record = att as RawAttachmentLike;
+      const mimeType = typeof record.content_type === 'string' ? record.content_type : undefined;
+      const url = typeof record.url === 'string' ? record.url : undefined;
+      const name = typeof record.filename === 'string' && record.filename.trim() ? record.filename : 'attachment';
+      return {
+        type: attachmentTypeForMime(mimeType),
+        name,
+        mimeType,
+        size: typeof record.size === 'number' ? record.size : undefined,
+        width: typeof record.width === 'number' ? record.width : undefined,
+        height: typeof record.height === 'number' ? record.height : undefined,
+        ...(url ? { url } : {}),
+      } as Attachment;
+    })
+    .filter((att): att is Attachment => att !== null);
+}
+
 /**
  * A MESSAGE_POLL_VOTE_ADD / MESSAGE_POLL_VOTE_REMOVE gateway event, parsed
  * from the forwarded Discord payload. `guildId` is absent for DM polls —
@@ -587,8 +634,11 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     const serialized = message.toJSON() as Record<string, any>;
 
     // Download attachment data before serialization loses fetchData().
-    const enrichedAttachments =
-      message.attachments && message.attachments.length > 0 ? await enrichAttachments(message.attachments) : [];
+    const sdkAttachments =
+      message.attachments && message.attachments.length > 0
+        ? message.attachments
+        : rawAttachmentsToSdkAttachments(message.raw as Record<string, unknown> | undefined);
+    const enrichedAttachments = sdkAttachments.length > 0 ? await enrichAttachments(sdkAttachments) : [];
     if (enrichedAttachments.length > 0) {
       serialized.attachments = enrichedAttachments;
     }
