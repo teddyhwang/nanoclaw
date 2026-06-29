@@ -29,7 +29,7 @@ import {
   clearOutbox,
 } from './session-manager.js';
 import { markDelivered } from './db/session-db.js';
-import { getSession, findSession, findSessionByAgentGroup } from './db/sessions.js';
+import { getSession, findSession, findSessionByAgentGroup, updateSession } from './db/sessions.js';
 import type { InboundEvent } from './channels/adapter.js';
 
 // Mock container runner to prevent actual Docker spawning
@@ -261,6 +261,65 @@ describe('session manager', () => {
     const { session: s2, created: c2 } = resolveSession('ag-1', 'mg-1', null, 'shared');
     expect(c2).toBe(false);
     expect(s2.id).toBe(s1.id);
+  });
+
+  it('carries recent pending chat rows forward when a closed session is replaced', async () => {
+    const { session: oldSession } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    await writeSessionMessage('ag-1', oldSession.id, {
+      id: 'travel-question',
+      kind: 'chat-sdk',
+      timestamp: now(),
+      platformId: 'chan-123',
+      channelType: 'discord',
+      threadId: null,
+      content: JSON.stringify({
+        sender: 'Nicole',
+        text: 'I want to go on a 5 day trip that is scenic, adventurous and has golfing options.',
+      }),
+    });
+    await writeSessionMessage('ag-1', oldSession.id, {
+      id: 'old-maintenance-task',
+      kind: 'task',
+      timestamp: now(),
+      content: JSON.stringify({ prompt: 'Silent maintenance' }),
+    });
+    updateSession(oldSession.id, { status: 'closed', container_status: 'stopped' });
+
+    const { session: newSession, created } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    expect(created).toBe(true);
+    expect(newSession.id).not.toBe(oldSession.id);
+
+    await writeSessionMessage('ag-1', newSession.id, {
+      id: 'read-above',
+      kind: 'chat-sdk',
+      timestamp: now(),
+      platformId: 'chan-123',
+      channelType: 'discord',
+      threadId: null,
+      content: JSON.stringify({ sender: 'Nicole', text: 'Read message above' }),
+    });
+
+    const newDb = new Database(inboundDbPath('ag-1', newSession.id));
+    const newRows = newDb.prepare('SELECT id, kind, content FROM messages_in ORDER BY seq').all() as Array<{
+      id: string;
+      kind: string;
+      content: string;
+    }>;
+    newDb.close();
+    expect(newRows.map((r) => r.id)).toEqual(['travel-question', 'read-above']);
+    expect(newRows.map((r) => r.kind)).toEqual(['chat-sdk', 'chat-sdk']);
+    expect(JSON.parse(newRows[0].content).text).toContain('5 day trip');
+
+    const oldDb = new Database(inboundDbPath('ag-1', oldSession.id));
+    const oldRows = oldDb.prepare('SELECT id, status FROM messages_in ORDER BY seq').all() as Array<{
+      id: string;
+      status: string;
+    }>;
+    oldDb.close();
+    expect(Object.fromEntries(oldRows.map((r) => [r.id, r.status]))).toMatchObject({
+      'travel-question': 'completed',
+      'old-maintenance-task': 'pending',
+    });
   });
 
   it('should create separate sessions per thread (per-thread mode)', async () => {

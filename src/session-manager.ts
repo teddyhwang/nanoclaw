@@ -26,6 +26,7 @@ import {
   createSession,
   findSessionByAgentGroup,
   findSessionForAgent,
+  findMostRecentClosedSessionForAgent,
   getSession,
   updateSession,
 } from './db/sessions.js';
@@ -83,6 +84,94 @@ function generateId(): string {
   return `sess-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+interface PendingChatCarryForwardRow {
+  id: string;
+  kind: string;
+  timestamp: string;
+  platform_id: string | null;
+  channel_type: string | null;
+  thread_id: string | null;
+  content: string;
+  process_after: string | null;
+  recurrence: string | null;
+  trigger: 0 | 1;
+  source_session_id: string | null;
+  on_wake: 0 | 1;
+}
+
+/**
+ * When a chat gets a fresh session after the previous one was closed, recent
+ * unanswered human messages in the closed session must ride into the new
+ * queue. Otherwise a user can send "read above" and the new container sees
+ * only that follow-up, not the actual pending request.
+ */
+function carryForwardRecentPendingChatRows(
+  agentGroupId: string,
+  messagingGroupId: string | null,
+  threadId: string | null,
+  targetSessionId: string,
+): void {
+  if (!messagingGroupId) return;
+  const source = findMostRecentClosedSessionForAgent(agentGroupId, messagingGroupId, threadId);
+  if (!source) return;
+
+  const sourceDbPath = inboundDbPath(agentGroupId, source.id);
+  if (!fs.existsSync(sourceDbPath)) return;
+
+  const sourceDb = openInboundDbRaw(sourceDbPath);
+  const targetDb = openInboundDbRaw(inboundDbPath(agentGroupId, targetSessionId));
+  try {
+    const rows = sourceDb
+      .prepare(
+        `SELECT id, kind, timestamp, platform_id, channel_type, thread_id,
+                content, process_after, recurrence, trigger, source_session_id, on_wake
+           FROM messages_in
+          WHERE status = 'pending'
+            AND kind IN ('chat', 'chat-sdk')
+            AND trigger = 1
+            AND (process_after IS NULL OR datetime(process_after) <= datetime('now'))
+            AND julianday(timestamp) >= julianday('now', '-1 day')
+          ORDER BY seq ASC`,
+      )
+      .all() as PendingChatCarryForwardRow[];
+
+    if (rows.length === 0) return;
+
+    const markCompleted = sourceDb.prepare("UPDATE messages_in SET status = 'completed' WHERE id = ?");
+    const tx = targetDb.transaction((pendingRows: PendingChatCarryForwardRow[]) => {
+      for (const row of pendingRows) {
+        insertMessage(targetDb, {
+          id: row.id,
+          kind: row.kind,
+          timestamp: row.timestamp,
+          platformId: row.platform_id,
+          channelType: row.channel_type,
+          threadId: row.thread_id,
+          content: row.content,
+          processAfter: row.process_after,
+          recurrence: row.recurrence,
+          trigger: row.trigger,
+          sourceSessionId: row.source_session_id,
+          onWake: row.on_wake,
+        });
+        markCompleted.run(row.id);
+      }
+    });
+    tx(rows);
+    log.info('Carried forward pending chat rows from closed session', {
+      agentGroupId,
+      messagingGroupId,
+      threadId,
+      sourceSessionId: source.id,
+      targetSessionId,
+      count: rows.length,
+    });
+  } finally {
+    sourceDb.close();
+    targetDb.close();
+  }
+}
+
 /**
  * Find or create a session for a messaging group + thread.
  *
@@ -130,6 +219,7 @@ export function resolveSession(
 
   createSession(session);
   initSessionFolder(agentGroupId, id);
+  carryForwardRecentPendingChatRows(agentGroupId, messagingGroupId, lookupThreadId, id);
   log.info('Session created', { id, agentGroupId, messagingGroupId, threadId: lookupThreadId, sessionMode });
 
   return { session, created: true };
