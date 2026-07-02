@@ -107,6 +107,12 @@ interface RawAttachmentLike {
   height?: unknown;
 }
 
+interface RawMessageSnapshotLike {
+  message?: {
+    attachments?: unknown;
+  };
+}
+
 function attachmentTypeForMime(mimeType: string | undefined): string {
   if (!mimeType) return 'file';
   if (mimeType.startsWith('image/')) return 'image';
@@ -122,8 +128,8 @@ function attachmentTypeForMime(mimeType: string | undefined): string {
  * contract the rest of the bridge already enriches.
  */
 export function rawAttachmentsToSdkAttachments(raw: Record<string, unknown> | undefined): Attachment[] {
-  const rawAttachments = raw?.attachments;
-  if (!Array.isArray(rawAttachments) || rawAttachments.length === 0) return [];
+  const rawAttachments = collectRawAttachments(raw);
+  if (rawAttachments.length === 0) return [];
 
   return rawAttachments
     .map((att): Attachment | null => {
@@ -143,6 +149,32 @@ export function rawAttachmentsToSdkAttachments(raw: Record<string, unknown> | un
       } as Attachment;
     })
     .filter((att): att is Attachment => att !== null);
+}
+
+function collectRawAttachments(raw: Record<string, unknown> | undefined): unknown[] {
+  if (!raw) return [];
+  const attachments: unknown[] = [];
+  if (Array.isArray(raw.attachments)) {
+    attachments.push(...raw.attachments);
+  }
+  if (Array.isArray(raw.message_snapshots)) {
+    for (const snapshot of raw.message_snapshots as RawMessageSnapshotLike[]) {
+      const snapshotAttachments = snapshot?.message?.attachments;
+      if (Array.isArray(snapshotAttachments)) {
+        attachments.push(...snapshotAttachments);
+      }
+    }
+  }
+  return attachments;
+}
+
+function hasForwardedMessageSnapshot(raw: unknown): boolean {
+  return (
+    !!raw &&
+    typeof raw === 'object' &&
+    Array.isArray((raw as Record<string, unknown>).message_snapshots) &&
+    ((raw as Record<string, unknown>).message_snapshots as unknown[]).length > 0
+  );
 }
 
 /**
@@ -726,9 +758,15 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     // is never stubbed. Best-effort: a describer throw must not drop the message.
     const hasText = typeof serialized.text === 'string' && serialized.text.trim().length > 0;
     const hasAttachments = Array.isArray(serialized.attachments) && serialized.attachments.length > 0;
-    if (config.describeUnsupportedContent && message.raw && !hasText && !hasAttachments) {
+    const describeUnsupportedContent = config.describeUnsupportedContent;
+    const shouldDescribeUnsupported =
+      describeUnsupportedContent &&
+      message.raw &&
+      !hasText &&
+      (!hasAttachments || hasForwardedMessageSnapshot(message.raw));
+    if (shouldDescribeUnsupported) {
       try {
-        const stub = config.describeUnsupportedContent(message.raw as Record<string, unknown>);
+        const stub = describeUnsupportedContent(message.raw as Record<string, unknown>);
         if (stub) {
           serialized.text = stub;
           log.info('Surfaced unsupported content as a stub for agent visibility', {

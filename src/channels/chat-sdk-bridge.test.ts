@@ -195,6 +195,35 @@ describe('rawAttachmentsToSdkAttachments', () => {
     expect(rawAttachmentsToSdkAttachments({ attachments: [] })).toEqual([]);
     expect(rawAttachmentsToSdkAttachments({ attachments: [null] })).toEqual([]);
   });
+
+  it('normalizes forwarded Discord snapshot attachments', () => {
+    const out = rawAttachmentsToSdkAttachments({
+      message_snapshots: [
+        {
+          message: {
+            attachments: [
+              {
+                filename: 'SKILL.md',
+                content_type: 'text/markdown; charset=utf-8',
+                size: 1024,
+                url: 'https://cdn.discordapp.com/attachments/c/m/SKILL.md',
+              },
+            ],
+          },
+        },
+      ],
+    });
+
+    expect(out).toEqual([
+      {
+        type: 'file',
+        name: 'SKILL.md',
+        mimeType: 'text/markdown; charset=utf-8',
+        size: 1024,
+        url: 'https://cdn.discordapp.com/attachments/c/m/SKILL.md',
+      },
+    ]);
+  });
 });
 
 describe('createChatSdkBridge', () => {
