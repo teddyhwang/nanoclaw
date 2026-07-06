@@ -39,6 +39,7 @@ import {
   getLatestHumanInboundMs,
   getRecoverableMessage,
   getProcessingClaims,
+  getFailedMessageNotifyInfo,
   markMessageFailed,
   retryWithBackoff,
   syncProcessingAcks,
@@ -47,6 +48,7 @@ import {
 } from './db/session-db.js';
 import { ACTIVE_CONVERSATION_WINDOW_MS, ACTIVE_IDLE_TIMEOUT, IDLE_TIMEOUT } from './config.js';
 import { emitEngineEvent } from './engine/events.js';
+import { getDeliveryAdapter } from './delivery.js';
 import { log } from './log.js';
 import { openInboundDb, openOutboundDb, openOutboundDbRw, inboundDbPath, heartbeatPath } from './session-manager.js';
 import { isContainerRunning, killContainer, wakeContainer } from './container-runner.js';
@@ -535,6 +537,85 @@ export function _claimStuckHelpersForTesting() {
   };
 }
 
+// Failed-message user notification. When a user's addressed chat message is
+// given up on — MAX_TRIES exhausted or force-failed by the claim-stuck
+// circuit-breaker — `markMessageFailed` flips the row to 'failed' and logs a
+// warning, but nothing is ever delivered back to the human who sent it. The
+// request just evaporates: no error, no retry visible to them, silence
+// (Nicole Paik doodle request, 2026-07-03 — repeated Claude-API 429s
+// exhausted the retry budget in minutes, then the row was force-failed and
+// she got no response to either her request or her "Hello?" follow-up).
+//
+// This closes that loop: on give-up, deliver a short, friendly apology to the
+// origin chat asking the user to resend. We only do this for user-facing
+// addressed messages (kind='chat', trigger=1) with a resolvable channel
+// destination — system round-trips, task rows, and accumulate-only context
+// rows (trigger=0) are not something a human is waiting on in-channel.
+//
+// Deduped per session for a short window so a batch of failed messages (a
+// busy chat that all timed out on the same rate-limit wall) yields ONE
+// apology, not one per message. Best-effort throughout: any resolution or
+// delivery error is logged and swallowed — a failed notification must never
+// wedge the sweep or re-fail the already-failed row.
+const FAILED_NOTIFY_DEDUP_MS = 5 * 60 * 1000;
+const lastFailedNotifyAt = new Map<string, number>();
+
+export function _resetFailedNotifyDedupForTesting(): void {
+  lastFailedNotifyAt.clear();
+}
+
+const FAILED_MESSAGE_USER_TEXT =
+  "⚠️ I hit a temporary limit and couldn't get to your last message. Nothing was lost on your end — please send it again and I'll pick it right up.";
+
+function notifyUserOfFailedMessage(inDb: Database.Database, session: Session, messageId: string): void {
+  try {
+    const info = getFailedMessageNotifyInfo(inDb, messageId);
+    if (!info) return;
+    // Only apologize for an addressed, user-facing chat message with a real
+    // channel destination. Everything else (system MCP round-trips, task
+    // rows, agent-to-agent, accumulate-only context) has no human waiting on
+    // an in-channel reply to *this* row.
+    if (info.kind !== 'chat') return;
+    if (info.trigger !== 1) return;
+    if (info.channel_type === 'agent') return;
+    if (!info.channel_type || !info.platform_id) return;
+
+    const now = Date.now();
+    const last = lastFailedNotifyAt.get(session.id) ?? 0;
+    if (now - last < FAILED_NOTIFY_DEDUP_MS) return;
+
+    const adapter = getDeliveryAdapter();
+    if (!adapter) {
+      log.warn('Cannot notify user of failed message — no delivery adapter', {
+        messageId,
+        sessionId: session.id,
+      });
+      return;
+    }
+
+    lastFailedNotifyAt.set(session.id, now);
+    const content = JSON.stringify({ type: 'text', text: FAILED_MESSAGE_USER_TEXT });
+    void adapter
+      .deliver(info.channel_type, info.platform_id, info.thread_id, 'chat', content)
+      .then(() => {
+        log.info('Notified user of failed message', {
+          messageId,
+          sessionId: session.id,
+          channelType: info.channel_type,
+          platformId: info.platform_id,
+        });
+      })
+      .catch((err) => {
+        // Roll back the dedup stamp so a transient delivery failure doesn't
+        // suppress the next genuine notification for the full window.
+        if (lastFailedNotifyAt.get(session.id) === now) lastFailedNotifyAt.delete(session.id);
+        log.error('Failed to notify user of failed message', { messageId, sessionId: session.id, err });
+      });
+  } catch (err) {
+    log.error('notifyUserOfFailedMessage threw', { messageId, sessionId: session.id, err });
+  }
+}
+
 function heartbeatMtimeMs(agentGroupId: string, sessionId: string): number {
   const hbPath = heartbeatPath(agentGroupId, sessionId);
   try {
@@ -689,6 +770,7 @@ function resetStuckProcessingRows(
         tries: msg.tries,
         reason,
       });
+      notifyUserOfFailedMessage(inDb, session, msg.id);
       continue;
     }
 
@@ -704,6 +786,7 @@ function resetStuckProcessingRows(
         sessionId: session.id,
         reason,
       });
+      notifyUserOfFailedMessage(inDb, session, msg.id);
     } else {
       const backoffMs = BACKOFF_BASE_MS * Math.pow(2, msg.tries);
       const backoffSec = Math.floor(backoffMs / 1000);

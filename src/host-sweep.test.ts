@@ -15,6 +15,7 @@ import {
   _MAX_CONSECUTIVE_CLAIM_STUCK_KILLS_FOR_TESTING,
   _claimStuckHelpersForTesting,
   _resetStuckProcessingRowsForTesting,
+  _resetFailedNotifyDedupForTesting,
   _shouldForceFailClaimStuckForTesting,
   _withTimeoutForTesting,
   _SweepTimeoutErrorForTesting,
@@ -22,6 +23,7 @@ import {
   pickIdleTimeoutMs,
   parseSqliteUtc,
 } from './host-sweep.js';
+import { setDeliveryAdapter, type ChannelDeliveryAdapter } from './delivery.js';
 import { getLatestHumanInboundMs } from './db/session-db.js';
 import type { Session } from './types.js';
 
@@ -519,6 +521,125 @@ describe('resetStuckProcessingRows — orphan claim cleanup', () => {
       { id: 'm-done', status: 'completed' },
       { id: 'm-failed', status: 'failed' },
     ]);
+  });
+});
+
+describe('failed-message user notification (Nicole Paik doodle 429, 2026-07-03)', () => {
+  // A stub adapter that records every deliver() call. deliver resolves so the
+  // fire-and-forget `.then()` in the notifier runs; we flush microtasks after.
+  function stubAdapter(): { adapter: ChannelDeliveryAdapter; calls: unknown[][] } {
+    const calls: unknown[][] = [];
+    const adapter: ChannelDeliveryAdapter = {
+      async deliver(...args: unknown[]) {
+        calls.push(args);
+        return 'platform-msg-id';
+      },
+    };
+    return { adapter, calls };
+  }
+
+  // Insert a message row already at MAX_TRIES so the reset path force-fails it
+  // via the tries>=MAX_TRIES branch (not the circuit-breaker), then assert the
+  // notification. MAX_TRIES is 5.
+  function seedExhaustedMessage(
+    inDb: Database.Database,
+    outDb: Database.Database,
+    id: string,
+    fields: { kind?: string; trigger?: number; channel_type?: string | null; platform_id?: string | null } = {},
+  ) {
+    const claimedAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    inDb
+      .prepare(
+        `INSERT INTO messages_in (id, seq, kind, timestamp, status, tries, trigger, channel_type, platform_id, thread_id, content)
+         VALUES (?, ?, ?, ?, 'processing', 5, ?, ?, ?, NULL, '{}')`,
+      )
+      .run(
+        id,
+        Math.floor(Math.random() * 1e9),
+        fields.kind ?? 'chat',
+        claimedAt,
+        fields.trigger ?? 1,
+        fields.channel_type ?? 'telegram',
+        fields.platform_id ?? 'chat-123',
+      );
+    outDb.prepare('INSERT INTO processing_ack VALUES (?, ?, ?)').run(id, 'processing', claimedAt);
+  }
+
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+
+  it('delivers a friendly apology to the origin chat when a chat message is force-failed', async () => {
+    _resetFailedNotifyDedupForTesting();
+    const { adapter, calls } = stubAdapter();
+    setDeliveryAdapter(adapter);
+    const { inDb, outDb } = makeSessionDbs();
+    seedExhaustedMessage(inDb, outDb, 'm-fail-notify');
+
+    _resetStuckProcessingRowsForTesting(inDb, outDb, fakeSession(), 'claim-stuck');
+    await flush();
+
+    expect(inDb.prepare("SELECT status FROM messages_in WHERE id='m-fail-notify'").get()).toEqual({ status: 'failed' });
+    expect(calls).toHaveLength(1);
+    const [channelType, platformId, threadId, kind, content] = calls[0] as string[];
+    expect(channelType).toBe('telegram');
+    expect(platformId).toBe('chat-123');
+    expect(threadId).toBeNull();
+    expect(kind).toBe('chat');
+    expect(JSON.parse(content).text).toContain('send it again');
+  });
+
+  it('does NOT notify for system/task rows or accumulate-only (trigger=0) rows', async () => {
+    _resetFailedNotifyDedupForTesting();
+    const { adapter, calls } = stubAdapter();
+    setDeliveryAdapter(adapter);
+    const { inDb, outDb } = makeSessionDbs();
+    seedExhaustedMessage(inDb, outDb, 'm-system', { kind: 'system' });
+    seedExhaustedMessage(inDb, outDb, 'm-task', { kind: 'task' });
+    seedExhaustedMessage(inDb, outDb, 'm-accumulate', { trigger: 0 });
+    seedExhaustedMessage(inDb, outDb, 'm-agent', { channel_type: 'agent' });
+
+    _resetStuckProcessingRowsForTesting(inDb, outDb, fakeSession(), 'claim-stuck');
+    await flush();
+
+    // All four failed, none notified.
+    expect(calls).toHaveLength(0);
+  });
+
+  it('dedupes: a batch of failed chat rows yields exactly one notification', async () => {
+    _resetFailedNotifyDedupForTesting();
+    const { adapter, calls } = stubAdapter();
+    setDeliveryAdapter(adapter);
+    const { inDb, outDb } = makeSessionDbs();
+    seedExhaustedMessage(inDb, outDb, 'm-a');
+    seedExhaustedMessage(inDb, outDb, 'm-b');
+    seedExhaustedMessage(inDb, outDb, 'm-c');
+
+    _resetStuckProcessingRowsForTesting(inDb, outDb, fakeSession(), 'claim-stuck');
+    await flush();
+
+    expect(calls).toHaveLength(1);
+  });
+
+  it('also notifies when the circuit-breaker force-fails the batch', async () => {
+    _resetFailedNotifyDedupForTesting();
+    const { adapter, calls } = stubAdapter();
+    setDeliveryAdapter(adapter);
+    const { inDb, outDb } = makeSessionDbs();
+    // tries below MAX so only forceFail path can fail it.
+    const claimedAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    inDb
+      .prepare(
+        `INSERT INTO messages_in (id, seq, kind, timestamp, status, tries, trigger, channel_type, platform_id, content)
+         VALUES ('m-cb', 1, 'chat', ?, 'processing', 0, 1, 'telegram', 'chat-999', '{}')`,
+      )
+      .run(claimedAt);
+    outDb.prepare('INSERT INTO processing_ack VALUES (?, ?, ?)').run('m-cb', 'processing', claimedAt);
+
+    _resetStuckProcessingRowsForTesting(inDb, outDb, fakeSession(), 'claim-stuck', /* forceFail */ true);
+    await flush();
+
+    expect(inDb.prepare("SELECT status FROM messages_in WHERE id='m-cb'").get()).toEqual({ status: 'failed' });
+    expect(calls).toHaveLength(1);
+    expect((calls[0] as string[])[1]).toBe('chat-999');
   });
 });
 

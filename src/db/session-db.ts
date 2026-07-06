@@ -203,6 +203,49 @@ export function markMessageFailed(db: Database.Database, messageId: string): voi
   db.prepare("UPDATE messages_in SET status = 'failed' WHERE id = ?").run(messageId);
 }
 
+/**
+ * Routing + classification fields for a message the host is about to give up
+ * on, so the caller can decide whether to notify the user and where. Used by
+ * host-sweep's failed-message user notification: without this, a message that
+ * exhausts MAX_TRIES (or is force-failed by the claim-stuck breaker) flips to
+ * `failed` and logs a warning, but the user who sent it hears *nothing* — the
+ * request just evaporates (Nicole Paik doodle request, 2026-07-03: repeated
+ * Claude-API 429s exhausted retries, no response ever delivered).
+ *
+ * `trigger` distinguishes an addressed request (1) from an accumulate-only
+ * context row (0) — we only apologize for the former. `kind='chat'` is the
+ * only user-facing kind; system round-trips and task rows are not something a
+ * human is waiting on in-channel.
+ */
+export function getFailedMessageNotifyInfo(
+  db: Database.Database,
+  messageId: string,
+):
+  | {
+      kind: string;
+      trigger: number;
+      channel_type: string | null;
+      platform_id: string | null;
+      thread_id: string | null;
+    }
+  | undefined {
+  return db
+    .prepare(
+      `SELECT kind, trigger, channel_type, platform_id, thread_id
+         FROM messages_in
+        WHERE id = ?`,
+    )
+    .get(messageId) as
+    | {
+        kind: string;
+        trigger: number;
+        channel_type: string | null;
+        platform_id: string | null;
+        thread_id: string | null;
+      }
+    | undefined;
+}
+
 export function retryWithBackoff(db: Database.Database, messageId: string, backoffSec: number): void {
   // Normalize status back to 'pending'. The wake path (countDueMessages /
   // getDueTaskRows) only picks up status='pending' rows. A claim-stuck
