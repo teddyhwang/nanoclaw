@@ -198,7 +198,7 @@ function buildDestinationsSection(): string {
   );
   lines.push('');
   lines.push(
-    'When replying to an incoming message, default to addressing the destination it came `from` (every inbound `<message>` tag carries a `from="name"` attribute). Pick a different destination when the request asks for it (e.g., "tell Laura that…").',
+    'When replying to an incoming message, address the destination it came `from` (every inbound `<message>` tag carries a `from="name"` attribute — that is where the question was asked and where the answer belongs). This is a hard default, not a preference: the answer to a question goes back to the chat that asked it. Send to a DIFFERENT destination ONLY when the triggering message explicitly directs it elsewhere by name (e.g. "tell Laura that…", "post this to the family group"). The topic or content of your answer is NEVER a reason to switch destinations — even if the answer concerns another chat, another person, or another group, a reply to a question still goes back to the `from` chat unless the user named a different target. Answering in a different chat than the one that asked (e.g. a question from a Telegram DM answered into a WhatsApp group) is a routing error the user experiences as the bot sending their private answer to the wrong place.',
   );
   lines.push('');
   lines.push(

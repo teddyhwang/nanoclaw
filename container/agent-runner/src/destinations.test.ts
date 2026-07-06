@@ -27,10 +27,28 @@ describe('buildSystemPromptAddendum — multi-destination routing guidance', () 
 
     const prompt = buildSystemPromptAddendum('Casa');
 
-    expect(prompt).toContain('default to addressing the destination it came `from`');
+    expect(prompt).toContain('address the destination it came `from`');
     expect(prompt).toContain('from="name"');
     expect(prompt).toContain('`casa`');
     expect(prompt).toContain('`whatsapp-mg-17780`');
+  });
+
+  it('states the origin-reply rule as a hard default and forbids switching on topic', () => {
+    // Regression: 2026-07-06 — Teddy's weight question asked in his Telegram DM
+    // was answered by the agent into the Tico WhatsApp group because it had
+    // Tico wired as a destination and the soft "default to" wording let the
+    // model switch destinations on the *topic* of the answer. The rule is now
+    // a hard default: content never justifies switching; only an explicit
+    // in-message directive does.
+    seedDestination('teddy', 'Teddy', 'telegram', 'telegram:8665243302');
+    seedDestination('tico', 'Tico', 'whatsapp', 'group-1@g.us');
+
+    const prompt = buildSystemPromptAddendum('Teddy');
+
+    expect(prompt).toContain('hard default, not a preference');
+    expect(prompt).toContain('goes back to the chat that asked it');
+    expect(prompt).toContain('ONLY when the triggering message explicitly directs it elsewhere by name');
+    expect(prompt).toContain('topic or content of your answer is NEVER a reason to switch destinations');
   });
 
   it('describes message wrapping for a single destination', () => {
@@ -47,7 +65,7 @@ describe('buildSystemPromptAddendum — multi-destination routing guidance', () 
     const prompt = buildSystemPromptAddendum('Casa');
 
     expect(prompt).toContain('no configured destinations');
-    expect(prompt).not.toContain('default to addressing');
+    expect(prompt).not.toContain('address the destination it came `from`');
   });
 
   it('includes default-routing and wrapping instructions for single destination', () => {
@@ -57,7 +75,7 @@ describe('buildSystemPromptAddendum — multi-destination routing guidance', () 
 
     expect(prompt).toContain('Wrap each delivered message');
     expect(prompt).toContain('<message to="name">');
-    expect(prompt).toContain('default to addressing the destination it came `from`');
+    expect(prompt).toContain('address the destination it came `from`');
     expect(prompt).toContain('`casa`');
   });
 
