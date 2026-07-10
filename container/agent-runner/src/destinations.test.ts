@@ -79,6 +79,21 @@ describe('buildSystemPromptAddendum — multi-destination routing guidance', () 
     expect(prompt).toContain('`casa`');
   });
 
+  it('forbids going silent when directly addressed even if a human answered in the same batch (Boys Night 2026-07-10)', () => {
+    // Regression: Barret @mentioned Optimus "when's the July boys night"; JK
+    // answered "July 23rd" 1s later in the same batch; Optimus read it as
+    // "already handled" and went silent, violating IDENTITY "always reply to
+    // the message that invoked you". The addressed-turn rule must explicitly
+    // cover the same-batch human-answer case.
+    seedDestination('casa', 'Casa', 'whatsapp', 'group-1@g.us');
+
+    const prompt = buildSystemPromptAddendum('Casa');
+
+    expect(prompt).toContain('A silent turn is NOT allowed when you were directly addressed');
+    expect(prompt).toContain('same batch');
+    expect(prompt).toContain('never because someone else answered first');
+  });
+
   it('teaches both <internal> as the private channel AND that unwrapped text is not delivered', () => {
     seedDestination('casa', 'Casa', 'whatsapp', 'group-1@g.us');
 
