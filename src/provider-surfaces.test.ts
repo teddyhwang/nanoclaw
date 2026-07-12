@@ -25,6 +25,7 @@ vi.mock('./log.js', () => ({
 import { buildMounts } from './container-runner.js';
 import { closeDb, createAgentGroup, initTestDb, runMigrations } from './db/index.js';
 import { ensureContainerConfig } from './db/container-configs.js';
+import { _resetEnginePathsForTests, setEnginePaths } from './engine/paths.js';
 import { initGroupFilesystem } from './group-init.js';
 import { registerProviderContainerConfig } from './providers/provider-container-registry.js';
 import type { ContainerConfig } from './container-config.js';
@@ -49,11 +50,13 @@ function containerConfig(): ContainerConfig {
 beforeEach(() => {
   fs.rmSync(TEST_ROOT, { recursive: true, force: true });
   fs.mkdirSync(TEST_ROOT, { recursive: true });
+  setEnginePaths({ projectRoot: TEST_ROOT, dataDir: DATA_DIR, groupsDir: GROUPS_DIR });
   runMigrations(initTestDb());
 });
 
 afterEach(() => {
   closeDb();
+  _resetEnginePathsForTests();
   fs.rmSync(TEST_ROOT, { recursive: true, force: true });
 });
 
@@ -147,13 +150,13 @@ describe('initGroupFilesystem deferred seed (.seed.md)', () => {
 });
 
 describe('buildMounts agent surfaces', () => {
-  it('mounts the default surfaces for an unregistered provider (today’s behavior)', () => {
+  it('mounts the default surfaces for an unregistered provider (today’s behavior)', async () => {
     const ag = group('ag-mounts-default', 'mounts-default');
     createAgentGroup(ag);
     ensureContainerConfig(ag.id);
     initGroupFilesystem(ag, {});
 
-    const mounts = buildMounts(ag, session('s1', ag.id), containerConfig(), 'claude', {});
+    const mounts = await buildMounts(ag, session('s1', ag.id), containerConfig(), 'claude', {});
 
     const byContainerPath = new Map(mounts.map((m) => [m.containerPath, m]));
     expect(byContainerPath.has('/home/node/.claude')).toBe(true);
@@ -163,7 +166,7 @@ describe('buildMounts agent surfaces', () => {
     expect(fs.existsSync(path.join(GROUPS_DIR, ag.folder, 'CLAUDE.md'))).toBe(true);
   });
 
-  it('suppresses the default surfaces and keeps contributed mounts for a surfaces-providing provider', () => {
+  it('suppresses the default surfaces and keeps contributed mounts for a surfaces-providing provider', async () => {
     const ag = group('ag-mounts-surfy', 'mounts-surfy');
     createAgentGroup(ag);
     ensureContainerConfig(ag.id);
@@ -178,7 +181,13 @@ describe('buildMounts agent surfaces', () => {
         },
       ],
     };
-    const mounts = buildMounts(ag, session('s2', ag.id), containerConfig(), 'surfaces-test-provider', contributed);
+    const mounts = await buildMounts(
+      ag,
+      session('s2', ag.id),
+      containerConfig(),
+      'surfaces-test-provider',
+      contributed,
+    );
 
     const containerPaths = mounts.map((m) => m.containerPath);
     expect(containerPaths).not.toContain('/home/node/.claude');

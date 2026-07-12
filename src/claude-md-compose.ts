@@ -131,10 +131,8 @@ export async function composeGroupClaudeMd(group: AgentGroup): Promise<void> {
 
   // Built-in module fragments — every MCP/CLI module that ships a
   // sibling `<name>.instructions.md`. These describe how the agent should
-  // use that module's tools (`ncl tasks`, install_packages, etc.).
-  // Skip ncl-dependent instructions when cli_scope is disabled. `scheduling`
-  // teaches `ncl tasks`, so it is just as dead as `cli` itself when the agent
-  // has no ncl — dispatch rejects every cli_request and ncl is excluded.
+  // use that module's tools (install_packages, etc.). Skip CLI instructions
+  // when cli_scope is disabled.
   const cliDisabled = configRow?.cli_scope === 'disabled';
   const mcpToolsHostDir = path.join(containerSourceDir, 'agent-runner', 'src', 'mcp-tools');
   if (fs.existsSync(mcpToolsHostDir)) {
@@ -142,7 +140,7 @@ export async function composeGroupClaudeMd(group: AgentGroup): Promise<void> {
       const match = entry.match(/^(.+)\.instructions\.md$/);
       if (!match) continue;
       const moduleName = match[1];
-      if ((moduleName === 'cli' || moduleName === 'scheduling') && cliDisabled) continue;
+      if (moduleName === 'cli' && cliDisabled) continue;
       desired.set(`module-${moduleName}.md`, {
         type: 'symlink',
         content: `${SHARED_MCP_TOOLS_CONTAINER_BASE}/${entry}`,

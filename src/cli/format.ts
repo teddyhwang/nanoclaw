@@ -23,8 +23,7 @@ const ISO_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?Z$/;
 /**
  * Human display shows local time; --json keeps the ISO machine contract.
  * The "YYYY-MM-DD HH:mm" stamp shape round-trips: parseZonedToUtc reads a
- * naive string as local wall-clock time, so a value copied from `ncl tasks
- * get` output into `--process-after` means what it shows.
+ * naive string as local wall-clock time.
  */
 export function localizeIsoTimestamps(value: unknown): unknown {
   if (typeof value === 'string') {

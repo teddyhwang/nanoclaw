@@ -344,13 +344,14 @@ describe('poll loop integration', () => {
 
     // Wait for BOTH to be handled as separate turns (task isolated,
     // then the deferred chat re-processed on a later poll).
-    await waitFor(() => getUndeliveredMessages().length >= 2, 2000);
+    await waitFor(() => getUndeliveredMessages().filter((row) => row.kind === 'chat').length >= 2, 2000);
     controller.abort();
 
-    const out = getUndeliveredMessages();
+    const out = getUndeliveredMessages().filter((row) => row.kind === 'chat');
     // Each turn produced its own outbound — no fold, no drop.
     expect(out.length).toBeGreaterThanOrEqual(2);
-    // Every outbound carries the correct origin routing.
+    // Every chat outbound carries the correct origin routing. Control rows
+    // intentionally have no platform routing and are excluded above.
     expect(out.every((o) => o.platform_id === 'chan-1')).toBe(true);
     // The task row was consumed (not left pending after its isolated turn).
     const pendingTask = getPendingMessages().find((m) => m.id === 't-task');
@@ -611,7 +612,11 @@ describe('poll loop — exchange hook (onExchangeComplete)', () => {
   }
 
   it('reports each exchange to a provider that declares the hook', async () => {
-    insertMessage('m1', { sender: 'Alice', text: 'please archive this' }, { platformId: 'chan-1', channelType: 'discord' });
+    insertMessage(
+      'm1',
+      { sender: 'Alice', text: 'please archive this' },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
 
     const provider = new HookedMockProvider({}, () => '<message to="discord-test">archived answer</message>');
     const controller = new AbortController();
@@ -656,7 +661,11 @@ describe('poll loop — exchange hook (onExchangeComplete)', () => {
   });
 
   it('a throwing hook never breaks delivery', async () => {
-    insertMessage('m1', { sender: 'Alice', text: 'still deliver this' }, { platformId: 'chan-1', channelType: 'discord' });
+    insertMessage(
+      'm1',
+      { sender: 'Alice', text: 'still deliver this' },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
 
     class ThrowingHookProvider extends MockProvider {
       onExchangeComplete(): void {
@@ -1303,14 +1312,22 @@ class InvalidSessionProvider {
 
 describe('poll loop — slash command during active query', () => {
   it('aborts the active query when /clear arrives as a follow-up', async () => {
-    insertMessage('m-active', { sender: 'Alice', text: 'long running request' }, { platformId: 'chan-1', channelType: 'discord' });
+    insertMessage(
+      'm-active',
+      { sender: 'Alice', text: 'long running request' },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
 
     const provider = new BlockingProvider();
     const controller = new AbortController();
     const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 3000);
 
     await waitFor(() => provider.queries === 1, 2000);
-    insertMessage('m-clear-active', { sender: 'Alice', text: '/clear' }, { platformId: 'chan-1', channelType: 'discord' });
+    insertMessage(
+      'm-clear-active',
+      { sender: 'Alice', text: '/clear' },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
 
     await waitFor(() => provider.aborts === 1, 2000);
     await waitFor(

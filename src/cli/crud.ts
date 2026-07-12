@@ -273,7 +273,8 @@ function genericUpdate(def: ResourceDef) {
 
     if (def.preUpdate) {
       const current = getDb().prepare(`SELECT ${cols} FROM ${def.table} WHERE ${def.idColumn} = ?`).get(id) as
-        Record<string, unknown> | undefined;
+        | Record<string, unknown>
+        | undefined;
       if (!current) throw new Error(`${def.name} not found: ${id}`);
       def.preUpdate(updates, current);
     }
@@ -374,8 +375,8 @@ export function validateArgs(
         if (typeof v === 'string') {
           try {
             out[def.name] = JSON.parse(v);
-          } catch {
-            throw new Error(`${flag} must be valid JSON`);
+          } catch (cause) {
+            throw new Error(`${flag} must be valid JSON`, { cause });
           }
         }
         break;
@@ -470,10 +471,10 @@ export function registerResource(def: ResourceDef): void {
           ? (raw) => {
               try {
                 return validateArgs(declared, normalizeArgs(raw));
-              } catch (e) {
+              } catch (cause) {
                 const usage = renderVerbHelp(def, verb);
-                const msg = e instanceof Error ? e.message : String(e);
-                throw new Error(usage ? `${msg}\n\n${usage}` : msg);
+                const msg = cause instanceof Error ? cause.message : String(cause);
+                throw new Error(usage ? `${msg}\n\n${usage}` : msg, { cause });
               }
             }
           : (raw) => normalizeArgs(raw),

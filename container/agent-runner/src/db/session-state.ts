@@ -205,6 +205,8 @@ export function consumeRotationNotice(): string | undefined {
   const v = getValue(ROTATION_NOTICE_KEY);
   if (v !== undefined) deleteValue(ROTATION_NOTICE_KEY);
   return v;
+}
+
 /**
  * The a2a reply stamp: the id of the first inbound message in the batch the
  * agent is currently processing. The poll loop publishes it at batch start;

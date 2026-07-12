@@ -15,8 +15,9 @@ vi.mock('./log.js', () => ({
 }));
 
 import { composeGroupClaudeMd } from './claude-md-compose.js';
-import { ensureContainerConfig, updateContainerConfigScalars } from './db/container-configs.js';
+import { ensureContainerConfig } from './db/container-configs.js';
 import { closeDb, createAgentGroup, initTestDb, runMigrations } from './db/index.js';
+import { _resetEnginePathsForTests, setEnginePaths } from './engine/paths.js';
 import { PERSONA_PREPEND_FILE } from './group-persona.js';
 import type { AgentGroup } from './types.js';
 
@@ -43,21 +44,23 @@ function importsOf(folder: string): string[] {
 beforeEach(() => {
   fs.rmSync(TEST_ROOT, { recursive: true, force: true });
   fs.mkdirSync(TEST_ROOT, { recursive: true });
+  setEnginePaths({ groupsDir: GROUPS_DIR });
   runMigrations(initTestDb());
 });
 
 afterEach(() => {
   closeDb();
+  _resetEnginePathsForTests();
   fs.rmSync(TEST_ROOT, { recursive: true, force: true });
 });
 
 describe('composeGroupClaudeMd persona prepend', () => {
-  it('imports the persona fragment FIRST, before the shared base', () => {
+  it('imports the persona fragment FIRST, before the shared base', async () => {
     const ag = group('ag-persona', 'persona-group');
     seed(ag);
     writePersona(ag.folder, 'You are an SDR agent.\n');
 
-    composeGroupClaudeMd(ag);
+    await composeGroupClaudeMd(ag);
 
     const imports = importsOf(ag.folder);
     expect(imports[0]).toBe('@./.claude-fragments/persona.md');
@@ -67,52 +70,27 @@ describe('composeGroupClaudeMd persona prepend', () => {
     );
   });
 
-  it('keeps the persona across a second compose (not pruned)', () => {
+  it('keeps the persona across a second compose (not pruned)', async () => {
     const ag = group('ag-persona-2', 'persona-group-2');
     seed(ag);
     writePersona(ag.folder, 'persona body');
 
-    composeGroupClaudeMd(ag);
-    composeGroupClaudeMd(ag);
+    await composeGroupClaudeMd(ag);
+    await composeGroupClaudeMd(ag);
 
     expect(fs.existsSync(path.join(GROUPS_DIR, ag.folder, '.claude-fragments', 'persona.md'))).toBe(true);
     expect(importsOf(ag.folder)[0]).toBe('@./.claude-fragments/persona.md');
   });
 
-  it('is inert when no persona file is present (non-template groups)', () => {
+  it('is inert when no persona file is present (non-template groups)', async () => {
     const ag = group('ag-no-persona', 'no-persona-group');
     seed(ag);
 
-    composeGroupClaudeMd(ag);
+    await composeGroupClaudeMd(ag);
 
     const imports = importsOf(ag.folder);
     expect(imports[0]).toBe('@./.claude-shared.md');
     expect(imports).not.toContain('@./.claude-fragments/persona.md');
     expect(fs.existsSync(path.join(GROUPS_DIR, ag.folder, '.claude-fragments', 'persona.md'))).toBe(false);
-  });
-});
-
-describe('composeGroupClaudeMd scheduling instructions (ncl tasks reach-in)', () => {
-  // Red-on-delete guard for the `scheduling`/`cli` exclusion at the
-  // module-fragment loop: the agent is taught `ncl tasks` iff it has ncl.
-  it('imports module-scheduling.md at the default cli_scope', () => {
-    const ag = group('ag-sched', 'sched-group');
-    seed(ag);
-
-    composeGroupClaudeMd(ag);
-
-    expect(importsOf(ag.folder)).toContain('@./.claude-fragments/module-scheduling.md');
-  });
-
-  it('excludes module-scheduling.md (and module-cli.md) when cli_scope is disabled', () => {
-    const ag = group('ag-sched-off', 'sched-group-off');
-    seed(ag);
-    updateContainerConfigScalars(ag.id, { cli_scope: 'disabled' });
-
-    composeGroupClaudeMd(ag);
-
-    const imports = importsOf(ag.folder);
-    expect(imports).not.toContain('@./.claude-fragments/module-scheduling.md');
-    expect(imports).not.toContain('@./.claude-fragments/module-cli.md');
   });
 });

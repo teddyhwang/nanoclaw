@@ -134,7 +134,7 @@ A personal AI assistant accessible via messaging, with minimal custom code.
 
 ### Scheduler
 - Built-in scheduler runs on the host, spawns containers for task execution
-- `ncl tasks` provides scheduling commands
+- The Optimus fork's built-in scheduling MCP tools provide task management backed by host-only `schedule.db` storage
 - Commands: `list`, `get`, `create`, `update`, `cancel`, `pause`, `resume`, `delete`, `run`, `append-log`
 - Tasks stored in SQLite with run history
 - Scheduler loop checks for due tasks every minute

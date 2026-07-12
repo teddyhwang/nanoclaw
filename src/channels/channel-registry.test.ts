@@ -260,6 +260,10 @@ describe('channel registry — instance keying', () => {
       'chat',
       JSON.stringify({ text: 'to the default bot' }),
       undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
       'slack',
     );
     expect(result).toBeUndefined();
@@ -272,6 +276,10 @@ describe('channel registry — instance keying', () => {
       null,
       'chat',
       JSON.stringify({ text: 'to the tester bot' }),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
       undefined,
       'slack-tester',
     );

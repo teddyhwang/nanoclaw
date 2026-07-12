@@ -87,8 +87,8 @@ export function shouldDeliverAssistantTextForRetryableResult(
 // don't fit our async message-passing model (they're designed for Claude
 // Code's interactive UI and would hang here).
 //
-// - CronCreate / CronDelete / CronList / ScheduleWakeup: we have durable
-//   scheduling via `ncl tasks`.
+// - CronCreate / CronDelete / CronList / ScheduleWakeup: the Optimus fork
+//   provides durable scheduling through its built-in scheduling MCP tools.
 // - AskUserQuestion: SDK returns a placeholder instead of blocking on a
 //   real answer — we have mcp__nanoclaw__ask_user_question that persists
 //   the question and blocks on the real reply.

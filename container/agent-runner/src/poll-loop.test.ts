@@ -1246,13 +1246,27 @@ describe('error result with no <message> envelope', () => {
     const budgetText = 'Spending limit reached. Add your own key at https://example.com/keys';
     const { query, pushes } = makeResultQuery({ type: 'result', text: budgetText, isError: true });
 
-    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', null, false, 'TestBot', [], null, undefined, 'prompt', undefined);
+    await processQuery(
+      query,
+      ERR_ROUTING,
+      ['m1'],
+      'claude',
+      null,
+      false,
+      'TestBot',
+      [],
+      null,
+      undefined,
+      'prompt',
+      undefined,
+    );
 
     const out = getUndeliveredMessages();
-    expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toBe(budgetText);
-    expect(out[0].platform_id).toBe('chan-1');
-    expect(out[0].channel_type).toBe('discord');
+    const delivered = out.filter((row) => row.kind === 'chat');
+    expect(delivered).toHaveLength(1);
+    expect(JSON.parse(delivered[0].content).text).toBe(budgetText);
+    expect(delivered[0].platform_id).toBe('chan-1');
+    expect(delivered[0].channel_type).toBe('discord');
     // No re-wrap nudge — an error result must not re-hammer the gateway.
     expect(pushes).toHaveLength(0);
   });
@@ -1260,9 +1274,22 @@ describe('error result with no <message> envelope', () => {
   it('still nudges (and does not deliver) a normal unwrapped result', async () => {
     const { query, pushes } = makeResultQuery({ type: 'result', text: 'bare text, no envelope' });
 
-    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', null, false, 'TestBot', [], null, undefined, 'prompt', undefined);
+    await processQuery(
+      query,
+      ERR_ROUTING,
+      ['m1'],
+      'claude',
+      null,
+      false,
+      'TestBot',
+      [],
+      null,
+      undefined,
+      'prompt',
+      undefined,
+    );
 
-    expect(getUndeliveredMessages()).toHaveLength(0);
+    expect(getUndeliveredMessages().filter((row) => row.kind === 'chat')).toHaveLength(0);
     expect(pushes).toHaveLength(1);
     expect(pushes[0]).toContain('was not delivered');
   });

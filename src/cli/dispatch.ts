@@ -32,8 +32,7 @@ export async function dispatch(
   // command that is a dash-prefix of req.command; the remainder is the target ID,
   // kept intact (dashes and all). This lets clients join all positional args with
   // dashes — e.g. `ncl groups get abc123` → "groups-get-abc123" → "groups-get" +
-  // id "abc123", and crucially `ncl tasks cancel task-374f-...-442` →
-  // "tasks-cancel" + id "task-374f-...-442" (a dashed id is no longer shredded).
+  // id "abc123" while preserving dashed IDs instead of shredding them.
   // Trimming from the end (longest→shortest) means a multi-segment verb like
   // "groups-config-add-mcp-server" still matches before any shorter prefix.
   if (!cmd) {

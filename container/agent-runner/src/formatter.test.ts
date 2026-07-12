@@ -526,6 +526,7 @@ describe('pickInReplyToMessage', () => {
       channelType: 'discord',
       threadId: 'discord:guild:general',
       inReplyTo: 'general-trigger',
+      taskFire: false,
     });
   });
 

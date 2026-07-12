@@ -18,7 +18,7 @@ const mockCreateAgentGroup = vi.fn();
 const mockInitGroupFilesystem = vi.fn();
 const mockUpdateScalars = vi.fn();
 const mockWriteDestinations = vi.fn();
-const mockNotifyWrite = vi.fn();
+const mockNotifyWrite = vi.fn().mockResolvedValue(undefined);
 
 vi.mock('../approvals/index.js', () => ({
   requestApproval: (...a: unknown[]) => mockRequestApproval(...a),

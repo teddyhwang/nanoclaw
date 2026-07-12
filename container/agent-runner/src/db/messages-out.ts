@@ -180,8 +180,8 @@ export function getUndeliveredMessages(): MessageOutRow[] {
  * already delivered something; suppress the fallback.
  *
  * `sinceIso` must be SQLite-comparable against `timestamp`, which is
- * written by `datetime('now')` (`'YYYY-MM-DD HH:MM:SS'`, UTC). Callers
- * pass a turn-start stamp from `outboundDbNow()` so the formats match.
+ * written as an ISO-8601 UTC instant. Callers pass a turn-start stamp from
+ * `outboundDbNow()` so the formats match.
  */
 export function countChatMessagesSince(sinceIso: string): number {
   const row = getOutboundDb()
@@ -267,13 +267,16 @@ export function hasChatMessageToDestinationSince(
 }
 
 /**
- * Current SQLite UTC timestamp string — matches `messages_out.timestamp`
- * formatting (`datetime('now')`) so `countChatMessagesSince` comparisons
- * are exact. Capture this at turn start.
+ * Current SQLite UTC timestamp in the same ISO-8601 shape written by
+ * `writeMessageOut`, so lexical timestamp comparisons are exact. Capture
+ * this at turn start.
  */
 export function outboundDbNow(): string {
-  const row = getOutboundDb().prepare("SELECT datetime('now') AS ts").get() as { ts: string };
+  const row = getOutboundDb().prepare("SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now') AS ts").get() as { ts: string };
   return row.ts;
+}
+
+/**
  * True if a deliberate send with this exact destination + text already exists
  * (an MCP send_message row from the current turn). Used by the task-fire
  * final-text dispatcher to drop the turn-final <message> echo of a send the

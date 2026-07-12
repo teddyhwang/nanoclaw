@@ -145,12 +145,12 @@ describe('writeSessionMessage re-provisions a deleted session folder', () => {
     closeDb();
   });
 
-  it('re-creates the folder + inbound.db and does not throw when the row still exists', () => {
+  it('re-creates the folder + inbound.db and does not throw when the row still exists', async () => {
     // Operator resets a stuck session by deleting its folder; the row survives.
     fs.rmSync(sessionDir(AG, SESS), { recursive: true, force: true });
     expect(fs.existsSync(inboundDbPath(AG, SESS))).toBe(false);
 
-    expect(() =>
+    await expect(
       writeSessionMessage(AG, SESS, {
         id: 'after-reset-1',
         kind: 'chat',
@@ -160,14 +160,15 @@ describe('writeSessionMessage re-provisions a deleted session folder', () => {
         threadId: null,
         content: JSON.stringify({ text: 'still here?' }),
       }),
-    ).not.toThrow();
+    ).resolves.toBeUndefined();
 
     // The folder + inbound.db are back and the message landed.
     expect(fs.existsSync(inboundDbPath(AG, SESS))).toBe(true);
     const db = new Database(inboundDbPath(AG, SESS), { readonly: true });
     try {
       const row = db.prepare('SELECT id, content FROM messages_in WHERE id = ?').get('after-reset-1') as
-        { id: string; content: string } | undefined;
+        | { id: string; content: string }
+        | undefined;
       expect(row?.id).toBe('after-reset-1');
       expect(JSON.parse(row!.content).text).toBe('still here?');
     } finally {

@@ -579,7 +579,7 @@ NanoClaw has a built-in scheduler that runs tasks as full agents in their group'
 ```
 User: @Andy remind me every Monday at 9am to review the weekly metrics
 
-Claude: [runs ncl tasks create --prompt "Send a reminder to review weekly metrics. Be encouraging!" --process-after "2024-02-05T09:00:00" --recurrence "0 9 * * 1"]
+Claude: [calls schedule_task with prompt "Send a reminder to review weekly metrics. Be encouraging!", process_after "2024-02-05T09:00:00", recurrence "0 9 * * 1"]
 
 Claude: Done! I'll remind you every Monday at 9am.
 ```
@@ -589,7 +589,7 @@ Claude: Done! I'll remind you every Monday at 9am.
 ```
 User: @Andy at 5pm today, send me a summary of today's emails
 
-Claude: [runs ncl tasks create --prompt "Search for today's emails, summarize the important ones, and send the summary to the group." --process-after "2024-01-31T17:00:00"]
+Claude: [calls schedule_task with prompt "Search for today's emails, summarize the important ones, and send the summary to the group.", process_after "2024-01-31T17:00:00"]
 ```
 
 ### Managing Tasks
@@ -610,7 +610,7 @@ From main channel:
 
 ### NanoClaw MCP (built-in)
 
-The `nanoclaw` MCP server is created dynamically per agent call with the current group's context. Scheduled task management lives in `ncl tasks`, not MCP.
+The `nanoclaw` MCP server is created dynamically per agent call with the current group's context. In the Optimus fork, scheduled task management uses the built-in scheduling MCP tools backed by host-only `schedule.db` storage.
 
 **Available Tools:**
 | Tool | Purpose |
