@@ -369,7 +369,13 @@ export function stopTypingRefresh(sessionId: string): void {
  * to surface them fleet-wide instead of guessing.
  */
 export type SilentWakeCause =
-  'task' | 'dm' | 'pattern' | 'group-mention' | 'reply-to-bot' | 'group-ambient' | 'unknown';
+  | 'task'
+  | 'dm'
+  | 'pattern'
+  | 'group-mention'
+  | 'reply-to-bot'
+  | 'group-ambient'
+  | 'unknown';
 
 /**
  * Pure classification of why a silent turn ended, split out so the rule

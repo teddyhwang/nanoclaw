@@ -797,7 +797,8 @@ describe('router', () => {
     expect(routedSession).toBeDefined();
     const inDb = new Database(inboundDbPath('ag-1', routedSession!.id));
     const row = inDb.prepare('SELECT trigger, content FROM messages_in WHERE id = ?').get('msg-reply-to-bot:ag-1') as
-      { trigger: number; content: string } | undefined;
+      | { trigger: number; content: string }
+      | undefined;
     inDb.close();
 
     expect(row).toBeDefined();

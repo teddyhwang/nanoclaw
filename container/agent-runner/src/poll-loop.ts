@@ -57,7 +57,13 @@ import {
 } from './formatter.js';
 import { getConfig } from './config.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
-import type { AgentProvider, AgentQuery, ImageContentBlock, ProviderEvent, ProviderExchange } from './providers/types.js';
+import type {
+  AgentProvider,
+  AgentQuery,
+  ImageContentBlock,
+  ProviderEvent,
+  ProviderExchange,
+} from './providers/types.js';
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;

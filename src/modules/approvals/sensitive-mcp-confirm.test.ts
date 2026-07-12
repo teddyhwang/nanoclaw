@@ -27,11 +27,13 @@ vi.mock('../../session-manager.js', () => ({
 // Fix B: the confirm handler now calls dashboard-server to replay the
 // held MCP call. Mock the client so the suite is hermetic (no real
 // localhost fetch) and so we can assert the engine-driven replay path.
-const replayConfirmedMcpCall = vi.fn(async (..._args: unknown[]): Promise<unknown> => ({
-  status: 'ok',
-  content: [{ type: 'text', text: 'CALENDAR-RESULT' }],
-  isError: false,
-}));
+const replayConfirmedMcpCall = vi.fn(
+  async (..._args: unknown[]): Promise<unknown> => ({
+    status: 'ok',
+    content: [{ type: 'text', text: 'CALENDAR-RESULT' }],
+    isError: false,
+  }),
+);
 vi.mock('./mcp-replay-client.js', () => ({
   replayConfirmedMcpCall: (...args: unknown[]) => replayConfirmedMcpCall(...args),
 }));

@@ -192,7 +192,8 @@ export function getDueTaskRows(db: Database.Database): { id: string; series_id: 
  */
 export function getLatestHumanInboundMs(db: Database.Database): number {
   const row = db.prepare(`SELECT MAX(timestamp) AS ts FROM messages_in WHERE kind = 'chat-sdk'`).get() as
-    { ts: string | null } | undefined;
+    | { ts: string | null }
+    | undefined;
   if (!row?.ts) return 0;
   const ms = Date.parse(row.ts);
   return Number.isFinite(ms) ? ms : 0;
@@ -532,7 +533,8 @@ export function migrateMessagesInTable(db: Database.Database): void {
  */
 export function getInboundSourceSessionId(db: Database.Database, messageId: string): string | null {
   const row = db.prepare('SELECT source_session_id FROM messages_in WHERE id = ?').get(messageId) as
-    { source_session_id: string | null } | undefined;
+    | { source_session_id: string | null }
+    | undefined;
   return row?.source_session_id ?? null;
 }
 
