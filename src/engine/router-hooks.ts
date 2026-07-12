@@ -22,7 +22,7 @@ import {
   setSenderResolver as _setSenderResolver,
   setAccessGate as _setAccessGate,
   setSenderScopeGate as _setSenderScopeGate,
-  setMessageInterceptor as _setMessageInterceptor,
+  registerMessageInterceptor as _registerMessageInterceptor,
   setChannelRequestGate as _setChannelRequestGate,
   type SenderResolverFn,
   type AccessGateFn,
@@ -93,7 +93,11 @@ export function addSenderScopeGate(fn: SenderScopeGateFn): () => void {
 export function addMessageInterceptor(fn: MessageInterceptorFn): () => void {
   messageInterceptors.push(fn);
   if (!installed.interceptor) {
-    _setMessageInterceptor(async (event) => {
+    // Upstream's router grew a native multi-interceptor registry
+    // (registerMessageInterceptor). We still funnel through ONE registered
+    // dispatcher over our own array so addMessageInterceptor keeps its
+    // removal semantics (the returned unsubscribe fn).
+    _registerMessageInterceptor(async (event) => {
       for (const i of messageInterceptors) {
         if (await i(event)) return true;
       }

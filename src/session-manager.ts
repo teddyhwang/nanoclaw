@@ -21,13 +21,16 @@ import { DATA_DIR } from './config.js';
 import { getPlatformCredentialReader } from './engine/platform-credentials.js';
 import { transcribeAudio } from './media/transcription.js';
 import { formatVideoMarker, processVideo } from './media/video.js';
+import { ensureContainedInboxDir, isPathInside } from './inbox-safety.js';
 import { getMessagingGroup } from './db/messaging-groups.js';
 import {
   createSession,
+  findSystemSession,
   findSessionByAgentGroup,
   findSessionForAgent,
   findMostRecentClosedSessionForAgent,
   getSession,
+  taskThreadId,
   updateSession,
 } from './db/sessions.js';
 import {
@@ -41,11 +44,6 @@ import {
 } from './db/session-db.js';
 import { log } from './log.js';
 import type { Session } from './types.js';
-
-function isPathInside(parent: string, child: string): boolean {
-  const relative = path.relative(parent, child);
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
-}
 
 /** Root directory for all session data. */
 export function sessionsBaseDir(): string {
@@ -70,14 +68,6 @@ export function outboundDbPath(agentGroupId: string, sessionId: string): string 
 /** Path to the container heartbeat file (touched instead of DB writes). */
 export function heartbeatPath(agentGroupId: string, sessionId: string): string {
   return path.join(sessionDir(agentGroupId, sessionId), '.heartbeat');
-}
-
-/**
- * @deprecated Use inboundDbPath / outboundDbPath instead.
- * Kept temporarily for test compatibility during migration.
- */
-export function sessionDbPath(agentGroupId: string, sessionId: string): string {
-  return inboundDbPath(agentGroupId, sessionId);
 }
 
 function generateId(): string {
@@ -221,6 +211,33 @@ export function resolveSession(
   initSessionFolder(agentGroupId, id);
   carryForwardRecentPendingChatRows(agentGroupId, messagingGroupId, lookupThreadId, id);
   log.info('Session created', { id, agentGroupId, messagingGroupId, threadId: lookupThreadId, sessionMode });
+
+  return { session, created: true };
+}
+
+/** Find or create the per-agent-group session used for scheduled tasks. */
+/** Find or create the isolated session for one task series (thread `system:tasks:<seriesId>`). */
+export function resolveTaskSession(agentGroupId: string, seriesId: string): { session: Session; created: boolean } {
+  const threadId = taskThreadId(seriesId);
+  const existing = findSystemSession(agentGroupId, threadId);
+  if (existing) return { session: existing, created: false };
+
+  const id = generateId();
+  const session: Session = {
+    id,
+    agent_group_id: agentGroupId,
+    messaging_group_id: null,
+    thread_id: threadId,
+    agent_provider: null,
+    status: 'active',
+    container_status: 'stopped',
+    last_active: null,
+    created_at: new Date().toISOString(),
+  };
+
+  createSession(session);
+  initSessionFolder(agentGroupId, id);
+  log.info('Task session created', { id, agentGroupId, seriesId });
 
   return { session, created: true };
 }
@@ -380,6 +397,16 @@ export async function writeSessionMessage(
     onWake?: 0 | 1;
   },
 ): Promise<void> {
+  // Documented reset: operators `rm -rf` a session folder to clear a stuck
+  // session. The sessions row survives, so the next message takes the
+  // existing-session path and lands here with a missing inbound.db — the open
+  // below would throw and the message would be logged-and-dropped forever.
+  // Re-provision the folder + DBs (initSessionFolder is idempotent) so the
+  // documented reset actually re-provisions instead of killing the chat.
+  if (!fs.existsSync(inboundDbPath(agentGroupId, sessionId))) {
+    initSessionFolder(agentGroupId, sessionId);
+  }
+
   // Extract base64 attachment data, save to inbox, replace with file paths.
   // Also runs the per-attachment audio-transcription pass so voice
   // messages land on disk with `att.transcript` populated for the
@@ -448,6 +475,14 @@ async function extractAttachmentFiles(
     return contentStr;
   }
 
+  const inboxRoot = path.join(sessionDir(agentGroupId, sessionId), 'inbox');
+  // Resolved lazily on the first attachment that actually carries bytes, so a
+  // message whose attachments have no inline `data` never creates an inbox dir.
+  // ensureContainedInboxDir refuses a pre-placed symlink at the inbox root or
+  // the per-message subdir before any write lands outside the sandbox (#2828).
+  let inboxDir: string | null = null;
+  let inboxResolved = false;
+
   let changed = false;
   // Synthetic `type:'image'` attachments for video keyframes. Collected
   // during the loop (mutating `attachments` mid-iteration is unsafe) and
@@ -467,32 +502,12 @@ async function extractAttachmentFiles(
       });
     }
 
-    const inboxDir = path.join(sessionDir(agentGroupId, sessionId), 'inbox', messageId);
-
-    // Refuse to mkdir through a symlink that the container may have pre placed
-    // at inboxDir. With recursive:true, mkdirSync would silently no op on a
-    // pre existing symlink and the subsequent writeFileSync would follow it.
-    if (fs.existsSync(inboxDir)) {
-      const stat = fs.lstatSync(inboxDir);
-      if (stat.isSymbolicLink() || !stat.isDirectory()) {
-        log.warn('Rejecting unsafe inbox directory', { messageId, inboxDir });
-        continue;
-      }
+    if (!inboxResolved) {
+      inboxDir = ensureContainedInboxDir(inboxRoot, messageId, { messageId });
+      inboxResolved = true;
     }
-    fs.mkdirSync(inboxDir, { recursive: true });
-
-    let realInboxDir: string;
-    try {
-      realInboxDir = fs.realpathSync(inboxDir);
-    } catch (err) {
-      log.warn('Failed to resolve inbox directory', { messageId, err });
-      continue;
-    }
-    const inboxRoot = path.join(sessionDir(agentGroupId, sessionId), 'inbox');
-    if (!isPathInside(fs.realpathSync(inboxRoot), realInboxDir)) {
-      log.warn('Inbox directory escaped session inbox root', { messageId, inboxDir });
-      continue;
-    }
+    // Unsafe inbox (symlink / escape) — no attachment can be written safely.
+    if (!inboxDir) break;
 
     // Decode the base64 buffer ONCE here. Used immediately for the
     // optional transcription pass (audio attachments) AND for the
@@ -635,6 +650,16 @@ export function openInboundDb(agentGroupId: string, sessionId: string): Database
   return db;
 }
 
+/** Open a session's inbound DB, run `fn`, and always close it. */
+export function withInboundDb<T>(agentGroupId: string, sessionId: string, fn: (db: Database.Database) => T): T {
+  const db = openInboundDb(agentGroupId, sessionId);
+  try {
+    return fn(db);
+  } finally {
+    db.close();
+  }
+}
+
 /** Open the outbound DB for a session (host reads only). */
 export function openOutboundDb(agentGroupId: string, sessionId: string): Database.Database {
   return openOutboundDbRaw(outboundDbPath(agentGroupId, sessionId));
@@ -649,6 +674,12 @@ export function openOutboundDbRw(agentGroupId: string, sessionId: string): Datab
  * Write a message directly to a session's outbound DB so the host delivery
  * loop picks it up. Used by the command gate to send denial responses
  * without waking a container.
+ *
+ * Needs the read-write open — the readonly handle the delivery poll uses
+ * can't INSERT. This is a host-side write to the container-owned outbound.db,
+ * but it's safe even with a container running: both sides open with DELETE
+ * journal + busy_timeout, and the even host seq stays out of the container's
+ * odd-seq space.
  */
 export function writeOutboundDirect(
   agentGroupId: string,
@@ -662,43 +693,23 @@ export function writeOutboundDirect(
     content: string;
   },
 ): void {
-  const db = openOutboundDb(agentGroupId, sessionId);
+  const db = openOutboundDbRw(agentGroupId, sessionId);
   try {
     db.prepare(
       `INSERT OR IGNORE INTO messages_out (id, seq, timestamp, kind, platform_id, channel_type, thread_id, content)
-       VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 2 FROM messages_out), datetime('now'), ?, ?, ?, ?, ?)`,
-    ).run(message.id, message.kind, message.platformId, message.channelType, message.threadId, message.content);
+       VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 2 FROM messages_out), ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      message.id,
+      new Date().toISOString(),
+      message.kind,
+      message.platformId,
+      message.channelType,
+      message.threadId,
+      message.content,
+    );
   } finally {
     db.close();
   }
-}
-
-/**
- * @deprecated Use openInboundDb / openOutboundDb instead.
- */
-export function openSessionDb(agentGroupId: string, sessionId: string): Database.Database {
-  return openInboundDb(agentGroupId, sessionId);
-}
-
-/** Write a system response to a session's inbound.db so the container's findQuestionResponse() picks it up. */
-export async function writeSystemResponse(
-  agentGroupId: string,
-  sessionId: string,
-  requestId: string,
-  status: string,
-  result: Record<string, unknown>,
-): Promise<void> {
-  await writeSessionMessage(agentGroupId, sessionId, {
-    id: `sys-resp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    kind: 'system',
-    timestamp: new Date().toISOString(),
-    content: JSON.stringify({
-      type: 'question_response',
-      questionId: requestId,
-      status,
-      result,
-    }),
-  });
 }
 
 /**

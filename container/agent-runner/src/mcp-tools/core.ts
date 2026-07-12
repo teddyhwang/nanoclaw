@@ -10,8 +10,6 @@
 import fs from 'fs';
 import path from 'path';
 
-import { getCurrentInReplyTo } from '../current-batch.js';
-import { getCurrentBatchReplyTarget } from '../db/session-state.js';
 import { getInboundDb, getOutboundDb } from '../db/connection.js';
 import { findByName, getAllDestinations } from '../destinations.js';
 import {
@@ -20,6 +18,7 @@ import {
   getRoutingBySeq,
   writeMessageOut,
 } from '../db/messages-out.js';
+import { getCurrentBatchReplyTarget, getCurrentInReplyTo } from '../db/session-state.js';
 import { getSessionRouting } from '../db/session-routing.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';

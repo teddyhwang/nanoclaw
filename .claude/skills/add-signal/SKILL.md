@@ -123,7 +123,9 @@ This prints a `tsdevice:` URI. Scan it as a QR code on your phone: **Settings �
 
 Skip to **Credentials** if all of these are already in place:
 
-- `src/channels/signal.ts` and `src/channels/signal.test.ts` both exist
+- `src/channels/signal.ts` exists
+- `src/channels/signal.test.ts` exists
+- `src/channels/signal-registration.test.ts` exists
 - `src/channels/index.ts` contains `import './signal.js';`
 
 Otherwise continue. Every step below is safe to re-run.
@@ -137,8 +139,9 @@ git fetch origin channels
 ### 2. Copy the adapter and tests
 
 ```bash
-git show origin/channels:src/channels/signal.ts      > src/channels/signal.ts
-git show origin/channels:src/channels/signal.test.ts > src/channels/signal.test.ts
+git show origin/channels:src/channels/signal.ts                   > src/channels/signal.ts
+git show origin/channels:src/channels/signal.test.ts             > src/channels/signal.test.ts
+git show origin/channels:src/channels/signal-registration.test.ts > src/channels/signal-registration.test.ts
 ```
 
 ### 3. Append the self-registration import
@@ -149,13 +152,14 @@ Append to `src/channels/index.ts` (skip if the line is already present):
 import './signal.js';
 ```
 
-### 4. Build
+### 4. Build and validate
 
 ```bash
 pnpm run build
+pnpm exec vitest run src/channels/signal-registration.test.ts
 ```
 
-No npm packages to install — the adapter uses only Node.js builtins.
+Both must be clean before proceeding. `signal-registration.test.ts` is the one integration test: it imports the real channel barrel and asserts the registry contains `signal`. It goes red if the `import './signal.js';` line is deleted or drifts, or if the barrel fails to evaluate (so the channel genuinely would not register). The adapter consumes only Node.js builtins, so there is no npm dependency to guard for this channel. The adapter's typed core-API consumption is guarded by `pnpm run build`.
 
 ## Credentials
 
@@ -216,30 +220,21 @@ Pass the `id` to `/init-first-agent` or `/manage-channels` to wire it to an agen
 
 ### Groups
 
-Add the Signal number to a group from your phone, send any message, then wire the resulting row the same way. For isolated per-group sessions:
+Add the Signal number to a group from your phone, send any message, then wire the resulting row the same way. Each group gets its own session with the default `shared` mode (one session per agent + messaging group). Create the wiring with `ncl` — **the host service must be running** (`ncl` connects to it over a Unix socket):
 
 ```bash
-NOW=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
-pnpm exec tsx scripts/q.ts data/v2.db "
-INSERT OR IGNORE INTO messaging_group_agents
-  (id, messaging_group_id, agent_group_id, session_mode, priority, created_at)
-VALUES
-  ('mga-'||hex(randomblob(8)), 'mg-GROUPID', 'ag-AGENTID', 'isolated', 0, '$NOW');
-"
+# Engage mode/pattern default to the Signal adapter's declared channel defaults
+ncl wirings create --messaging-group-id mg-GROUPID --agent-group-id ag-AGENTID
 ```
 
 ### Grant user access
 
-New Signal users (including the owner's Signal identity) are silently dropped with `not_member` until granted access. After the user's first message appears in `messaging_groups`:
+New Signal users (including the owner's Signal identity) are silently dropped with `not_member` until granted access. After the user's first message appears in `messaging_groups` (host service running):
 
 ```bash
-NOW=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
-pnpm exec tsx scripts/q.ts data/v2.db "
-INSERT OR REPLACE INTO user_roles (user_id, role, agent_group_id, granted_by, granted_at)
-  VALUES ('signal:UUID', 'owner', NULL, 'system', '$NOW');
-INSERT OR IGNORE INTO agent_group_members (user_id, agent_group_id, added_by, added_at)
-  VALUES ('signal:UUID', 'ag-AGENTID', 'system', '$NOW');
-"
+ncl users create --id "signal:UUID" --kind signal --display-name "<name>"
+ncl roles grant --user "signal:UUID" --role owner
+ncl members add --user "signal:UUID" --group ag-AGENTID
 ```
 
 Find the UUID from `messaging_groups.platform_id` or the `users` table.
@@ -260,7 +255,7 @@ Otherwise, run `/init-first-agent` to create an agent and wire it to your Signal
   - Group: `signal:{base64GroupId}` — base64-encoded GroupV2 ID
 - **how-to-find-id**: Send a message to the bot, then query `messaging_groups` as shown above
 - **typical-use**: Personal assistant via Signal DMs or small group chats
-- **default-isolation**: One agent per Signal account. Multiple chats with the same operator can share an agent group; groups with other people should typically use `isolated` session mode
+- **default-isolation**: One agent per Signal account. Multiple chats with the same operator can share an agent group; groups with other people should typically get their own agent group (the default `shared` session mode already gives each messaging group its own session)
 
 ### Features
 

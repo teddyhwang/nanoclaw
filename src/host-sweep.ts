@@ -29,7 +29,8 @@
 import Database from 'better-sqlite3';
 import fs from 'fs';
 
-import { getActiveSessions } from './db/sessions.js';
+import { ensureEgressNetwork } from './egress-lockdown.js';
+import { getActiveSessions, isTaskThread, updateSession } from './db/sessions.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import {
   countDueMessages,
@@ -304,6 +305,16 @@ async function sweep(generation: number): Promise<void> {
   if (!running) return;
   if (generation !== sweepGeneration) return; // superseded by a watchdog re-arm
 
+  // Re-heal the egress network so already-running agents keep their gateway hop
+  // if it was detached out-of-band. Best-effort here: a heal failure isn't a
+  // leak (agents stay on the internal net), so log and continue. No-op when
+  // lockdown is disabled.
+  try {
+    ensureEgressNetwork();
+  } catch (err) {
+    log.error('Egress lockdown re-heal failed', { err });
+  }
+
   try {
     const sessions = getActiveSessions();
     for (const session of sessions) {
@@ -343,6 +354,18 @@ async function sweep(generation: number): Promise<void> {
   // pre-existing series out of old inbound.dbs. The whole stranded class
   // is gone with the storage move — there is nothing left to revive.
 
+  // Finalize any "Reject with reason…" holds whose reply window elapsed (admin
+  // ghosted, or the host restarted mid-capture). Central-DB scan, once per tick
+  // — not per session.
+  // MODULE-HOOK:approvals-reason-sweep:start
+  try {
+    const { sweepAwaitingReasonRejects } = await import('./modules/approvals/index.js');
+    await sweepAwaitingReasonRejects();
+  } catch (err) {
+    log.error('Reject-with-reason sweep failed', { err });
+  }
+  // MODULE-HOOK:approvals-reason-sweep:end
+
   // Tick completed — the loop is alive. Bump the watchdog heartbeat and
   // re-arm under our generation (a watchdog re-arm would have bumped the
   // generation, retiring this link).
@@ -350,6 +373,15 @@ async function sweep(generation: number): Promise<void> {
   if (generation === sweepGeneration) {
     setTimeout(() => sweep(generation), SWEEP_INTERVAL_MS);
   }
+}
+
+/** A per-task session with no live tasks and no running container is spent → close it. */
+export function shouldCloseTaskSession(
+  threadId: string | null,
+  containerRunning: boolean,
+  liveTaskCount: number,
+): boolean {
+  return isTaskThread(threadId) && !containerRunning && liveTaskCount === 0;
 }
 
 async function sweepSession(session: Session): Promise<void> {
@@ -396,6 +428,7 @@ async function sweepSession(session: Session): Promise<void> {
     // would keep bumping process_after into the future, dueCount would stay 0,
     // and the wake would never fire.
     const dueCount = countDueMessages(inDb);
+    let justWoke = false;
     if (dueCount > 0 && !isContainerRunning(session.id)) {
       // Fire one `task.fired` per due task row before the wake so plugins
       // can stamp per-task pre-wake state (e.g. sender-identity) that
@@ -416,12 +449,17 @@ async function sweepSession(session: Session): Promise<void> {
       // wakeContainer never throws — transient spawn failures (OneCLI down,
       // etc.) return false and leave messages pending for the next tick.
       await wakeContainer(session);
+      justWoke = true;
     }
 
     const alive = isContainerRunning(session.id);
 
     // 3. Running-container SLA: idle timeout + stuck rules.
-    if (alive && outDb) {
+    // Skip on the same iteration that just woke the container — it hasn't
+    // had a chance to clear stale processing_ack rows from a previous crash
+    // yet. Without this grace period, stale claims cause an immediate
+    // spawn-kill loop.
+    if (alive && outDb && !justWoke) {
       enforceRunningContainerSla(inDb, outDb, session, agentGroup.id, dueCount);
     }
 
@@ -476,6 +514,24 @@ async function sweepSession(session: Session): Promise<void> {
       log.error('Failed to project task_series snapshot', { sessionId: session.id, err });
     }
     // MODULE-HOOK:scheduling-recurrence:end
+
+    // 6. GC spent task sessions. An isolated per-task session with no live task
+    // rows left (one-shot fired, or all cancelled/deleted) and no container
+    // running is dead — close it so it stops being swept and listed. Runs after
+    // recurrence so a just-fired recurring series has already re-armed its next
+    // pending row and is never collected. The per-task log file in the workspace
+    // is the durable history and survives the close.
+    if (isTaskThread(session.thread_id)) {
+      const liveTasks = (
+        inDb
+          .prepare("SELECT COUNT(*) AS c FROM messages_in WHERE kind = 'task' AND status IN ('pending', 'paused')")
+          .get() as { c: number }
+      ).c;
+      if (shouldCloseTaskSession(session.thread_id, isContainerRunning(session.id), liveTasks)) {
+        updateSession(session.id, { status: 'closed' });
+        log.info('Closed spent task session', { sessionId: session.id, threadId: session.thread_id });
+      }
+    }
   } finally {
     inDb.close();
     outDb?.close();

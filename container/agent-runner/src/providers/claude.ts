@@ -9,7 +9,7 @@ import { clearContinuationStartedAt, getContinuationStartedAt } from '../db/sess
 import { resolvePressureThresholdTokens } from '../pressure-rotation.js';
 import { evaluateRotation } from '../session-rotation.js';
 import { EMPTY_STATS, type SessionStats } from '../session-stats.js';
-import { TIMEZONE } from '../timezone.js';
+import { TIMEZONE, formatLocalStamp } from '../timezone.js';
 import { registerProvider } from './provider-registry.js';
 import type {
   AgentProvider,
@@ -88,7 +88,7 @@ export function shouldDeliverAssistantTextForRetryableResult(
 // Code's interactive UI and would hang here).
 //
 // - CronCreate / CronDelete / CronList / ScheduleWakeup: we have durable
-//   scheduling via mcp__nanoclaw__schedule_task.
+//   scheduling via `ncl tasks`.
 // - AskUserQuestion: SDK returns a placeholder instead of blocking on a
 //   real answer — we have mcp__nanoclaw__ask_user_question that persists
 //   the question and blocks on the real reply.
@@ -343,7 +343,9 @@ function archiveTranscriptFile(
 
     const conversationsDir = process.env.NANOCLAW_CONVERSATIONS_DIR || '/workspace/agent/conversations';
     fs.mkdirSync(conversationsDir, { recursive: true });
-    const filename = `${new Date().toISOString().split('T')[0]}-${name}.md`;
+    // Local calendar date — the fallback `name` above already uses local
+    // hours, and the agent navigates conversations/ by these date prefixes.
+    const filename = `${formatLocalStamp(new Date(), TIMEZONE).slice(0, 10)}-${name}.md`;
     fs.writeFileSync(path.join(conversationsDir, filename), formatTranscriptMarkdown(messages, summary, assistantName));
     log(`Archived conversation to ${filename}`);
     return true;
@@ -783,7 +785,12 @@ export class ClaudeProvider implements AgentProvider {
             lastAssistantTextWithMessage = assistantText;
           }
         } else if (message.type === 'result') {
-          const rawText = 'result' in message ? ((message as { result?: string }).result ?? null) : null;
+          // `result` text exists only on subtype:"success"; error subtypes
+          // (e.g. a non-retryable 403 billing_error) carry their message in
+          // `errors[]` instead. Surface either so the poll-loop can deliver a
+          // billing/quota notice to the user rather than dropping the turn.
+          const m = message as { result?: string; is_error?: boolean; errors?: string[] };
+          const rawText = m.result ?? (m.errors && m.errors.length > 0 ? m.errors.join('\n') : null);
           if (shouldDeliverAssistantTextForRetryableResult(rawText, lastAssistantTextWithMessage)) {
             const text = lastAssistantTextWithMessage;
             lastAssistantTextWithMessage = null;
@@ -801,10 +808,12 @@ export class ClaudeProvider implements AgentProvider {
           }
           const text = selectResultTextForDelivery(rawText, lastAssistantTextWithMessage);
           lastAssistantTextWithMessage = null;
-          yield { type: 'result', text, tokensUsed: lastContextTokens };
+          yield { type: 'result', text, tokensUsed: lastContextTokens, isError: m.is_error === true };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };
-        } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'rate_limit_event') {
+        } else if (message.type === 'rate_limit_event') {
+          // Fork: rate limits are retryable — the poll-loop backs off and
+          // retries instead of failing the turn (47d357f).
           yield { type: 'error', message: 'Rate limit', retryable: true, classification: 'quota' };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'compact_boundary') {
           const meta = (message as { compact_metadata?: { pre_tokens?: number } }).compact_metadata;

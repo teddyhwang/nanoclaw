@@ -3,16 +3,19 @@
  * Spawns agent containers with session folder + agent group folder mounts.
  * The container runs the v2 agent-runner which polls the session DB.
  */
-import { ChildProcess, execSync, spawn } from 'child_process';
+import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
+import { promisify } from 'util';
 
 import { OneCLI } from '@onecli-sh/sdk';
 
 import {
+  CONTAINER_CPU_LIMIT,
   CONTAINER_IMAGE,
   CONTAINER_IMAGE_BASE,
   CONTAINER_INSTALL_LABEL,
+  CONTAINER_MEMORY_LIMIT,
   DATA_DIR,
   GROUPS_DIR,
   ONECLI_API_KEY,
@@ -23,6 +26,7 @@ import { materializeContainerJson } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars } from './db/container-configs.js';
 import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
+import { EGRESS_NETWORK, egressNetworkArgs, ensureEgressNetwork } from './egress-lockdown.js';
 import { composeGroupClaudeMd } from './claude-md-compose.js';
 import { getExtraSkillRoots } from './engine/skill-roots.js';
 import { getSharedBaseSource, getDocsRoot, getSharedDreamSource } from './engine/composer-hooks.js';
@@ -40,6 +44,7 @@ import { resolveSharedGroups } from './shared-groups.js';
 import './providers/index.js';
 import {
   getProviderContainerConfig,
+  providerProvidesAgentSurfaces,
   type ProviderContainerContribution,
   type VolumeMount,
 } from './providers/provider-container-registry.js';
@@ -185,6 +190,13 @@ async function spawnContainer(session: Session): Promise<void> {
   // we don't re-read.
   const containerConfig = materializeContainerJson(agentGroup.id);
 
+  // Per-group filesystem state lives forever after first creation. Init is
+  // idempotent: it only writes paths that don't already exist, so this call
+  // is a no-op for groups that have spawned before. Runs before the provider
+  // contribution so a surfaces-providing provider finds the group dir ready.
+  const providerName = resolveProviderName(session.agent_provider, containerConfig.provider);
+  initGroupFilesystem(agentGroup, { provider: providerName });
+
   // Resolve the effective provider + any host-side contribution it declares
   // (extra mounts, env passthrough). Computed once and threaded through both
   // buildMounts and buildContainerArgs so side effects (mkdir, etc.) fire once.
@@ -209,7 +221,7 @@ async function spawnContainer(session: Session): Promise<void> {
     contribution.env = { ...(contribution.env ?? {}), ...pluginContrib.env };
   }
 
-  const mounts = await buildMounts(agentGroup, session, containerConfig, contribution);
+  const mounts = await buildMounts(agentGroup, session, containerConfig, provider, contribution);
   const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
   // OneCLI agent identifier is always the agent group id — stable across
   // sessions and reversible via getAgentGroup() for approval routing.
@@ -274,6 +286,7 @@ async function spawnContainer(session: Session): Promise<void> {
   // Stream stderr to debug as before, but also retain a bounded tail so a
   // crash exit can log WHY the container died without a manual `docker logs`
   // repro (the 2026-05-16 diagnostic gap).
+
   container.stderr?.on('data', (data) => {
     containerLogStream?.write(data);
     for (const line of data.toString().trim().split('\n')) {
@@ -423,16 +436,19 @@ function resolveProviderContribution(
     ? fn({
         sessionDir: sessionDir(agentGroup.id, session.id),
         agentGroupId: agentGroup.id,
+        groupDir: path.resolve(GROUPS_DIR, agentGroup.folder),
+        selectedSkills: selectedSkillNames(containerConfig),
         hostEnv: process.env,
       })
     : {};
   return { provider, contribution };
 }
 
-async function buildMounts(
+export async function buildMounts(
   agentGroup: AgentGroup,
   session: Session,
   containerConfig: import('./container-config.js').ContainerConfig,
+  provider: string,
   providerContribution: ProviderContainerContribution,
 ): Promise<VolumeMount[]> {
   // NANOCLAW_PROJECT_ROOT lets embedded hosts (e.g. Optimus) declare the
@@ -456,18 +472,20 @@ async function buildMounts(
     ? path.resolve(process.env.NANOCLAW_CONTAINER_SOURCE_DIR)
     : path.join(projectRoot, 'container');
 
-  // Per-group filesystem state lives forever after first creation. Init is
-  // idempotent: it only writes paths that don't already exist, so this call
-  // is a no-op for groups that have spawned before.
-  initGroupFilesystem(agentGroup);
+  // Default agent surfaces (composed project doc, skill links, provider state
+  // dir) apply unless the provider's registration declares it provides its
+  // own — a capability, never a provider name. See provider-container-registry.
+  const defaultSurfaces = !providerProvidesAgentSurfaces(provider);
 
-  // Sync skill symlinks based on container.json selection before mounting.
   const claudeDir = path.join(DATA_DIR, 'v2-sessions', agentGroup.id, '.claude-shared');
-  syncSkillSymlinks(claudeDir, containerConfig, agentGroup);
+  if (defaultSurfaces) {
+    // Sync skill symlinks based on container.json selection before mounting.
+    syncSkillSymlinks(claudeDir, containerConfig, agentGroup);
 
-  // Compose CLAUDE.md fresh every spawn from the shared base, enabled skill
-  // fragments, and MCP server instructions. See `claude-md-compose.ts`.
-  await composeGroupClaudeMd(agentGroup);
+    // Compose CLAUDE.md fresh every spawn from the shared base, enabled skill
+    // fragments, and MCP server instructions. See `claude-md-compose.ts`.
+    await composeGroupClaudeMd(agentGroup);
+  }
 
   const mounts: VolumeMount[] = [];
   const sessDir = sessionDir(agentGroup.id, session.id);
@@ -494,11 +512,11 @@ async function buildMounts(
   // already RO-mounted, so writes through it fail regardless — no need for
   // a nested mount there.
   const composedClaudeMd = path.join(groupDir, 'CLAUDE.md');
-  if (fs.existsSync(composedClaudeMd)) {
+  if (defaultSurfaces && fs.existsSync(composedClaudeMd)) {
     mounts.push({ hostPath: composedClaudeMd, containerPath: '/workspace/agent/CLAUDE.md', readonly: true });
   }
   const fragmentsDir = path.join(groupDir, '.claude-fragments');
-  if (fs.existsSync(fragmentsDir)) {
+  if (defaultSurfaces && fs.existsSync(fragmentsDir)) {
     mounts.push({ hostPath: fragmentsDir, containerPath: '/workspace/agent/.claude-fragments', readonly: true });
   }
 
@@ -548,7 +566,7 @@ async function buildMounts(
   // when no provider is registered the default container/CLAUDE.md applies.
   const sharedBaseOverride = getSharedBaseSource();
   const sharedClaudeMd = sharedBaseOverride ? sharedBaseOverride.hostPath : path.join(containerSourceDir, 'CLAUDE.md');
-  if (fs.existsSync(sharedClaudeMd)) {
+  if (defaultSurfaces && fs.existsSync(sharedClaudeMd)) {
     mounts.push({ hostPath: sharedClaudeMd, containerPath: '/app/CLAUDE.md', readonly: true });
   }
 
@@ -568,7 +586,9 @@ async function buildMounts(
 
   // Per-group .claude-shared at /home/node/.claude (Claude state, settings,
   // skill symlinks)
-  mounts.push({ hostPath: claudeDir, containerPath: '/home/node/.claude', readonly: false });
+  if (defaultSurfaces) {
+    mounts.push({ hostPath: claudeDir, containerPath: '/home/node/.claude', readonly: false });
+  }
 
   // Shared agent-runner source — read-only, same code for all groups.
   // Resolve symlinks: Docker Desktop on macOS does NOT follow host-side
@@ -779,16 +799,41 @@ export function syncSkillSymlinks(
   }
 }
 
+/**
+ * Resolve the group's skill selection to concrete names — `'all'` recomputes
+ * from `container/skills/` so newly-added upstream skills appear automatically.
+ */
+function selectedSkillNames(containerConfig: import('./container-config.js').ContainerConfig): string[] {
+  if (containerConfig.skills !== 'all') return containerConfig.skills;
+  const sharedSkillsDir = path.join(process.cwd(), 'container', 'skills');
+  return fs.existsSync(sharedSkillsDir)
+    ? fs.readdirSync(sharedSkillsDir).filter((e) => {
+        try {
+          return fs.statSync(path.join(sharedSkillsDir, e)).isDirectory();
+        } catch {
+          return false;
+        }
+      })
+    : [];
+}
+
 async function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
   agentGroup: AgentGroup,
   containerConfig: import('./container-config.js').ContainerConfig,
-  provider: string,
+  _provider: string,
   providerContribution: ProviderContainerContribution,
   agentIdentifier?: string,
 ): Promise<string[]> {
   const args: string[] = ['run', '--rm', '--name', containerName, '--label', CONTAINER_INSTALL_LABEL];
+
+  // Per-container resource caps (opt-in; empty = unbounded, today's behavior).
+  // Only --memory is set. Whether that's a hard cap depends on the host having no
+  // swap (a deployment concern) — on a swapless host --memory is hard and a runaway
+  // is OOM-killed; we don't manage swap from here.
+  if (CONTAINER_CPU_LIMIT) args.push('--cpus', CONTAINER_CPU_LIMIT);
+  if (CONTAINER_MEMORY_LIMIT) args.push('--memory', CONTAINER_MEMORY_LIMIT);
 
   // Environment — only vars read by code we don't own.
   // Everything NanoClaw-specific is in container.json (read by runner at startup).
@@ -824,34 +869,14 @@ async function buildContainerArgs(
     }
   }
 
-  // OneCLI gateway — injects HTTPS_PROXY + certs so container API calls
-  // are routed through the agent vault for credential injection. Treated as
-  // a transient hard failure: if we can't wire the gateway, we don't spawn.
-  // The caller (router or host-sweep) catches the throw, leaves the inbound
-  // message pending, and the next sweep tick retries.
-  if (agentIdentifier) {
-    await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+  // Egress lockdown when enabled — throws if it can't be established, aborting
+  // the spawn rather than running with open egress. Otherwise the host gateway.
+  if (ensureEgressNetwork()) {
+    args.push(...egressNetworkArgs());
+    log.info('Egress lockdown active', { containerName, network: EGRESS_NETWORK });
+  } else {
+    args.push(...hostGatewayArgs());
   }
-  const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
-  if (!onecliApplied) {
-    throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
-  }
-  // OneCLI injects ANTHROPIC_API_KEY=placeholder, which the Claude SDK turns
-  // into an `x-api-key` header. Anthropic prefers `x-api-key` over
-  // `Authorization` when both are present, so the proxy's Bearer-token
-  // injection (required for OAuth tokens, sk-ant-oat01-...) is ignored and
-  // the literal "placeholder" reaches Anthropic, which rejects it with
-  // `invalid x-api-key`. Swap to ANTHROPIC_AUTH_TOKEN so the SDK emits
-  // `Authorization: Bearer placeholder` instead, which the proxy replaces.
-  for (let i = 0; i < args.length - 1; i++) {
-    if (args[i] === '-e' && args[i + 1] === 'ANTHROPIC_API_KEY=placeholder') {
-      args[i + 1] = 'ANTHROPIC_AUTH_TOKEN=placeholder';
-    }
-  }
-  log.info('OneCLI gateway applied', { containerName });
-
-  // Host gateway
-  args.push(...hostGatewayArgs());
 
   // Bypass the OneCLI HTTP proxy for internal MCP / dashboard / qmd
   // traffic. The proxy is for credential injection on outbound calls
@@ -879,6 +904,36 @@ async function buildContainerArgs(
     }
   }
 
+  // OneCLI gateway — injects HTTPS_PROXY + certs so container API calls
+  // are routed through the agent vault for credential injection, and mounts
+  // any credential stubs the gateway serves (e.g. a sentinel auth file).
+  // Runs AFTER the volume mounts so a stub nested inside one of our mounts
+  // (a parent dir mounted RW above it) lands later in the args and isn't
+  // shadowed by it. Treated as a transient hard failure: if we can't wire
+  // the gateway, we don't spawn. The caller (router or host-sweep) catches
+  // the throw, leaves the inbound message pending, and the next sweep tick
+  // retries.
+  if (agentIdentifier) {
+    await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+  }
+  const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
+  if (!onecliApplied) {
+    throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
+  }
+  // OneCLI injects ANTHROPIC_API_KEY=placeholder, which the Claude SDK turns
+  // into an `x-api-key` header. Anthropic prefers `x-api-key` over
+  // `Authorization` when both are present, so the proxy's Bearer-token
+  // injection (required for OAuth tokens, sk-ant-oat01-...) is ignored and
+  // the literal "placeholder" reaches Anthropic, which rejects it with
+  // `invalid x-api-key`. Swap to ANTHROPIC_AUTH_TOKEN so the SDK emits
+  // `Authorization: Bearer placeholder` instead, which the proxy replaces.
+  for (let i = 0; i < args.length - 1; i++) {
+    if (args[i] === '-e' && args[i + 1] === 'ANTHROPIC_API_KEY=placeholder') {
+      args[i + 1] = 'ANTHROPIC_AUTH_TOKEN=placeholder';
+    }
+  }
+  log.info('OneCLI gateway applied', { containerName });
+
   // Override entrypoint: run v2 entry point directly via Bun (no tsc, no stdin).
   args.push('--entrypoint', 'bash');
 
@@ -895,6 +950,8 @@ async function buildContainerArgs(
 
   return args;
 }
+
+const execAsync = promisify(exec);
 
 /** Build a per-agent-group Docker image with custom packages. */
 export async function buildAgentGroupImage(agentGroupId: string): Promise<void> {
@@ -932,9 +989,12 @@ export async function buildAgentGroupImage(agentGroupId: string): Promise<void> 
   const tmpDockerfile = path.join(DATA_DIR, `Dockerfile.${agentGroupId}`);
   fs.writeFileSync(tmpDockerfile, dockerfile);
   try {
-    execSync(`${CONTAINER_RUNTIME_BIN} build -t ${imageTag} -f ${tmpDockerfile} .`, {
+    // Awaited async exec so the single-threaded host stays responsive during
+    // the build (can take minutes) instead of blocking on execSync. exec buffers
+    // stdout/stderr (matching the old stdio: 'pipe') and rejects on a non-zero
+    // exit, so error propagation is unchanged.
+    await execAsync(`${CONTAINER_RUNTIME_BIN} build -t ${imageTag} -f ${tmpDockerfile} .`, {
       cwd: DATA_DIR,
-      stdio: 'pipe',
       timeout: 900_000,
     });
   } finally {

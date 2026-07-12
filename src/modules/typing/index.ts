@@ -51,7 +51,7 @@ const HEARTBEAT_FRESH_MS = 6000;
 const POST_DELIVERY_PAUSE_MS = 10000;
 
 interface TypingAdapter {
-  setTyping?(channelType: string, platformId: string, threadId: string | null): Promise<void>;
+  setTyping?(channelType: string, platformId: string, threadId: string | null, instance?: string): Promise<void>;
 }
 
 interface TypingTarget {
@@ -59,6 +59,8 @@ interface TypingTarget {
   channelType: string;
   platformId: string;
   threadId: string | null;
+  /** Adapter instance that owns the chat; undefined = default (= channelType). */
+  instance?: string;
   interval: NodeJS.Timeout;
   startedAt: number;
   pausedUntil: number; // epoch ms; 0 = not paused
@@ -78,9 +80,14 @@ export function setTypingAdapter(a: TypingAdapter): void {
   adapter = a;
 }
 
-async function triggerTyping(channelType: string, platformId: string, threadId: string | null): Promise<void> {
+async function triggerTyping(
+  channelType: string,
+  platformId: string,
+  threadId: string | null,
+  instance?: string,
+): Promise<void> {
   try {
-    await adapter?.setTyping?.(channelType, platformId, threadId);
+    await adapter?.setTyping?.(channelType, platformId, threadId, instance);
   } catch {
     // Typing is best-effort — don't let it fail delivery or routing.
   }
@@ -227,6 +234,7 @@ export function startTypingRefresh(
   channelType: string,
   platformId: string,
   threadId: string | null,
+  instance?: string,
 ): void {
   const existing = typingRefreshers.get(sessionId);
   if (existing) {
@@ -235,14 +243,24 @@ export function startTypingRefresh(
     // the container-wake latency budget. Also clear any lingering
     // post-delivery pause: a new inbound means the user expects
     // typing to show immediately.
-    triggerTyping(channelType, platformId, threadId).catch(() => {});
+    triggerTyping(channelType, platformId, threadId, instance).catch(() => {});
     existing.startedAt = Date.now();
     existing.pausedUntil = 0;
+    // Keep the stored entry self-consistent: a re-trigger can arrive from
+    // a different chat address (agent-shared sessions span messaging
+    // groups, possibly on different platforms/instances), so the address
+    // fields and the owning instance must move together — a torn entry
+    // (old address + new instance) would hand e.g. a telegram platformId
+    // to a Slack instance's setTyping on the next interval tick.
+    existing.channelType = channelType;
+    existing.platformId = platformId;
+    existing.threadId = threadId;
+    existing.instance = instance;
     return;
   }
 
   // Immediate tick + periodic refresh.
-  triggerTyping(channelType, platformId, threadId).catch(() => {});
+  triggerTyping(channelType, platformId, threadId, instance).catch(() => {});
   const startedAt = Date.now();
   const interval = setInterval(() => {
     const entry = typingRefreshers.get(sessionId);
@@ -275,7 +293,7 @@ export function startTypingRefresh(
 
     const withinGrace = Date.now() - entry.startedAt < TYPING_GRACE_MS;
     if (withinGrace || isHeartbeatFresh(entry.agentGroupId, sessionId)) {
-      triggerTyping(entry.channelType, entry.platformId, entry.threadId).catch(() => {});
+      triggerTyping(entry.channelType, entry.platformId, entry.threadId, entry.instance).catch(() => {});
       return;
     }
 
@@ -290,6 +308,7 @@ export function startTypingRefresh(
     channelType,
     platformId,
     threadId,
+    instance,
     interval,
     startedAt,
     pausedUntil: 0,
@@ -350,13 +369,7 @@ export function stopTypingRefresh(sessionId: string): void {
  * to surface them fleet-wide instead of guessing.
  */
 export type SilentWakeCause =
-  | 'task'
-  | 'dm'
-  | 'pattern'
-  | 'group-mention'
-  | 'reply-to-bot'
-  | 'group-ambient'
-  | 'unknown';
+  'task' | 'dm' | 'pattern' | 'group-mention' | 'reply-to-bot' | 'group-ambient' | 'unknown';
 
 /**
  * Pure classification of why a silent turn ended, split out so the rule

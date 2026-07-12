@@ -5,27 +5,15 @@
  *   1. Module-initiated actions — the module called `requestApproval()` with
  *      some free-form `action` string and registered a handler via
  *      `registerApprovalHandler(action, handler)`. On approve, we look up the
- *      handler and call it; on reject, we notify the agent and move on.
+ *      handler and call it; on plain reject we relay a decline to the agent; on
+ *      "Reject with reason…" we hold the row and capture the admin's next DM as
+ *      a one-line reason (see reason-capture.ts). Reject finalization is shared
+ *      via finalizeReject.
  *   2. OneCLI credential approvals (`action = 'onecli_credential'`). Resolved
  *      via an in-memory Promise — see onecli-approvals.ts.
  *
  * The response handler is registered via core's `registerResponseHandler`;
  * core iterates handlers and the first one to return `true` claims the response.
- *
- * Clicker authorization (Phase 0, sensitive-action-approvals design): a card
- * is delivered to an eligible approver's DM, but the response plumbing does
- * not intrinsically bind the click to that approver — historically ANY user
- * whose click carried the card's questionId could approve/reject. That made
- * the security of an approval contingent purely on the delivery channel
- * staying private (security-by-delivery, not authorization-on-click). We now
- * additionally re-verify, on every click, that the clicking user is in
- * `pickApprover(approval.agent_group_id)` for module-initiated approvals.
- * An unauthorized click (including a click with no resolvable user id) is
- * ignored and the row is LEFT PENDING so a real approver can still act —
- * it is never consumed, so a bystander cannot deny a legitimate request by
- * clicking Reject either. OneCLI credential approvals keep their existing
- * in-memory-promise path (the card is short-id'd and DM-only; the registered
- * pending row is dropped without dispatch — see `handleApprovalsResponse`).
  */
 import { wakeContainer } from '../../container-runner.js';
 import { deletePendingApproval, getPendingApproval, getSession } from '../../db/sessions.js';
@@ -33,59 +21,45 @@ import type { ResponsePayload } from '../../response-registry.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { PendingApproval } from '../../types.js';
+import { hasAdminPrivilege, isGlobalAdmin, isOwner } from '../permissions/db/user-roles.js';
+import { finalizeReject } from './finalize.js';
 import { ONECLI_ACTION, resolveOneCLIApproval } from './onecli-approvals.js';
-import { getApprovalHandler, pickApprover } from './primitive.js';
+import { getApprovalHandler, notifyApprovalResolved, REJECT_WITH_REASON_VALUE } from './primitive.js';
+import { armReasonCapture } from './reason-capture.js';
 
 export async function handleApprovalsResponse(payload: ResponsePayload): Promise<boolean> {
-  // OneCLI credential approvals — resolved via in-memory Promise first.
-  if (resolveOneCLIApproval(payload.questionId, payload.value)) {
-    return true;
-  }
-
-  // DB-backed pending_approvals.
   const approval = getPendingApproval(payload.questionId);
   if (!approval) return false;
 
+  if (!isAuthorizedApprovalClick(approval, payload)) {
+    log.warn('Ignoring unauthorized approval response', {
+      approvalId: approval.approval_id,
+      action: approval.action,
+      userId: payload.userId,
+      channelType: payload.channelType,
+    });
+    return true;
+  }
+
   if (approval.action === ONECLI_ACTION) {
+    if (resolveOneCLIApproval(payload.questionId, payload.value)) {
+      return true;
+    }
     // Row exists but the in-memory resolver is gone (timer fired or the process
     // was in a weird state). Nothing to do — just drop the row.
     deletePendingApproval(payload.questionId);
     return true;
   }
 
-  await handleRegisteredApproval(approval, payload.value, payload.userId ?? '', payload.channelType ?? '');
+  await handleRegisteredApproval(approval, payload.value, namespacedUserId(payload) ?? '');
   return true;
-}
-
-/**
- * Namespace a raw platform clicker id into the `users(id)` /
- * `pending_approvals.payload.actorId` form so clicker-auth's equality
- * check works across channels. MUST stay byte-identical to the engine's
- * sender namespacing (modules/permissions/index.ts:233-237 and
- * modules/approvals/sensitive-gate.ts `namespaceActorId`): only prefix
- * when the raw id has no colon — some platforms (Teams `29:xxx`,
- * channel-prefixed WhatsApp `whatsapp:...@lid`) already carry a
- * namespace. Bug C (2026-05-17): the WhatsApp /confirm slash path
- * (whatsapp-channel.ts:1429) passes the RAW jid `<n>@lid` while
- * decideSensitiveGate recorded the actor as `whatsapp:<n>@lid`, so a
- * strict `userId === actorId` made the actor's own Confirm look like a
- * bystander click — no grant, task never ran, infinite re-prompt.
- */
-function namespaceClickerId(channelType: string, rawUserId: string): string {
-  if (!rawUserId) return '';
-  return rawUserId.includes(':') ? rawUserId : `${channelType}:${rawUserId}`;
 }
 
 async function handleRegisteredApproval(
   approval: PendingApproval,
   selectedOption: string,
-  rawUserId: string,
-  channelType: string,
+  userId: string,
 ): Promise<void> {
-  // Normalize the clicker id to the namespaced form BEFORE any auth
-  // comparison or grant write — the recorded actorId and pickApprover
-  // ids are all in `<channel>:<handle>` form.
-  const userId = namespaceClickerId(channelType, rawUserId);
   if (!approval.session_id) {
     deletePendingApproval(approval.approval_id);
     return;
@@ -96,10 +70,10 @@ async function handleRegisteredApproval(
     return;
   }
 
+  // "Reject with reason…" — hold the row and capture the admin's next DM
+  // instead of finalizing now. The agent is notified exactly once: after the
   const notify = (text: string): void => {
-    // Fire-and-forget — system text notifications never carry audio
-    // attachments, so the engine's transcription pass is a no-op.
-    void writeSessionMessage(session.agent_group_id, session.id, {
+    writeSessionMessage(session.agent_group_id, session.id, {
       id: `appr-note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       kind: 'chat',
       timestamp: new Date().toISOString(),
@@ -107,73 +81,44 @@ async function handleRegisteredApproval(
       channelType: 'agent',
       threadId: null,
       content: JSON.stringify({ text, sender: 'system', senderId: 'system' }),
-    }).catch((err) => log.error('writeSessionMessage failed in notify', { err }));
+    });
   };
 
-  // Clicker authorization. A click only carries a questionId + the clicking
-  // user's id, so without this check any user who can reach the card's
-  // callback could resolve it (approve/reject/confirm/cancel). Two trust
-  // models, keyed by the row's action:
-  //
-  //   - sensitive_mcp_confirm / sensitive_golf_confirm (self-confirm
-  //     gates): the authorized clicker is the recorded actor (the
-  //     triggering sender), NOT an approver. The card is delivered
-  //     in-channel where every member can see it, so a bystander clicking
-  //     Confirm must be a no-op. Authorize against payload.actorId.
-  //   - everything else (CLI / OneCLI / self-mod admin-approval): the card
-  //     is in an approver's DM; authorize against pickApprover.
-  //
-  // An unauthorized click (or one with no resolvable user id) is dropped
-  // WITHOUT consuming the row — it stays pending so a legitimate actor /
-  // approver can still act, and a bystander cannot deny it by clicking the
-  // negative option. No wakeContainer: nothing changed for the agent.
-  // The two self-confirm gates (MCP integrations + golf booking) share a
-  // single trust model: in-channel card, authorize against the recorded
-  // actorId, positive option is 'confirm'. Everything else is
-  // admin-approval (DM card, pickApprover, positive option 'approve').
-  const isSelfConfirm = approval.action === 'sensitive_mcp_confirm' || approval.action === 'sensitive_golf_confirm';
-  let authorized: boolean;
-  if (isSelfConfirm) {
-    let actorId = '';
-    try {
-      actorId = (JSON.parse(approval.payload) as { actorId?: string }).actorId ?? '';
-    } catch {
-      actorId = '';
+  // Self-confirm gates (MCP integrations + golf booking) use a two-button
+  // Confirm/Cancel card delivered in-channel; the positive option is
+  // 'confirm', anything else is a cancel by the recorded actor — no
+  // reason-capture flow applies.
+  if (isSelfConfirmAction(approval.action)) {
+    if (selectedOption !== 'confirm') {
+      notify(`Your ${approval.action} request was cancelled.`);
+      log.info('Approval not granted', {
+        approvalId: approval.approval_id,
+        action: approval.action,
+        selectedOption,
+        userId,
+      });
+      deletePendingApproval(approval.approval_id);
+      await wakeContainer(session);
+      return;
     }
-    authorized = !!userId && !!actorId && userId === actorId;
   } else {
-    const eligible = pickApprover(approval.agent_group_id);
-    authorized = !!userId && eligible.includes(userId);
-  }
-  if (!authorized) {
-    log.warn('Approval click from unauthorized user ignored — row left pending', {
-      approvalId: approval.approval_id,
-      action: approval.action,
-      clickerUserId: userId || '(none)',
-      selectedOption,
-    });
-    return;
-  }
+    // "Reject with reason…" — hold the row and capture the admin's next DM
+    // instead of finalizing now. The agent is notified exactly once: after the
+    // reason arrives, or after the sweep's timeout if the admin ghosts.
+    if (selectedOption === REJECT_WITH_REASON_VALUE) {
+      await armReasonCapture(approval, session, userId);
+      return;
+    }
 
-  // Positive option is action-dependent: admin-approval cards use
-  // 'approve'; the self-confirm gate uses 'confirm'. Anything else is the
-  // negative path (reject / cancel) — drop the row, tell the agent.
-  const positiveValue = isSelfConfirm ? 'confirm' : 'approve';
-  if (selectedOption !== positiveValue) {
-    const verb = isSelfConfirm ? 'cancelled' : 'rejected by admin';
-    notify(`Your ${approval.action} request was ${verb}.`);
-    log.info('Approval not granted', {
-      approvalId: approval.approval_id,
-      action: approval.action,
-      selectedOption,
-      userId,
-    });
-    deletePendingApproval(approval.approval_id);
-    await wakeContainer(session);
-    return;
+    // Plain Reject (or any other non-approve value) — instant fast path.
+    if (selectedOption !== 'approve') {
+      await finalizeReject(approval, session, userId);
+      return;
+    }
   }
 
   // Approved — dispatch to the module that registered for this action.
+
   const handler = getApprovalHandler(approval.action);
   if (!handler) {
     log.warn('No approval handler registered — row dropped', {
@@ -182,6 +127,7 @@ async function handleRegisteredApproval(
     });
     notify(`Your ${approval.action} was approved, but no handler is installed to apply it.`);
     deletePendingApproval(approval.approval_id);
+    await notifyApprovalResolved({ approval, session, outcome: 'approve', userId });
     await wakeContainer(session);
     return;
   }
@@ -198,5 +144,52 @@ async function handleRegisteredApproval(
   }
 
   deletePendingApproval(approval.approval_id);
+  await notifyApprovalResolved({ approval, session, outcome: 'approve', userId });
   await wakeContainer(session);
+}
+
+function namespacedUserId(payload: ResponsePayload): string | null {
+  if (!payload.userId) return null;
+  return payload.userId.includes(':') ? payload.userId : `${payload.channelType}:${payload.userId}`;
+}
+
+/**
+ * Self-confirm gates (sensitive_mcp_confirm / sensitive_golf_confirm): the
+ * card is delivered in-channel where every member can see it, and the
+ * authorized clicker is the recorded ACTOR (the triggering sender), not an
+ * approver — a bystander clicking Confirm or Cancel must be a no-op.
+ */
+function isSelfConfirmAction(action: string): boolean {
+  return action === 'sensitive_mcp_confirm' || action === 'sensitive_golf_confirm';
+}
+
+function isAuthorizedApprovalClick(approval: PendingApproval, payload: ResponsePayload): boolean {
+  const userId = namespacedUserId(payload);
+  if (!userId) return false;
+
+  // Self-confirm gates authorize against the actor recorded on the row's
+  // payload (see sensitive-mcp-confirm.ts), not against approver roles.
+  if (isSelfConfirmAction(approval.action)) {
+    let actorId = '';
+    try {
+      actorId = (JSON.parse(approval.payload) as { actorId?: string }).actorId ?? '';
+    } catch {
+      actorId = '';
+    }
+    return !!actorId && userId === actorId;
+  }
+
+  // An approval may name a specific approver; only that exact user may resolve it.
+  if (approval.approver_user_id) {
+    return userId === approval.approver_user_id;
+  }
+
+  const agentGroupId =
+    approval.agent_group_id ?? (approval.session_id ? getSession(approval.session_id)?.agent_group_id : null);
+
+  if (!agentGroupId) {
+    return isOwner(userId) || isGlobalAdmin(userId);
+  }
+
+  return hasAdminPrivilege(userId, agentGroupId);
 }

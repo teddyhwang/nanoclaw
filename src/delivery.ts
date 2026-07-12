@@ -14,7 +14,7 @@ import { getAgentGroup } from './db/agent-groups.js';
 import { configFromDb } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { getDb, hasTable } from './db/connection.js';
-import { getMessagingGroupByPlatform, getMessagingGroupAgentByPair } from './db/messaging-groups.js';
+import { getMessagingGroup, getMessagingGroupByPlatform, getMessagingGroupAgentByPair } from './db/messaging-groups.js';
 import {
   getDueOutboundMessages,
   getDeliveredIds,
@@ -80,8 +80,11 @@ export interface ChannelDeliveryAdapter {
      * platform has no embed concept ignore it.
      */
     suppressEmbeds?: boolean,
+    /** Delivering adapter instance (defaults to channelType downstream).
+     *  Host-internal only — containers never see instance. */
+    instance?: string,
   ): Promise<string | undefined>;
-  setTyping?(channelType: string, platformId: string, threadId: string | null): Promise<void>;
+  setTyping?(channelType: string, platformId: string, threadId: string | null, instance?: string): Promise<void>;
 }
 
 let deliveryAdapter: ChannelDeliveryAdapter | null = null;
@@ -333,7 +336,7 @@ async function deliverMessage(
 
   const content = JSON.parse(msg.content);
 
-  // System actions — handle internally (schedule_task, cancel_task, etc.)
+  // System actions — handle internally (cli_request, etc.)
   if (msg.kind === 'system') {
     await handleSystemAction(content, session, inDb);
     return;
@@ -368,8 +371,19 @@ async function deliverMessage(
   // path in deliverSessionMessages and eventually marks the message as failed
   // (instead of marking it delivered when nothing was actually delivered,
   // which was the pre-refactor bug).
+  // Resolve the messaging group ORIGIN-SESSION-FIRST: when the message
+  // targets the session's own chat address, the origin row wins even if
+  // sibling instances share the same (channel_type, platform_id) — so the
+  // reply goes out through the instance the message came in on. Otherwise
+  // fall back to the by-platform lookup (default-instance-first).
+  const originMg = session.messaging_group_id ? getMessagingGroup(session.messaging_group_id) : undefined;
   const deliveryMessagingGroup =
-    msg.channel_type && msg.platform_id ? getMessagingGroupByPlatform(msg.channel_type, msg.platform_id) : undefined;
+    msg.channel_type && msg.platform_id
+      ? originMg && originMg.channel_type === msg.channel_type && originMg.platform_id === msg.platform_id
+        ? originMg
+        : getMessagingGroupByPlatform(msg.channel_type, msg.platform_id)
+      : undefined;
+  let deliverInstance: string | undefined;
   if (msg.channel_type && msg.platform_id) {
     if (!deliveryMessagingGroup) {
       throw new Error(`unknown messaging group for ${msg.channel_type}/${msg.platform_id} (message ${msg.id})`);
@@ -415,6 +429,7 @@ async function deliverMessage(
         );
       }
     }
+    deliverInstance = deliveryMessagingGroup.instance;
   }
 
   // Track pending questions for ask_user_question flow.
@@ -510,6 +525,7 @@ async function deliverMessage(
     assistantName,
     assistantPrefixSeparator,
     suppressEmbeds,
+    deliverInstance,
   );
   log.info('Message delivered', {
     id: msg.id,
@@ -565,6 +581,11 @@ export function registerDeliveryAction(action: string, handler: DeliveryActionHa
     log.warn('Delivery action handler overwritten', { action });
   }
   handlers.set(action, handler);
+}
+
+/** Look up a registered delivery-action handler. Lets module registrations be behavior-tested. */
+export function getDeliveryAction(action: string): DeliveryActionHandler | undefined {
+  return getActionHandlers().get(action);
 }
 
 /**

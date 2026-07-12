@@ -64,6 +64,9 @@ export async function runScript(script: string, taskId: string): Promise<ScriptR
   });
 }
 
+/** Why a script gated its task: deliberate wakeAgent=false vs a broken script. */
+export type ScriptSkipReason = 'gated' | 'error';
+
 /**
  * A task whose pre-task script gated it out of this tick (wakeAgent=false
  * or script error/no-output). Carries the identity the poll-loop needs to
@@ -81,8 +84,8 @@ export interface GatedTask {
 
 export interface TaskScriptOutcome {
   keep: MessageInRow[];
-  /** Task ids gated out — fed to markCompleted by the caller. */
-  skipped: string[];
+  /** Tasks gated out, with the reason — fed to markScriptSkipped by the caller. */
+  skipped: Array<{ id: string; reason: ScriptSkipReason }>;
   /** Same gated tasks, with the fields needed to write a 'gated' fire. */
   gated: GatedTask[];
 }
@@ -90,14 +93,16 @@ export interface TaskScriptOutcome {
 /**
  * Run pre-task scripts for any task messages that carry one, serially.
  * - Errors / missing output / wakeAgent=false → task id added to `skipped`
- *   and a `GatedTask` pushed to `gated` so the caller can record the fire.
+ *   with the reason (the caller acks these as script-skips, not plain
+ *   completions, so the host can count consecutive failures), and a
+ *   `GatedTask` pushed to `gated` so the caller can record the fire.
  * - wakeAgent=true → content JSON is mutated to carry `scriptOutput`, so the
  *   formatter renders it into the prompt.
  * Non-task messages and tasks without scripts pass through unchanged.
  */
 export async function applyPreTaskScripts(messages: MessageInRow[]): Promise<TaskScriptOutcome> {
   const keep: MessageInRow[] = [];
-  const skipped: string[] = [];
+  const skipped: Array<{ id: string; reason: ScriptSkipReason }> = [];
   const gated: GatedTask[] = [];
 
   for (const msg of messages) {
@@ -126,14 +131,15 @@ export async function applyPreTaskScripts(messages: MessageInRow[]): Promise<Tas
     touchHeartbeat();
 
     if (!result || !result.wakeAgent) {
-      const reason = result ? 'wakeAgent=false' : 'script error/no output';
-      log(`task ${msg.id} skipped: ${reason}`);
-      skipped.push(msg.id);
+      const reason: ScriptSkipReason = result ? 'gated' : 'error';
+      const reasonText = reason === 'gated' ? 'wakeAgent=false' : 'script error/no output';
+      log(`task ${msg.id} skipped: ${reasonText}`);
+      skipped.push({ id: msg.id, reason });
       gated.push({
         id: msg.id,
         seriesId: msg.series_id ?? msg.id,
         taskId: msg.id,
-        reason,
+        reason: reasonText,
       });
       continue;
     }

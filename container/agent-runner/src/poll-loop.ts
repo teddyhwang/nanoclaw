@@ -1,9 +1,16 @@
 import { findByName, findByRouting, getAllDestinations, type DestinationEntry } from './destinations.js';
-import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
+import {
+  getPendingMessages,
+  markProcessing,
+  markCompleted,
+  markScriptSkipped,
+  type MessageInRow,
+} from './db/messages-in.js';
 import {
   countChatMessagesSince,
   hasChatMessageTextSince,
   hasChatMessageToDestinationSince,
+  hasIdenticalSend,
   getReplyTargetMessageIdBySeq,
   getRoutingBySeq,
   outboundDbNow,
@@ -16,11 +23,13 @@ import {
   clearContinuation,
   clearContinuationStartedAt,
   clearCurrentBatchReplyTarget,
+  clearCurrentInReplyTo,
   consumeRotationNotice,
   migrateLegacyContinuation,
   setContinuation,
   setContinuationStartedAt,
   setCurrentBatchReplyTarget,
+  setCurrentInReplyTo,
   setRotationNotice,
 } from './db/session-state.js';
 import {
@@ -31,7 +40,6 @@ import {
 } from './pressure-rotation.js';
 import { computeRotationDate } from './session-rotation.js';
 import { TIMEZONE } from './timezone.js';
-import { clearCurrentInReplyTo, setCurrentInReplyTo } from './current-batch.js';
 import fs from 'fs';
 import {
   formatMessages,
@@ -49,7 +57,7 @@ import {
 } from './formatter.js';
 import { getConfig } from './config.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
-import type { AgentProvider, AgentQuery, ImageContentBlock, ProviderEvent } from './providers/types.js';
+import type { AgentProvider, AgentQuery, ImageContentBlock, ProviderEvent, ProviderExchange } from './providers/types.js';
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
@@ -394,6 +402,12 @@ export interface PollLoopConfig {
    * the semantically correct behavior.
    */
   isDreamRun?: boolean;
+  /**
+   * Optional stop signal. In production the loop runs until the container
+   * dies; tests pass a signal so an abandoned loop actually exits instead of
+   * polling forever and stealing messages from the next test's DB.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -464,6 +478,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       log('Shutdown latch set — exiting poll loop without starting a new turn');
       break;
     }
+    if (config.signal?.aborted) return;
     // Skip system messages — they're responses for MCP tools (e.g., ask_user_question)
     const messages = getPendingMessages(isFirstPoll).filter((m) => m.kind !== 'system');
     isFirstPoll = false;
@@ -606,15 +621,15 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // Without the scheduling module, the marker block is empty, `keep`
     // falls back to `normalMessages`, and no gating happens.
     let keep: MessageInRow[] = normalMessages;
-    let skipped: string[] = [];
+    let skipped: Array<{ id: string; reason: string }> = [];
     // MODULE-HOOK:scheduling-pre-task:start
     const { applyPreTaskScripts } = await import('./scheduling/task-script.js');
     const preTask = await applyPreTaskScripts(normalMessages);
     keep = preTask.keep;
     skipped = preTask.skipped;
     if (skipped.length > 0) {
-      markCompleted(skipped);
-      log(`Pre-task script skipped ${skipped.length} task(s): ${skipped.join(', ')}`);
+      markScriptSkipped(skipped);
+      log(`Pre-task script skipped ${skipped.length} task(s): ${skipped.map((s) => s.id).join(', ')}`);
       // Record a 'gated' fire per skipped task. The task fired on
       // schedule and its script ran — it just decided not to wake the
       // agent. Without this row the dashboard shows "never ran" for a
@@ -748,7 +763,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     if (shuttingDown) query.end();
 
     // Process the query while concurrently polling for new messages
-    const skippedSet = new Set(skipped);
+    const skippedSet = new Set(skipped.map((s) => s.id));
     const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
     // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
     // can stamp it on outbound rows — needed for a2a return-path routing.
@@ -784,6 +799,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         // Proactive pressure rotation is for the persistent interactive
         // thread only — a dream's fresh thread is ephemeral by design.
         config.isDreamRun ? null : (config.provider.pressureRotationTokens?.() ?? null),
+        config.provider.onExchangeComplete?.bind(config.provider),
+        prompt,
+        continuation,
       );
       sawResult = Boolean(result.sawResult);
       if (result.pressureRotated) {
@@ -1035,7 +1053,7 @@ export function dropUnrunTaskContexts(contexts: TaskFireContext[], rows: Message
   }
 }
 
-async function processQuery(
+export async function processQuery(
   query: AgentQuery,
   routing: RoutingContext,
   initialBatchIds: string[],
@@ -1058,6 +1076,9 @@ async function processQuery(
   // (see pressure-rotation.ts). Null disables: dream runs (ephemeral
   // thread) and providers without a `tokensUsed` signal.
   pressureThresholdTokens: number | null = null,
+  onExchangeComplete?: ((exchange: ProviderExchange) => void) | undefined,
+  initialPrompt = '',
+  initialContinuation: string | undefined = undefined,
 ): Promise<QueryResult> {
   let queryContinuation: string | undefined;
   let done = false;
@@ -1197,6 +1218,11 @@ async function processQuery(
       }
     }
   };
+  // Prompt queue for the exchange hook — each result event consumes the
+  // oldest unanswered prompt, except a wrapping-retry result, which answers
+  // the same prompt again. Unused (and unmaintained) when the provider
+  // doesn't implement `onExchangeComplete`.
+  const archivePrompts: string[] = [initialPrompt];
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open avoids
@@ -1260,13 +1286,16 @@ async function processQuery(
         // resume id (fixed at sdkQuery() time); admin/passthrough commands
         // (/compact, /cost, …) only dispatch when they're the first input
         // of a query — pushed mid-stream they arrive as plain text and
-        // the SDK never runs them. End the stream and leave the rows
-        // pending; the outer loop handles them on next iteration via the
-        // canonical command path + formatMessagesWithCommands.
+        // the SDK never runs them. Abort the active stream and leave the
+        // rows pending; the outer loop handles them on next iteration via
+        // the canonical command path + formatMessagesWithCommands. Abort,
+        // not end: end() lets an in-flight turn run to completion, which
+        // can block the command (e.g. /clear during a long task) for as
+        // long as the turn takes.
         if (pending.some((m) => isRunnerCommand(m))) {
-          log('Pending slash command — ending stream so outer loop can process');
+          log('Pending slash command — aborting active stream so outer loop can process');
           endedForCommand = true;
-          query.end();
+          query.abort();
           return;
         }
 
@@ -1551,15 +1580,15 @@ async function processQuery(
         // its script gate and always wakes the agent, defeating the gate.
         // Mirrors the initial-batch hook above.
         let keep = newMessages;
-        let skipped: string[] = [];
+        let skipped: Array<{ id: string; reason: string }> = [];
         // MODULE-HOOK:scheduling-pre-task-followup:start
         const { applyPreTaskScripts } = await import('./scheduling/task-script.js');
         const preTask = await applyPreTaskScripts(newMessages);
         keep = preTask.keep;
         skipped = preTask.skipped;
         if (skipped.length > 0) {
-          markCompleted(skipped);
-          log(`Pre-task script skipped ${skipped.length} follow-up task(s): ${skipped.join(', ')}`);
+          markScriptSkipped(skipped);
+          log(`Pre-task script skipped ${skipped.length} follow-up task(s): ${skipped.map((s) => s.id).join(', ')}`);
           // Record a 'gated' fire per skipped follow-up task — the exact
           // mirror of the initial-batch gated-write at the
           // scheduling-pre-task hook above. Without this, a script-gated
@@ -1670,6 +1699,7 @@ async function processQuery(
         registerPushContexts(pushTaskContexts);
         pushAddressed.push(isAddressedTurn(keep, assistantName));
         query.push(prompt, followupImageBlocks.length > 0 ? followupImageBlocks : undefined);
+        archivePrompts.push(prompt);
         markCompleted(keptIds);
         // Refresh routing.inReplyTo so subsequent outbound rows reply to the
         // most recent triggering message, not the one captured when this
@@ -1806,20 +1836,56 @@ async function processQuery(
             if (fireCtx && dispatched.length > 0) {
               fireCtx.dispatched.push(...dispatched);
             }
-            if (hasUnwrapped && !unwrappedNudged) {
-              unwrappedNudged = true;
-              const destinations = getAllDestinations();
-              const names = destinations.map((d) => d.name).join(', ');
-              query.push(
-                `<system>Your response was not delivered — it was not wrapped in <message to="name">...</message> blocks. ` +
-                  `All output must be wrapped: use <message to="name"> for content to send, or <internal> for scratchpad. ` +
-                  `Your destinations: ${names}. ` +
-                  `Please re-send your response with the correct wrapping.</system>`,
-              );
-              pushAddressed.push(resultAddressed);
+            if (dispatched.length === 0 && event.isError === true) {
+              // Non-retryable error turn (e.g. a 403 billing_error) with no
+              // <message> envelope: deliver the notice instead of dropping it
+              // as scratchpad, and skip the re-wrap nudge — it would just
+              // re-hammer the failing gateway turn after turn.
+              deliverErrorResult(event.text, routing);
+              notifyExchangeComplete(onExchangeComplete, {
+                prompt: archivePrompts[0] ?? initialPrompt,
+                result: event.text,
+                continuation: queryContinuation ?? initialContinuation,
+                status: 'error',
+              });
+              archivePrompts.shift();
+            } else {
+              const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
+              notifyExchangeComplete(onExchangeComplete, {
+                prompt: archivePrompts[0] ?? initialPrompt,
+                result: event.text,
+                continuation: queryContinuation ?? initialContinuation,
+                status: hasUnwrapped ? 'undelivered' : 'completed',
+              });
+              if (willRetryWrapping) {
+                unwrappedNudged = true;
+                const destinations = getAllDestinations();
+                const names = destinations.map((d) => d.name).join(', ');
+                query.push(
+                  `<system>Your response was not delivered — it was not wrapped in <message to="name">...</message> blocks. ` +
+                    `All output must be wrapped: use <message to="name"> for content to send, or <internal> for scratchpad. ` +
+                    `Your destinations: ${names}. ` +
+                    `Please re-send your response with the correct wrapping.</system>`,
+                );
+                pushAddressed.push(resultAddressed);
+              }
+              // The wrapping-retry result answers the SAME user prompt — keep it
+              // queued so the retry archives against it, not the nudge text.
+              if (!willRetryWrapping) archivePrompts.shift();
             }
           } else if (resultAddressed && compactedSinceLastResult) {
             dispatchResultText('', routing, true, turnStartedAt, true);
+            notifyExchangeComplete(onExchangeComplete, {
+              prompt: archivePrompts[0] ?? initialPrompt,
+              result: null,
+              continuation: queryContinuation ?? initialContinuation,
+              status: 'completed',
+            });
+            archivePrompts.shift();
+          } else {
+            // Silent result (no text, no compaction notice) — keep the
+            // exchange archive queue in sync with consumed prompts.
+            archivePrompts.shift();
           }
           compactedSinceLastResult = false;
           // Advance the per-result dedup boundary. A single processQuery can
@@ -1928,6 +1994,15 @@ async function processQuery(
       streamErrored = true;
       throw err;
     }
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    notifyExchangeComplete(onExchangeComplete, {
+      prompt: archivePrompts[0] ?? initialPrompt,
+      result: `Error: ${errMsg}`,
+      continuation: queryContinuation ?? initialContinuation,
+      status: 'error',
+    });
+    throw err;
   } finally {
     done = true;
     clearInterval(pollHandle);
@@ -1949,6 +2024,18 @@ async function processQuery(
   return { continuation: queryContinuation, sawResult: resultIndex > 0, pressureRotated };
 }
 
+function notifyExchangeComplete(
+  hook: ((exchange: ProviderExchange) => void) | undefined,
+  exchange: ProviderExchange,
+): void {
+  if (!hook) return;
+  try {
+    hook(exchange);
+  } catch (err) {
+    log(`onExchangeComplete failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
   switch (event.type) {
     case 'init':
@@ -1966,6 +2053,26 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
       log(`Progress: ${event.message}`);
       break;
   }
+}
+
+/**
+ * Deliver a turn's text straight to the channel the batch arrived on. Used when
+ * a turn ends in a provider error (e.g. a non-retryable 403 billing_error) with
+ * no <message> envelope: the notice would otherwise be dropped as scratchpad.
+ * This is the same user-facing write the outer catch block does, minus the
+ * `Error:` prefix — the provider's text is already a user-facing message.
+ */
+function deliverErrorResult(text: string, routing: RoutingContext): void {
+  log('Error result with no <message> envelope — delivering to channel');
+  writeMessageOut({
+    id: generateId(),
+    in_reply_to: routing.inReplyTo,
+    kind: 'chat',
+    platform_id: routing.platformId,
+    channel_type: routing.channelType,
+    thread_id: routing.threadId,
+    content: JSON.stringify({ text }),
+  });
 }
 
 /**
@@ -2386,6 +2493,17 @@ function sendToDestination(
 ): boolean {
   const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
   const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
+  // Task fires: an explicitly-addressed final-text block is either the echo of
+  // an MCP send the agent already made this turn (drop it HERE, where the
+  // duplication originates) or the agent's only deliberate send (write it
+  // in_reply_to-null like the MCP path, or the host's task-fire suppression
+  // would discard it — zero delivery).
+  if (routing.taskFire && hasIdenticalSend(platformId, channelType, body)) {
+    log(`Dropping turn-final echo of an already-sent task message to ${dest.name}`);
+    // The content WAS delivered (by the MCP send this echoes) — report
+    // success so the caller doesn't treat the block as undelivered.
+    return true;
+  }
   // Resolve thread_id per-destination from the most recent inbound message
   // that came from this same channel+platform. In agent-shared sessions,
   // different destinations have different thread contexts — using a single
