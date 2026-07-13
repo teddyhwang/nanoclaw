@@ -146,7 +146,7 @@ describe('UsageLimitFallbackProvider', () => {
     expect(fallback.inputs[1].continuation).toBeUndefined();
   });
 
-  it('returns to the standing harness on the next retry when both accounts are limited', async () => {
+  it('surfaces one terminal notice when both accounts are limited, then resets to standing', async () => {
     const primary = new StubProvider([
       [{ type: 'error', message: 'primary quota', retryable: true, classification: 'quota' }],
       [{ type: 'result', text: 'primary recovered' }],
@@ -162,8 +162,15 @@ describe('UsageLimitFallbackProvider', () => {
     });
 
     expect(await collect(provider.query({ prompt: 'one', cwd: '/workspace/agent' }))).toEqual([
-      { type: 'error', message: 'fallback quota', retryable: true, classification: 'quota' },
+      {
+        type: 'result',
+        text:
+          'Both codex and claude have reached their usage limits. ' +
+          'Please try again after one of the limits resets.',
+        isError: true,
+      },
     ]);
+    expect(fallback.aborts).toBe(1);
     expect(await collect(provider.query({ prompt: 'retry', cwd: '/workspace/agent' }))).toEqual([
       { type: 'result', text: 'primary recovered' },
     ]);

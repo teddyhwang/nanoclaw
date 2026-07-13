@@ -93,6 +93,9 @@ export class UsageLimitFallbackProvider implements AgentProvider {
     let activeProvider = this.preferFallback ? this.fallback : this.primary;
     let activeQuery = activeProvider.query(activeProvider === this.fallback ? fallbackInput() : input);
     const fallbackProvider = this.fallback;
+    const dualLimitText =
+      `Both ${this.primaryName} and ${this.fallbackName} have reached their usage limits. ` +
+      'Please try again after one of the limits resets.';
     const resetPreference = (): void => {
       this.preferFallback = false;
     };
@@ -134,10 +137,19 @@ export class UsageLimitFallbackProvider implements AgentProvider {
           // standing provider's continuation slot.
           if (activeProvider === fallbackProvider && event.type === 'init') continue;
           if (activeProvider === fallbackProvider && isUsageLimitEvent(event)) {
-            // Both accounts are unavailable. Let the poll-loop keep the row
-            // pending, but retry the standing provider on the next host pass
-            // instead of pinning this container forever to the fallback.
+            // The first limit was invisible; the alternate is now limited too.
+            // Convert the second quota event into a terminal result so chat
+            // turns receive one clear notice instead of remaining pending
+            // forever with no response. The poll-loop suppresses error results
+            // for task-only turns, preserving silent maintenance semantics.
             resetPreference();
+            activeQuery.abort();
+            yield {
+              type: 'result',
+              text: dualLimitText,
+              isError: true,
+            };
+            return;
           }
           yield event;
         }

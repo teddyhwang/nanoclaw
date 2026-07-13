@@ -1843,11 +1843,16 @@ export async function processQuery(
               fireCtx.dispatched.push(...dispatched);
             }
             if (dispatched.length === 0 && event.isError === true) {
-              // Non-retryable error turn (e.g. a 403 billing_error) with no
-              // <message> envelope: deliver the notice instead of dropping it
-              // as scratchpad, and skip the re-wrap nudge — it would just
-              // re-hammer the failing gateway turn after turn.
-              deliverErrorResult(event.text, routing);
+              // Non-retryable error turn (e.g. both provider accounts are at
+              // quota) with no <message> envelope: deliver the notice for an
+              // interactive chat instead of dropping it as scratchpad. Task-
+              // only failures remain silent in-channel, matching the outer
+              // provider-throw path and scheduled-maintenance contract.
+              if (!isTaskTurn) {
+                deliverErrorResult(event.text, routing);
+              } else {
+                log(`Suppressing user-visible error result for task-only turn: ${event.text ?? '(empty)'}`);
+              }
               notifyExchangeComplete(onExchangeComplete, {
                 prompt: archivePrompts[0] ?? initialPrompt,
                 result: event.text,

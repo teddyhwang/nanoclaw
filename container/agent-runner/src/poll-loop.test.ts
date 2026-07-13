@@ -1271,6 +1271,40 @@ describe('error result with no <message> envelope', () => {
     expect(pushes).toHaveLength(0);
   });
 
+  it('suppresses a terminal error result for a task-only turn', async () => {
+    const { query, pushes } = makeResultQuery({
+      type: 'result',
+      text: 'Both claude and codex have reached their usage limits.',
+      isError: true,
+    });
+
+    await processQuery(
+      query,
+      ERR_ROUTING,
+      ['task-1'],
+      'claude',
+      null,
+      false,
+      'TestBot',
+      [
+        {
+          seriesId: 'series-1',
+          taskId: 'task-1',
+          dispatched: [],
+          assistantText: null,
+          written: false,
+        },
+      ],
+      null,
+      undefined,
+      'task prompt',
+      undefined,
+    );
+
+    expect(getUndeliveredMessages().filter((row) => row.kind === 'chat')).toHaveLength(0);
+    expect(pushes).toHaveLength(0);
+  });
+
   it('still nudges (and does not deliver) a normal unwrapped result', async () => {
     const { query, pushes } = makeResultQuery({ type: 'result', text: 'bare text, no envelope' });
 
