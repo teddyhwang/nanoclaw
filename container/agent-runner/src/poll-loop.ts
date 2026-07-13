@@ -919,10 +919,18 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     // Ensure completed even if processQuery ended without a result event
     // (e.g. stream closed unexpectedly). EXCEPT a retryable-with-no-result
-    // failure: leaving those rows pending is what lets the host re-fire the
-    // task rather than silently completing a run that did nothing.
+    // failure: leave the rows pending and exit this container. The processing
+    // claim lives in outbound.db, so a warm runner cannot claim the row again;
+    // exiting is what lets host-sweep observe the stopped container, clear the
+    // stale claim with backoff, and spawn a clean provider process. Staying
+    // alive here stranded the trigger until the 30-minute absolute ceiling
+    // (Fasting Add Chat, 2026-07-13).
     if (retryableBatchFailure) {
-      log(`Leaving ${processingIds.length} message(s) pending for host retry (retryable provider failure)`);
+      log(
+        `Leaving ${processingIds.length} message(s) pending and exiting container for host retry ` +
+          `(retryable provider failure)`,
+      );
+      return;
     } else if (shuttingDown && !sawResult) {
       // SIGTERM ended the query before it produced any result — the turn was
       // cut short by the host reap, not finished. Leave the rows pending so

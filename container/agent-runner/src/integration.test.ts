@@ -479,24 +479,19 @@ describe('poll loop integration', () => {
         'Client error: streamable HTTP session expired with 404 Not Found',
     });
     const controller = new AbortController();
-    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
-
-    await sleep(1200);
-    controller.abort();
+    await expect(runPollLoopWithTimeout(provider, controller.signal, 2000)).resolves.toBeUndefined();
 
     // The container tracks task lifecycle via processing_ack in outbound.db
     // (the inbound.db row stays host-owned 'pending'). The invariant: the
-    // task must NOT be acked 'completed' — that's the empty-fire bug. It is
-    // either re-claimed 'processing' (a retry is mid-flight) or has no ack at
-    // all (cleared for re-pickup); never 'completed'.
+    // task must NOT be acked 'completed' — that's the empty-fire bug. The
+    // runner must also exit so host-sweep can observe a stopped container,
+    // clear the processing claim with backoff, and re-fire the row.
     const ack = getOutboundDb().prepare("SELECT status FROM processing_ack WHERE message_id = 't-dream'").get() as
       | { status: string }
       | undefined;
     expect(ack?.status).not.toBe('completed');
     // And it produced no outbound (it genuinely did nothing).
     expect(getUndeliveredMessages()).toHaveLength(0);
-
-    await loopPromise.catch(() => {});
   });
 
   it('retryable provider error with no result leaves chat pending without leaking the error to outbound', async () => {
@@ -511,18 +506,13 @@ describe('poll loop integration', () => {
         'codex exited (0): <message to="discord-test">This should not be delivered wrapped or prefixed.</message>',
     });
     const controller = new AbortController();
-    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
-
-    await sleep(1200);
-    controller.abort();
+    await expect(runPollLoopWithTimeout(provider, controller.signal, 2000)).resolves.toBeUndefined();
 
     const ack = getOutboundDb().prepare("SELECT status FROM processing_ack WHERE message_id = 'm-retry-chat'").get() as
       | { status: string }
       | undefined;
     expect(ack?.status).not.toBe('completed');
     expect(getUndeliveredMessages()).toHaveLength(0);
-
-    await loopPromise.catch(() => {});
   });
 
   it('SIGTERM mid-turn before any result leaves the row pending and exits the loop', async () => {
