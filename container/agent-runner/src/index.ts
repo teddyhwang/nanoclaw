@@ -34,7 +34,8 @@ import { ensureMemoryScaffold } from './memory-scaffold.js';
 // `loadProviderPlugins()` (awaited in main() before createProvider).
 import './providers/index.js';
 import { createProvider, type ProviderName } from './providers/factory.js';
-import type { McpServerConfig } from './providers/types.js';
+import type { AgentProvider, McpServerConfig, ProviderOptions } from './providers/types.js';
+import { resolveUsageLimitFallback, UsageLimitFallbackProvider } from './providers/usage-limit-fallback.js';
 import { loadProviderPlugins } from './engine/provider-plugins.js';
 import { runPollLoop, requestGracefulShutdown } from './poll-loop.js';
 
@@ -141,14 +142,40 @@ async function main(): Promise<void> {
   // populated before createProvider() looks the name up.
   await loadProviderPlugins();
 
-  const provider = createProvider(providerName, {
+  const providerOptions: ProviderOptions = {
     assistantName: config.assistantName || undefined,
     mcpServers,
     env: { ...process.env },
     additionalDirectories: additionalDirectories.length > 0 ? additionalDirectories : undefined,
     model: config.model,
     effort: config.effort,
-  });
+  };
+  const standingProvider = createProvider(providerName, providerOptions);
+  let provider: AgentProvider = standingProvider;
+
+  // Optional transparent account-quota failover. The host enables this and
+  // supplies the alternate family model through spawn env. Only explicit
+  // classification:'quota' events trigger it; transport failures keep their
+  // normal retry behavior. The alternate continuation is ephemeral, so a
+  // Claude thread id can never be persisted under Codex (or vice versa).
+  const fallback = resolveUsageLimitFallback(providerName);
+  if (fallback) {
+    const alternate = createProvider(fallback.providerName, {
+      ...providerOptions,
+      model: fallback.model,
+    });
+    provider = new UsageLimitFallbackProvider({
+      primaryName: providerName,
+      fallbackName: fallback.providerName,
+      fallbackModel: fallback.model,
+      primary: standingProvider,
+      fallback: alternate,
+    });
+    log(
+      `Usage-limit failover armed: ${providerName} → ${fallback.providerName}` +
+        (fallback.model ? ` (${fallback.model})` : ''),
+    );
+  }
 
   // Providers that lack native memory opt in via `usesMemoryScaffold`; for them
   // the runner creates a persistent memory/ tree in its host-backed workspace at

@@ -66,13 +66,13 @@ export function selectResultTextForDelivery(
 export function isRetryableClaudeApiRateLimitResult(resultText: string | null): boolean {
   if (!resultText) return false;
   const text = resultText.toLowerCase();
-  if (!/\b(api error|request rejected|429|quota|exceeded)\b/.test(text)) return false;
   return (
     /\b429\b/.test(text) ||
+    text.includes('usage limit') ||
     text.includes("exceed your account's rate limit") ||
+    text.includes('rate limit exceeded') ||
     text.includes('exceeded your current quota') ||
-    text.includes('quota exceeded') ||
-    text.includes('request rejected')
+    text.includes('quota exceeded')
   );
 }
 
@@ -81,6 +81,15 @@ export function shouldDeliverAssistantTextForRetryableResult(
   lastAssistantTextWithMessage: string | null,
 ): boolean {
   return Boolean(lastAssistantTextWithMessage && isRetryableClaudeApiRateLimitResult(resultText));
+}
+
+export function isRejectedClaudeRateLimitEvent(message: unknown): boolean {
+  const info = (
+    message as {
+      rate_limit_info?: { status?: string; overageStatus?: string };
+    }
+  ).rate_limit_info;
+  return info?.status === 'rejected' || info?.overageStatus === 'rejected';
 }
 
 // Deferred SDK builtins that either sidestep nanoclaw's own scheduling or
@@ -725,7 +734,10 @@ export class ClaudeProvider implements AgentProvider {
     // model" for nightly maintenance work. NANOCLAW_AGENT_MODEL is the
     // host-controlled name; the SDK also reads ANTHROPIC_MODEL natively
     // so we accept either, preferring ours.
-    const modelOverride = process.env.NANOCLAW_AGENT_MODEL || process.env.ANTHROPIC_MODEL;
+    // Constructor options are already the runner's resolved per-provider
+    // model. They must win over the process-wide standing-provider env when
+    // a quota fallback creates Claude inside a Codex-configured container.
+    const modelOverride = this.model || process.env.NANOCLAW_AGENT_MODEL || process.env.ANTHROPIC_MODEL;
 
     const sdkResult = sdkQuery({
       prompt: stream,
@@ -812,9 +824,12 @@ export class ClaudeProvider implements AgentProvider {
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };
         } else if (message.type === 'rate_limit_event') {
-          // Fork: rate limits are retryable — the poll-loop backs off and
-          // retries instead of failing the turn (47d357f).
-          yield { type: 'error', message: 'Rate limit', retryable: true, classification: 'quota' };
+          // The SDK emits this whenever subscription usage INFO changes,
+          // including status=allowed/allowed_warning. Only a rejected window
+          // is a real quota failure eligible for cross-harness failover.
+          if (isRejectedClaudeRateLimitEvent(message)) {
+            yield { type: 'error', message: 'Rate limit', retryable: true, classification: 'quota' };
+          }
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'compact_boundary') {
           const meta = (message as { compact_metadata?: { pre_tokens?: number } }).compact_metadata;
           const detail = meta?.pre_tokens ? ` (${meta.pre_tokens.toLocaleString()} tokens compacted)` : '';

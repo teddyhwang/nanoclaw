@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 
 import {
   extractAssistantText,
+  isRejectedClaudeRateLimitEvent,
   isRetryableClaudeApiRateLimitResult,
   mcpTimeoutEnv,
   selectResultTextForDelivery,
@@ -69,6 +70,28 @@ describe('ClaudeProvider result delivery helpers', () => {
   it('does not classify ordinary unwrapped public text as a rate limit', () => {
     expect(isRetryableClaudeApiRateLimitResult('Please rate limit the invite list to 10 customers.')).toBe(false);
     expect(isRetryableClaudeApiRateLimitResult('Done but forgot the wrapper.')).toBe(false);
+    expect(isRetryableClaudeApiRateLimitResult('API Error: Request rejected (400) · invalid model')).toBe(false);
+  });
+
+  it('only treats rejected SDK rate-limit info updates as failures', () => {
+    expect(
+      isRejectedClaudeRateLimitEvent({
+        type: 'rate_limit_event',
+        rate_limit_info: { status: 'allowed_warning', utilization: 0.9 },
+      }),
+    ).toBe(false);
+    expect(
+      isRejectedClaudeRateLimitEvent({
+        type: 'rate_limit_event',
+        rate_limit_info: { status: 'rejected' },
+      }),
+    ).toBe(true);
+    expect(
+      isRejectedClaudeRateLimitEvent({
+        type: 'rate_limit_event',
+        rate_limit_info: { status: 'allowed', overageStatus: 'rejected' },
+      }),
+    ).toBe(true);
   });
 
   it('preserves wrapped assistant output when the SDK final result is a retryable rate-limit string', () => {
