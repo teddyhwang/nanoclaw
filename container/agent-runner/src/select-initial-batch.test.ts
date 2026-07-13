@@ -136,27 +136,17 @@ describe('shouldDeferTaskFromChatTurn', () => {
   });
 });
 
-// The accumulate-only gate must not tear down an in-flight TASK turn.
-// 2026-06-06 degenerates dream empty-fire: codex spawned for the isolated
-// dream task, then the follow-up poller saw 9 accumulate-only chat rows,
-// hit the "no trigger=1 work" gate, and called query.end() ~2s into init —
-// killing codex before it ran the dream (exit 0 "before any turn output" →
-// retryable → pending → every retry repeats). The epicure rmcp
-// `fail to delete session` line was teardown noise; zero-epicure runs
-// failed identically. The gate may only end the query for a chat turn, or
-// a task turn that already produced a result.
+// The accumulate-only gate must not tear down any in-flight turn before its
+// first result. This first affected a task (Degenerates Dream, 2026-06-06),
+// then a normal chat (Fasting, 2026-07-13): ambient trigger=0 follow-ups made
+// query.end() kill Codex during init/generation, leaving the trigger pending
+// for an identical retry loop.
 describe('mayEndQueryForAccumulateOnly', () => {
-  it('allows ending for a chat turn (activeSender set), result or not', () => {
-    expect(mayEndQueryForAccumulateOnly({ activeSender: 'Teddy', firstResultSeen: false })).toBe(true);
-    expect(mayEndQueryForAccumulateOnly({ activeSender: 'Teddy', firstResultSeen: true })).toBe(true);
+  it('does NOT allow ending while the active turn awaits its first result', () => {
+    expect(mayEndQueryForAccumulateOnly(false)).toBe(false);
   });
 
-  it('does NOT allow ending for a task turn still awaiting its first result', () => {
-    // The dream/maintenance case: activeSender null, no result yet.
-    expect(mayEndQueryForAccumulateOnly({ activeSender: null, firstResultSeen: false })).toBe(false);
-  });
-
-  it('allows ending for a task turn that already produced a result (post-result tail)', () => {
-    expect(mayEndQueryForAccumulateOnly({ activeSender: null, firstResultSeen: true })).toBe(true);
+  it('allows ending after the active turn produced a result', () => {
+    expect(mayEndQueryForAccumulateOnly(true)).toBe(true);
   });
 });

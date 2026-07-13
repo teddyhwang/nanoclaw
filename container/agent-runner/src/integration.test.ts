@@ -79,6 +79,45 @@ describe('poll loop integration', () => {
     await loopPromise.catch(() => {});
   });
 
+  it('keeps a chat turn open when accumulate-only follow-ups arrive before its first result', async () => {
+    // Live repro: Fasting 2026-07-13. The addressed chat trigger started a
+    // Codex turn, but ambient trigger=0 rows remained pending after the
+    // initial context batch. The 500ms follow-up poll called query.end()
+    // before Codex emitted its first result, so every host retry exited empty
+    // and preserved the same trigger forever.
+    insertMessage(
+      'm-trigger',
+      { sender: 'Alice', text: 'addressed question' },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
+
+    const provider = new DelayedResultProvider('<message to="discord-test">finished</message>');
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 3000);
+
+    await waitFor(() => provider.queries === 1, 1000);
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, trigger, platform_id, channel_type, content)
+         VALUES ('m-ambient', 'chat', datetime('now'), 'pending', 0, 'chan-1', 'discord', ?)`,
+      )
+      .run(JSON.stringify({ sender: 'Bob', text: 'ambient chatter' }));
+
+    // Give the in-query follow-up poll enough time to observe m-ambient.
+    await sleep(800);
+    expect(provider.ends).toBe(0);
+    expect(getUndeliveredMessages()).toHaveLength(0);
+
+    provider.releaseResult();
+    await waitFor(() => getUndeliveredMessages().length === 1, 1500);
+
+    expect(JSON.parse(getUndeliveredMessages()[0].content).text).toBe('finished');
+    expect(getPendingMessages().map((row) => row.id)).toEqual(['m-ambient']);
+
+    controller.abort();
+    await loopPromise.catch(() => {});
+  });
+
   it('should process multiple messages in a batch', async () => {
     insertMessage('m1', { sender: 'Alice', text: 'Hello' });
     insertMessage('m2', { sender: 'Bob', text: 'World' });
@@ -1338,6 +1377,66 @@ describe('poll loop — slash command during active query', () => {
  * Provider whose query never completes until ended/aborted — for testing how
  * the loop interrupts an active stream.
  */
+class DelayedResultProvider {
+  readonly supportsNativeSlashCommands = false;
+  queries = 0;
+  ends = 0;
+  private released = false;
+  private wake: (() => void) | null = null;
+  private readonly response: string;
+
+  constructor(response: string) {
+    this.response = response;
+  }
+
+  isSessionInvalid(): boolean {
+    return false;
+  }
+
+  releaseResult(): void {
+    this.released = true;
+    this.wake?.();
+  }
+
+  query() {
+    const owner = this;
+    owner.queries += 1;
+    let ended = false;
+    let aborted = false;
+
+    return {
+      push() {},
+      end: () => {
+        owner.ends += 1;
+        ended = true;
+        owner.wake?.();
+      },
+      abort: () => {
+        aborted = true;
+        owner.wake?.();
+      },
+      events: (async function* () {
+        yield { type: 'activity' as const };
+        yield { type: 'init' as const, continuation: 'delayed-result-session' };
+        while (!owner.released && !ended && !aborted) {
+          await new Promise<void>((resolve) => {
+            owner.wake = resolve;
+          });
+          owner.wake = null;
+        }
+        if (ended || aborted) return;
+        yield { type: 'result' as const, text: owner.response };
+        while (!ended && !aborted) {
+          await new Promise<void>((resolve) => {
+            owner.wake = resolve;
+          });
+          owner.wake = null;
+        }
+      })(),
+    };
+  }
+}
+
 class BlockingProvider {
   readonly supportsNativeSlashCommands = false;
   queries = 0;

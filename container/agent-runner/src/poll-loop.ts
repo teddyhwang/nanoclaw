@@ -209,36 +209,20 @@ export function shouldDeferTaskFromChatTurn(activeSender: string | null, followu
 /**
  * Whether the accumulate-only follow-up gate may END the active query.
  *
- * The gate (poll-loop ~L1110) ends the stream when a freshly-polled
- * follow-up batch contains no trigger=1 work — for a chat turn that's
- * correct (nothing to do, let the outer loop sleep). But a TASK turn
- * (dream / maintenance / RSS occurrence — `activeSender` is null, since
- * only chat turns carry a sender) is silent-by-design and frequently
- * co-arrives with ambient trigger=0 chatter. While that task turn is
- * still in flight (no `result` emitted yet — `firstResultSeen` false),
- * ending the query TEARS DOWN the provider subprocess before it can run
- * the task at all: the provider exits 0 "before any turn output", the
- * caller flags it retryable, the row stays pending, and every host retry
- * repeats identically. This is the real cause of the degenerates dream
- * empty-fire (2026-06-06) — codex was killed by this gate ~2s into init,
- * with the epicure `fail to delete session` rmcp error as teardown noise,
- * NOT the cause (runs with zero epicure errors failed identically).
+ * The gate ends the stream when a freshly-polled follow-up batch contains
+ * no trigger=1 work. That is safe only after the active turn has emitted a
+ * result. Before the first result, `query.end()` tears down the provider
+ * subprocess while it is still initializing or generating, so the trigger
+ * remains pending and every host retry repeats identically.
  *
- * So: only allow the end-the-query path when the active turn is a chat
- * turn, OR the task turn has already produced a result (a post-result
- * accumulate tail should still unwind cleanly, as before). When the
- * active turn is a task still awaiting its first result, the caller must
- * instead leave the accumulate rows pending WITHOUT ending the query, so
- * the in-flight task can complete. Pure so it's unit-testable.
+ * This first surfaced for task turns (Degenerates Dream, 2026-06-06), but
+ * chat turns have the same lifecycle. The Fasting chat reproduced it on
+ * 2026-07-13: one addressed message started a Codex turn while three ambient
+ * trigger=0 rows remained pending; the follow-up gate ended Codex before its
+ * first output on every retry.
  */
-export function mayEndQueryForAccumulateOnly(args: { activeSender: string | null; firstResultSeen: boolean }): boolean {
-  // Chat turn → always fine to end (original behavior).
-  if (args.activeSender) return true;
-  // Task turn that already emitted a result → post-result tail, end is fine.
-  if (args.firstResultSeen) return true;
-  // Task turn still awaiting its first result → do NOT end; the in-flight
-  // task (dream/maintenance) would be torn down before it runs.
-  return false;
+export function mayEndQueryForAccumulateOnly(firstResultSeen: boolean): boolean {
+  return firstResultSeen;
 }
 
 /**
@@ -1338,25 +1322,20 @@ export async function processQuery(
           // Don't markCompleted these — they need to ride along with the
           // next real trigger so the agent sees them as context.
           //
-          // GUARD: do NOT end the query if the active turn is a TASK turn
-          // (dream/maintenance — activeSender null) still awaiting its
-          // first result. Ending here tears down the provider subprocess
-          // mid-init, before the task runs at all → provider exits 0
-          // "before any turn output" → flagged retryable → row stays
-          // pending → every host retry repeats identically. This was the
-          // degenerates dream empty-fire (2026-06-06): codex killed ~2s
-          // into init by this very gate, with the epicure rmcp
-          // `fail to delete session` line as teardown noise, not cause
-          // (zero-epicure runs failed the same way). Leave the
-          // accumulate-only rows pending and let the in-flight task
-          // complete; once it emits its result, the same gate will
-          // unwind cleanly on a later poll.
-          if (!mayEndQueryForAccumulateOnly({ activeSender, firstResultSeen: resultIndex > 0 })) {
+          // GUARD: do NOT end any active turn before its first result.
+          // Ending here tears down the provider subprocess mid-init or
+          // mid-generation → provider exits with no output → flagged
+          // retryable → trigger stays pending → every host retry repeats.
+          // This affected task turns first (Degenerates Dream, 2026-06-06)
+          // and then a normal chat turn (Fasting, 2026-07-13). Leave the
+          // accumulate-only rows pending and let the addressed turn finish;
+          // after its result, this same gate can unwind the stream cleanly.
+          if (!mayEndQueryForAccumulateOnly(resultIndex > 0)) {
             if (!loggedHoldingForTask) {
               loggedHoldingForTask = true;
               log(
                 `Holding active query open — ${newMessages.length} accumulate-only ` +
-                  `follow-up(s) pending but a task turn is still in flight (no result yet)`,
+                  `follow-up(s) pending but the active turn is still in flight (no result yet)`,
               );
             }
             return;
