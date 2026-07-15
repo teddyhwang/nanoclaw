@@ -333,6 +333,22 @@ function resolveSelectedOption(
 }
 
 /**
+ * Decode Chat SDK Discord's wire-level custom id. Since adapter v4.29,
+ * Discord buttons encode both fields as `<actionId>\n<value>` because the
+ * platform exposes only `custom_id`. Normal webhook handling decodes this in
+ * the adapter, but the Gateway forwarding path below intentionally handles
+ * interactions before the adapter and therefore must mirror that decode.
+ */
+export function decodeDiscordCustomId(customId: string): { actionId: string; value?: string } {
+  const delimiterIndex = customId.indexOf('\n');
+  if (delimiterIndex === -1) return { actionId: customId };
+  return {
+    actionId: customId.slice(0, delimiterIndex),
+    value: customId.slice(delimiterIndex + 1),
+  };
+}
+
+/**
  * Convert common HTML inline tags to Markdown. Discord, Telegram, Slack all
  * parse Markdown, never HTML — so any literal `<code>X</code>` an agent emits
  * renders as visible angle-brackets. Conversion happens before chunking so
@@ -1658,7 +1674,9 @@ async function handleForwardedEvent(
     const interaction = event.data;
     // type 3 = MessageComponent (button/select)
     if (interaction.type === 3) {
-      const customId = (interaction.data as Record<string, unknown>)?.custom_id as string;
+      const customId = (interaction.data as Record<string, unknown>)?.custom_id as string | undefined;
+      if (!customId) return;
+      const decodedCustomId = decodeDiscordCustomId(customId);
       // In guilds the clicker is at interaction.member.user; in DMs it's interaction.user directly.
       const user =
         ((interaction.member as Record<string, unknown>)?.user as Record<string, string> | undefined) ??
@@ -1669,11 +1687,11 @@ async function handleForwardedEvent(
       // Parse the selected option from custom_id
       let questionId: string | undefined;
       let tail: string | undefined;
-      if (customId?.startsWith('ncq:')) {
-        const colonIdx = customId.indexOf(':', 4); // after "ncq:"
+      if (decodedCustomId.actionId.startsWith('ncq:')) {
+        const colonIdx = decodedCustomId.actionId.indexOf(':', 4); // after "ncq:"
         if (colonIdx !== -1) {
-          questionId = customId.slice(4, colonIdx);
-          tail = customId.slice(colonIdx + 1);
+          questionId = decodedCustomId.actionId.slice(4, colonIdx);
+          tail = decodedCustomId.actionId.slice(colonIdx + 1);
         }
       }
 
@@ -1684,7 +1702,7 @@ async function handleForwardedEvent(
       const render = questionId ? getAskQuestionRender(questionId) : undefined;
       // Discord custom_id mirrors the new index-based encoding (see Button
       // construction). Decode back to the real option value for downstream.
-      const selectedOption = resolveSelectedOption(render, tail, tail);
+      const selectedOption = resolveSelectedOption(render, decodedCustomId.value, tail);
       const cardTitle = render?.title ?? ((originalEmbeds[0]?.title as string) || '❓ Question');
       const matchedOpt = render?.options.find((o) => o.value === selectedOption);
       const selectedLabel = matchedOpt?.selectedLabel ?? selectedOption ?? customId;

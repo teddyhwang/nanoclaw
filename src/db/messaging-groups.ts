@@ -307,6 +307,21 @@ export function updateMessagingGroupAgent(
     .run(values);
 }
 
+/**
+ * Move every chat wired to one agent into the same session regime. Adding a
+ * second chat with `agent-shared` must update the existing bindings too;
+ * otherwise the old chat keeps a separate session and recurring tasks can
+ * fire once per binding.
+ */
+export function setAgentGroupSessionMode(
+  agentGroupId: string,
+  sessionMode: MessagingGroupAgent['session_mode'],
+): number {
+  return getDb()
+    .prepare('UPDATE messaging_group_agents SET session_mode = ? WHERE agent_group_id = ? AND session_mode != ?')
+    .run(sessionMode, agentGroupId, sessionMode).changes;
+}
+
 export function deleteMessagingGroupAgent(id: string): void {
   getDb().prepare('DELETE FROM messaging_group_agents WHERE id = ?').run(id);
 }

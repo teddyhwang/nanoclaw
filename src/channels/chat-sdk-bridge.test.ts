@@ -5,6 +5,7 @@ import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
 import {
   createChatSdkBridge,
   createPollVoteDebouncer,
+  decodeDiscordCustomId,
   enrichAttachments,
   htmlToMarkdown,
   isSelfAuthoredChatSdkMessage,
@@ -37,6 +38,21 @@ function makePostCapture() {
   };
   return { calls, postMessage };
 }
+
+describe('decodeDiscordCustomId', () => {
+  it('separates the action id and duplicated value emitted by Chat SDK Discord v4.29', () => {
+    expect(decodeDiscordCustomId('ncq:mg-123:0\n0')).toEqual({
+      actionId: 'ncq:mg-123:0',
+      value: '0',
+    });
+  });
+
+  it('preserves legacy custom ids that contain no encoded value', () => {
+    expect(decodeDiscordCustomId('ncq:mg-123:approve')).toEqual({
+      actionId: 'ncq:mg-123:approve',
+    });
+  });
+});
 
 describe('splitForLimit', () => {
   it('returns a single chunk when text fits', () => {

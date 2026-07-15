@@ -17,7 +17,12 @@
  */
 import { recordDroppedMessage } from '../../db/dropped-messages.js';
 import { getAgentGroup, getAllAgentGroups } from '../../db/agent-groups.js';
-import { createMessagingGroupAgent, getMessagingGroup, setMessagingGroupDeniedAt } from '../../db/messaging-groups.js';
+import {
+  createMessagingGroupAgent,
+  getMessagingGroup,
+  setAgentGroupSessionMode,
+  setMessagingGroupDeniedAt,
+} from '../../db/messaging-groups.js';
 import { resolveWiringDefaults } from '../../channels/channel-defaults.js';
 import {
   routeInbound,
@@ -355,13 +360,18 @@ async function wireApprovedChannel(
     engage_pattern: engage.engage_pattern,
     // Deliberate card-flow choices, not channel defaults: the triggering
     // sender is auto-admitted below, so 'known' keeps other strangers gated;
-    // 'accumulate' / 'shared' / priority 0 are the flow's fixed semantics.
+    // 'accumulate' / priority 0 are the flow's fixed semantics. Match the
+    // dashboard Add Chat path's agent-shared invariant: one agent with
+    // multiple chats must still have one session and one recurring-task fire.
     sender_scope: 'known',
     ignored_message_policy: 'accumulate',
-    session_mode: 'shared',
+    session_mode: 'agent-shared',
     priority: 0,
     created_at: new Date().toISOString(),
   });
+  // The new row alone is insufficient if this agent already had a `shared`
+  // chat. Flip every sibling binding exactly as dashboard Add Chat does.
+  setAgentGroupSessionMode(agentGroupId, 'agent-shared');
   log.info('Channel registration approved — wiring created', {
     messagingGroupId: row.messaging_group_id,
     agentGroupId,

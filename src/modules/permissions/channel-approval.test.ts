@@ -18,7 +18,11 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 
 import { initTestDb, closeDb, runMigrations } from '../../db/index.js';
 import { createAgentGroup } from '../../db/agent-groups.js';
-import { createMessagingGroup, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
+import {
+  createMessagingGroup,
+  createMessagingGroupAgent,
+  getMessagingGroupByPlatform,
+} from '../../db/messaging-groups.js';
 import { registerChannelAdapter } from '../../channels/channel-registry.js';
 import type { ChannelDefaults } from '../../channels/adapter.js';
 import { upsertUser } from './db/users.js';
@@ -218,6 +222,31 @@ describe('unknown-channel registration flow', () => {
     const { wakeContainer } = await import('../../container-runner.js');
     (wakeContainer as unknown as ReturnType<typeof vi.fn>).mockClear();
 
+    // Existing agent already has a chat in the historical `shared` mode.
+    // Approval must behave like Dashboard Add Chat: add the new chat as
+    // agent-shared and flip this sibling binding into the same regime.
+    createMessagingGroup({
+      id: 'mg-existing-chat',
+      channel_type: 'telegram',
+      platform_id: 'chat-existing',
+      name: 'Existing chat',
+      is_group: 1,
+      unknown_sender_policy: 'public',
+      created_at: now(),
+    });
+    createMessagingGroupAgent({
+      id: 'mga-existing-chat',
+      messaging_group_id: 'mg-existing-chat',
+      agent_group_id: 'ag-1',
+      engage_mode: 'mention',
+      engage_pattern: null,
+      sender_scope: 'known',
+      ignored_message_policy: 'accumulate',
+      session_mode: 'shared',
+      priority: 0,
+      created_at: now(),
+    });
+
     await routeInbound(groupMention('chat-approve'));
     await new Promise((r) => setTimeout(r, 10));
 
@@ -248,6 +277,7 @@ describe('unknown-channel registration flow', () => {
       engage_pattern: string | null;
       sender_scope: string;
       ignored_message_policy: string;
+      session_mode: string;
       agent_group_id: string;
     };
     expect(mga).toBeDefined();
@@ -255,7 +285,12 @@ describe('unknown-channel registration flow', () => {
     expect(mga.engage_pattern).toBeNull();
     expect(mga.sender_scope).toBe('known');
     expect(mga.ignored_message_policy).toBe('accumulate');
+    expect(mga.session_mode).toBe('agent-shared');
     expect(mga.agent_group_id).toBe('ag-1');
+    const sibling = getDb()
+      .prepare('SELECT session_mode FROM messaging_group_agents WHERE id = ?')
+      .get('mga-existing-chat') as { session_mode: string };
+    expect(sibling.session_mode).toBe('agent-shared');
 
     // Triggering sender auto-admitted so sender_scope='known' doesn't
     // bounce the replay into sender-approval.
