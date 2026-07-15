@@ -771,10 +771,9 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(anyChat).toBeUndefined();
   });
 
-  it('REGRESSION GUARD: a genuine no-output addressed turn (not confirm) is suppressed, not visibly degraded', () => {
-    // The real tool-failure case (2026-05-17 AI Friends) should stay
-    // visible to operators in logs/task_fires, but must not synthesize an
-    // alarming [degraded] channel post.
+  it('REGRESSION GUARD: a genuine no-output addressed turn gets a non-alarming scoped fallback', () => {
+    // The real tool-failure case (2026-05-17 AI Friends) must not silently
+    // disappear or synthesize an alarming internal diagnostic.
     insertChannelDestination('boys-night');
 
     dispatchResultText(
@@ -785,11 +784,11 @@ describe('dispatchResultText safety net (local fork patch)', () => {
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(out[0].kind).toBe('system');
-    expect(JSON.parse(out[0].content)).toEqual({
-      action: 'silent_turn_complete',
-    });
-    expect(out[0].channel_type).toBeNull();
+    expect(out[0].kind).toBe('chat');
+    expect(JSON.parse(out[0].content).text).toBe(
+      "I couldn't complete that request or produce a reliable reply. Please try again.",
+    );
+    expect(out[0].channel_type).toBe(ROUTING.channelType);
   });
 
   it('emits silent_turn_complete (not safety-net chat) for <internal>-only output (private maintenance turn)', () => {
@@ -927,19 +926,20 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     });
   });
 
-  it('addressed + zero output: suppresses degraded fallback and emits silent_turn_complete', () => {
+  it('addressed + zero output: sends a scoped failure fallback instead of going silent', () => {
     insertChannelDestination('boys-night');
 
     dispatchResultText('   \n\n   ', ROUTING, /* addressed */ true);
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(out[0].kind).toBe('system');
-    expect(out[0].channel_type).toBeNull();
-    expect(out[0].platform_id).toBeNull();
-    expect(JSON.parse(out[0].content)).toEqual({
-      action: 'silent_turn_complete',
-    });
+    expect(out[0].kind).toBe('chat');
+    expect(out[0].channel_type).toBe(ROUTING.channelType);
+    expect(out[0].platform_id).toBe(ROUTING.platformId);
+    expect(out[0].in_reply_to).toBe(ROUTING.inReplyTo);
+    expect(JSON.parse(out[0].content).text).toBe(
+      "I couldn't complete that request or produce a reliable reply. Please try again.",
+    );
   });
 
   it('addressed + zero <message> blocks but a tool DID deliver a chat row: silent_turn_complete, NO degraded fallback', async () => {
@@ -1055,17 +1055,17 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(followup).toHaveLength(1);
   });
 
-  it('addressed + <internal>-only output: suppresses degraded fallback', () => {
+  it('addressed + <internal>-only output: sends scoped failure fallback', () => {
     insertChannelDestination('boys-night');
 
     dispatchResultText('<internal>I cannot answer this, search failed</internal>', ROUTING, true);
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(out[0].kind).toBe('system');
-    expect(JSON.parse(out[0].content)).toEqual({
-      action: 'silent_turn_complete',
-    });
+    expect(out[0].kind).toBe('chat');
+    expect(JSON.parse(out[0].content).text).toBe(
+      "I couldn't complete that request or produce a reliable reply. Please try again.",
+    );
   });
 
   it('addressed + compacted + internal-only output: notifies after an earlier progress acknowledgement', async () => {

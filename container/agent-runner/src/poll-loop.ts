@@ -1866,6 +1866,17 @@ export async function processQuery(
                     `Please re-send your response with the correct wrapping.</system>`,
                 );
                 pushAddressed.push(resultAddressed);
+              } else if (hasUnwrapped && resultAddressed) {
+                // The model ignored the one allowed wrapping retry. Convert
+                // the exhausted addressed turn into the same deterministic
+                // scoped fallback as a truly empty addressed result. Do not
+                // pass the stream-wide turnStartedAt: an earlier push may
+                // legitimately have replied in this warm query, but that
+                // must not make this later follow-up look answered.
+                const fallback = dispatchResultText('', routing, true);
+                if (fireCtx && fallback.dispatched.length > 0) {
+                  fireCtx.dispatched.push(...fallback.dispatched);
+                }
               }
               // The wrapping-retry result answers the SAME user prompt — keep it
               // queued so the retry archives against it, not the nudge text.
@@ -2366,12 +2377,23 @@ export function dispatchResultText(
         return { sent, hasUnwrapped, dispatched };
       }
       // A human @mentioned this agent or replied to it, and the agent
-      // produced nothing to send back. Do not synthesize a visible
-      // "[degraded]" channel post: those messages are alarming, can route
-      // incorrectly if the batch carries cross-channel context, and are not
-      // the agent's actual answer. End the turn quietly; the host logs and
-      // task_fires keep the failure visible to operators.
-      log(`WARNING: addressed turn produced no deliverable output — suppressing degraded fallback`);
+      // produced nothing to send back even after the wrapping retry. Silence
+      // is worse than a scoped, honest failure here: the user otherwise sees
+      // the bot as having ignored the request entirely (the-vibes calendar
+      // follow-up, 2026-07-14). Keep the fallback deliberately generic — the
+      // runner cannot infer whether a side effect completed — and route it
+      // only to the triggering destination.
+      const dest = findByRouting(routing.channelType, routing.platformId);
+      if (dest) {
+        const body = "I couldn't complete that request or produce a reliable reply. Please try again.";
+        if (sendToDestination(dest, body, routing)) {
+          log(`WARNING: addressed turn produced no deliverable output — sent scoped failure fallback`);
+          dispatched.push({ destination: dest.name, body });
+          sent++;
+          return { sent, hasUnwrapped, dispatched };
+        }
+      }
+      log(`WARNING: addressed turn produced no deliverable output and had no valid reply destination`);
       emitSilentTurnComplete();
       return { sent, hasUnwrapped, dispatched };
     }

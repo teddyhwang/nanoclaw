@@ -208,6 +208,45 @@ describe('poll loop integration', () => {
     await loopPromise.catch(() => {});
   });
 
+  it('directly addressed turn gets a scoped fallback when the wrapping retry is exhausted', async () => {
+    // Live repro: the-vibes 2026-07-14. Mladen's follow-up was pushed into
+    // the warm turn; the model returned scratchpad twice (original + wrapping
+    // retry), and the runner completed the input with no visible response.
+    insertMessage(
+      'm-addressed',
+      { sender: 'Mladen', text: '@optimus add it to the Tico calendar', isMention: true },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
+
+    const provider = new MockProvider(
+      {},
+      () => '<internal>Awaiting a confirmation that does not exist.</internal>\ntrace',
+    );
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2500);
+
+    await waitFor(
+      () =>
+        getUndeliveredMessages().some(
+          (row) =>
+            JSON.parse(row.content).text ===
+            "I couldn't complete that request or produce a reliable reply. Please try again.",
+        ),
+      2000,
+    );
+    controller.abort();
+
+    const chat = getUndeliveredMessages().filter((row) => row.kind === 'chat');
+    expect(chat).toHaveLength(1);
+    expect(chat[0].platform_id).toBe('chan-1');
+    expect(chat[0].in_reply_to).toBe('m-addressed');
+    expect(JSON.parse(chat[0].content).text).toBe(
+      "I couldn't complete that request or produce a reliable reply. Please try again.",
+    );
+
+    await loopPromise.catch(() => {});
+  });
+
   it('unknown destination is dropped, valid destination is sent', async () => {
     insertMessage('m1', { sender: 'Alice', text: 'hi' }, { platformId: 'chan-1', channelType: 'discord' });
 
