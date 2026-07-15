@@ -306,6 +306,100 @@ describe('unknown-channel registration flow', () => {
     expect(wakeContainer).toHaveBeenCalled();
   });
 
+  it('rolls back the entire approval commit when sender admission fails', async () => {
+    const { routeInbound } = await import('../../router.js');
+    const { getResponseHandlers } = await import('../../response-registry.js');
+    const { getDb } = await import('../../db/connection.js');
+    const { wakeContainer } = await import('../../container-runner.js');
+    (wakeContainer as unknown as ReturnType<typeof vi.fn>).mockClear();
+
+    createMessagingGroup({
+      id: 'mg-rollback-sibling',
+      channel_type: 'telegram',
+      platform_id: 'rollback-sibling',
+      name: 'Rollback sibling',
+      is_group: 1,
+      unknown_sender_policy: 'public',
+      created_at: now(),
+    });
+    createMessagingGroupAgent({
+      id: 'mga-rollback-sibling',
+      messaging_group_id: 'mg-rollback-sibling',
+      agent_group_id: 'ag-1',
+      engage_mode: 'mention',
+      engage_pattern: null,
+      sender_scope: 'known',
+      ignored_message_policy: 'accumulate',
+      session_mode: 'shared',
+      priority: 0,
+      created_at: now(),
+    });
+
+    await routeInbound(groupMention('chat-rollback'));
+    await new Promise((r) => setTimeout(r, 10));
+    const pending = getDb().prepare('SELECT messaging_group_id FROM pending_channel_approvals').get() as {
+      messaging_group_id: string;
+    };
+
+    // Fail after the wiring/destination insert and sibling-mode update. The
+    // transaction must unwind all of them and retain the approval for retry.
+    getDb()
+      .prepare(
+        `CREATE TRIGGER fail_channel_approval_member
+         BEFORE INSERT ON agent_group_members
+         WHEN NEW.user_id = 'telegram:caller'
+         BEGIN
+           SELECT RAISE(ABORT, 'forced member failure');
+         END`,
+      )
+      .run();
+
+    for (const handler of getResponseHandlers()) {
+      const claimed = await handler({
+        questionId: pending.messaging_group_id,
+        value: 'connect:ag-1',
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      });
+      if (claimed) break;
+    }
+
+    const wiringCount = (
+      getDb()
+        .prepare('SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ?')
+        .get(pending.messaging_group_id) as { c: number }
+    ).c;
+    const destinationCount = (
+      getDb()
+        .prepare("SELECT COUNT(*) AS c FROM agent_destinations WHERE target_type = 'channel' AND target_id = ?")
+        .get(pending.messaging_group_id) as { c: number }
+    ).c;
+    const sibling = getDb()
+      .prepare('SELECT session_mode FROM messaging_group_agents WHERE id = ?')
+      .get('mga-rollback-sibling') as { session_mode: string };
+    const pendingCount = (
+      getDb()
+        .prepare('SELECT COUNT(*) AS c FROM pending_channel_approvals WHERE messaging_group_id = ?')
+        .get(pending.messaging_group_id) as { c: number }
+    ).c;
+    const memberCount = (
+      getDb()
+        .prepare(
+          "SELECT COUNT(*) AS c FROM agent_group_members WHERE user_id = 'telegram:caller' AND agent_group_id = 'ag-1'",
+        )
+        .get() as { c: number }
+    ).c;
+
+    expect(wiringCount).toBe(0);
+    expect(destinationCount).toBe(0);
+    expect(sibling.session_mode).toBe('shared');
+    expect(pendingCount).toBe(1);
+    expect(memberCount).toBe(0);
+    expect(wakeContainer).not.toHaveBeenCalled();
+  });
+
   it('approve on a DM wires with pattern="." defaults', async () => {
     const { routeInbound } = await import('../../router.js');
     const { getResponseHandlers } = await import('../../response-registry.js');

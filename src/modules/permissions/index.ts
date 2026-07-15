@@ -17,6 +17,7 @@
  */
 import { recordDroppedMessage } from '../../db/dropped-messages.js';
 import { getAgentGroup, getAllAgentGroups } from '../../db/agent-groups.js';
+import { getDb } from '../../db/connection.js';
 import {
   createMessagingGroupAgent,
   getMessagingGroup,
@@ -352,26 +353,54 @@ async function wireApprovedChannel(
   }
 
   const mgaId = `mga-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  createMessagingGroupAgent({
-    id: mgaId,
-    messaging_group_id: row.messaging_group_id,
-    agent_group_id: agentGroupId,
-    engage_mode: engage.engage_mode,
-    engage_pattern: engage.engage_pattern,
-    // Deliberate card-flow choices, not channel defaults: the triggering
-    // sender is auto-admitted below, so 'known' keeps other strangers gated;
-    // 'accumulate' / priority 0 are the flow's fixed semantics. Match the
-    // dashboard Add Chat path's agent-shared invariant: one agent with
-    // multiple chats must still have one session and one recurring-task fire.
-    sender_scope: 'known',
-    ignored_message_policy: 'accumulate',
-    session_mode: 'agent-shared',
-    priority: 0,
-    created_at: new Date().toISOString(),
-  });
-  // The new row alone is insufficient if this agent already had a `shared`
-  // chat. Flip every sibling binding exactly as dashboard Add Chat does.
-  setAgentGroupSessionMode(agentGroupId, 'agent-shared');
+  const createdAt = new Date().toISOString();
+  try {
+    // Treat approval as one database commit. A failure must retain the pending
+    // row and every prior binding exactly as they were; otherwise the chat can
+    // become half-wired with no approval left to retry.
+    getDb().transaction(() => {
+      createMessagingGroupAgent({
+        id: mgaId,
+        messaging_group_id: row.messaging_group_id,
+        agent_group_id: agentGroupId,
+        engage_mode: engage.engage_mode,
+        engage_pattern: engage.engage_pattern,
+        // Deliberate card-flow choices, not channel defaults: the triggering
+        // sender is auto-admitted below, so 'known' keeps other strangers gated;
+        // 'accumulate' / priority 0 are the flow's fixed semantics. Match the
+        // dashboard Add Chat path's agent-shared invariant: one agent with
+        // multiple chats must still have one session and one recurring-task fire.
+        sender_scope: 'known',
+        ignored_message_policy: 'accumulate',
+        session_mode: 'agent-shared',
+        priority: 0,
+        created_at: createdAt,
+      });
+      // The new row alone is insufficient if this agent already had a `shared`
+      // chat. Flip every sibling binding exactly as dashboard Add Chat does.
+      setAgentGroupSessionMode(agentGroupId, 'agent-shared');
+
+      const senderUserId = extractAndUpsertUser(event);
+      if (senderUserId) {
+        addMember({
+          user_id: senderUserId,
+          agent_group_id: agentGroupId,
+          added_by: approverId,
+          added_at: createdAt,
+        });
+      }
+
+      deletePendingChannelApproval(row.messaging_group_id);
+    })();
+  } catch (err) {
+    log.error('Channel registration approval commit failed — rolled back', {
+      messagingGroupId: row.messaging_group_id,
+      agentGroupId,
+      err,
+    });
+    return false;
+  }
+
   log.info('Channel registration approved — wiring created', {
     messagingGroupId: row.messaging_group_id,
     agentGroupId,
@@ -379,18 +408,6 @@ async function wireApprovedChannel(
     engageMode: engage.engage_mode,
     approverId,
   });
-
-  const senderUserId = extractAndUpsertUser(event);
-  if (senderUserId) {
-    addMember({
-      user_id: senderUserId,
-      agent_group_id: agentGroupId,
-      added_by: approverId,
-      added_at: new Date().toISOString(),
-    });
-  }
-
-  deletePendingChannelApproval(row.messaging_group_id);
 
   try {
     await routeInbound(event);
