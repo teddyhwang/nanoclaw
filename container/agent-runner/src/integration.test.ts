@@ -247,14 +247,18 @@ describe('poll loop integration', () => {
     await loopPromise.catch(() => {});
   });
 
-  it('directly addressed empty result gets a scoped fallback', async () => {
+  it.each([
+    ['empty-string', ''],
+    ['null', null],
+  ] as const)('directly addressed %s result gets a scoped fallback', async (caseName, resultText) => {
+    const messageId = `m-${caseName}-addressed`;
     insertMessage(
-      'm-empty-addressed',
+      messageId,
       { sender: 'Alice', text: '@optimus answer me', isMention: true },
       { platformId: 'chan-1', channelType: 'discord' },
     );
 
-    const provider = new MockProvider({}, () => '');
+    const provider = new MockProvider({}, () => resultText);
     const controller = new AbortController();
     const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
 
@@ -264,7 +268,7 @@ describe('poll loop integration', () => {
     const chat = getUndeliveredMessages().filter((row) => row.kind === 'chat');
     expect(chat).toHaveLength(1);
     expect(chat[0].platform_id).toBe('chan-1');
-    expect(chat[0].in_reply_to).toBe('m-empty-addressed');
+    expect(chat[0].in_reply_to).toBe(messageId);
     expect(JSON.parse(chat[0].content).text).toBe(
       "I couldn't complete that request or produce a reliable reply. Please try again.",
     );

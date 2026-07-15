@@ -26,12 +26,12 @@ export interface MockProviderBehavior {
 export class MockProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = false;
 
-  private responseFactory: (prompt: string) => string;
+  private responseFactory: (prompt: string) => string | null;
   private behavior: MockProviderBehavior;
 
   constructor(
     _options: ProviderOptions = {},
-    responseFactory?: (prompt: string) => string,
+    responseFactory?: (prompt: string) => string | null,
     behavior: MockProviderBehavior = {},
   ) {
     this.responseFactory = responseFactory ?? ((prompt) => `Mock response to: ${prompt.slice(0, 100)}`);
