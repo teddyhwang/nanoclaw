@@ -247,6 +247,73 @@ describe('poll loop integration', () => {
     await loopPromise.catch(() => {});
   });
 
+  it('directly addressed empty result gets a scoped fallback', async () => {
+    insertMessage(
+      'm-empty-addressed',
+      { sender: 'Alice', text: '@optimus answer me', isMention: true },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
+
+    const provider = new MockProvider({}, () => '');
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
+
+    await waitFor(() => getUndeliveredMessages().some((row) => row.kind === 'chat'), 1500);
+    controller.abort();
+
+    const chat = getUndeliveredMessages().filter((row) => row.kind === 'chat');
+    expect(chat).toHaveLength(1);
+    expect(chat[0].platform_id).toBe('chan-1');
+    expect(chat[0].in_reply_to).toBe('m-empty-addressed');
+    expect(JSON.parse(chat[0].content).text).toBe(
+      "I couldn't complete that request or produce a reliable reply. Please try again.",
+    );
+
+    await loopPromise.catch(() => {});
+  });
+
+  it('does not retry or send a false fallback after a tool-delivered addressed reply', async () => {
+    insertMessage(
+      'm-tool-addressed',
+      { sender: 'Alice', text: '@optimus send it', isMention: true },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
+
+    let calls = 0;
+    const provider = new MockProvider({}, () => {
+      calls++;
+      if (calls === 1) {
+        getOutboundDb()
+          .prepare(
+            `INSERT INTO messages_out
+               (id, seq, in_reply_to, timestamp, kind, platform_id, channel_type, thread_id, content)
+             VALUES (?, 3, ?, ?, 'chat', 'chan-1', 'discord', NULL, ?)`,
+          )
+          .run(
+            'tool-delivery',
+            'm-tool-addressed',
+            new Date().toISOString(),
+            JSON.stringify({ text: 'Delivered through send_message.' }),
+          );
+      }
+      return '<internal>Done.</internal>\ntrace';
+    });
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
+
+    await waitFor(() => calls === 1, 1000);
+    await sleep(150);
+    controller.abort();
+
+    const chat = getUndeliveredMessages().filter((row) => row.kind === 'chat');
+    expect(calls).toBe(1);
+    expect(chat).toHaveLength(1);
+    expect(chat[0].id).toBe('tool-delivery');
+    expect(JSON.parse(chat[0].content).text).toBe('Delivered through send_message.');
+
+    await loopPromise.catch(() => {});
+  });
+
   it('unknown destination is dropped, valid destination is sent', async () => {
     insertMessage('m1', { sender: 'Alice', text: 'hi' }, { platformId: 'chan-1', channelType: 'discord' });
 

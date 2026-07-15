@@ -1821,7 +1821,7 @@ export async function processQuery(
               event.text,
               routing,
               resultAddressed,
-              turnStartedAt,
+              resultBoundaryAt,
               compactedSinceLastResult,
               isTaskTurn,
               resultBoundaryAt,
@@ -1882,8 +1882,17 @@ export async function processQuery(
               // queued so the retry archives against it, not the nudge text.
               if (!willRetryWrapping) archivePrompts.shift();
             }
-          } else if (resultAddressed && compactedSinceLastResult) {
-            dispatchResultText('', routing, true, turnStartedAt, true);
+          } else if (resultAddressed) {
+            // A result event with no text is still a completed provider turn.
+            // Retryable provider failures use the separate error-event path;
+            // a genuinely empty addressed result must not disappear silently.
+            // Scope tool-delivery detection to this push so an earlier warm-
+            // query reply cannot suppress the fallback for this follow-up.
+            const fireCtx = mostRecentTaskContext();
+            const fallback = dispatchResultText('', routing, true, resultBoundaryAt, compactedSinceLastResult);
+            if (fireCtx && fallback.dispatched.length > 0) {
+              fireCtx.dispatched.push(...fallback.dispatched);
+            }
             notifyExchangeComplete(onExchangeComplete, {
               prompt: archivePrompts[0] ?? initialPrompt,
               result: null,
@@ -2301,6 +2310,14 @@ export function dispatchResultText(
     log(`[scratchpad] ${scratchpad.slice(0, 500)}${scratchpad.length > 500 ? '…' : ''}`);
   }
 
+  // Check this before the unwrapped-text retry. A model can fulfill an
+  // addressed turn through send_message/send_file and still leave stray bare
+  // narration in its final result. Nudging that already-satisfied turn and
+  // then forcing a fallback after the retry produces a false failure message.
+  // processQuery passes the current push boundary here, so a reply from an
+  // earlier turn in the same warm query cannot suppress this turn.
+  const addressedDeliveredViaTool = addressed && !!turnStartedAt && countChatMessagesSince(turnStartedAt) > 0;
+
   // Safety-net only fires when there's user-facing content the runner
   // would otherwise silently drop. `<internal>...</internal>` is the
   // agent's private-thoughts tag — content inside it is *meant* to stay
@@ -2309,6 +2326,14 @@ export function dispatchResultText(
   // doesn't get force-emitted with a degraded label.
   const hasUnwrapped = sent === 0 && !!scratchpad;
   if (hasUnwrapped) {
+    if (addressedDeliveredViaTool) {
+      log(
+        'addressed turn emitted unwrapped final text after delivering a ' +
+          'chat message via a tool — ending cleanly without a wrapping retry',
+      );
+      emitSilentTurnComplete();
+      return { sent, hasUnwrapped: false, dispatched };
+    }
     log(`WARNING: agent output had no <message to="..."> blocks — suppressing unwrapped text and nudging retry`);
     emitSilentTurnComplete();
     // Caller pushes an upstream-style nudge re-prompt via the
@@ -2367,7 +2392,7 @@ export function dispatchResultText(
       // fine in the Discord Teddy DM, then got a bogus failure note).
       // If a chat row exists since turn start, the turn DID deliver —
       // end it cleanly with silent_turn_complete instead.
-      if (turnStartedAt && countChatMessagesSince(turnStartedAt) > 0) {
+      if (addressedDeliveredViaTool) {
         log(
           'addressed turn emitted no <message> blocks but delivered a ' +
             'chat message via a tool (send_file/send_message) — ending ' +
