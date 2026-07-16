@@ -163,6 +163,22 @@ export interface EngineEventMap {
     sessionsRefreshed: number;
   };
   'outbound.delivered': { sessionId: string; agentGroupId: string; channelType: string; platformId: string };
+  /**
+   * Fires after any host caller successfully sends, edits, or deletes a
+   * platform message through the shared delivery adapter. Unlike
+   * `outbound.delivered`, this covers plugin-originated traffic (dev bridge,
+   * watchers, approval cards) and carries the platform message id/content so
+   * projections can upsert edits instead of retaining creation snapshots.
+   */
+  'channel.outbound_observed': {
+    channelType: string;
+    platformId: string;
+    threadId: string | null;
+    messageId: string;
+    operation: 'send' | 'edit' | 'delete';
+    text: string | null;
+    ts: string;
+  };
   'outbound.failed': { sessionId: string; agentGroupId: string; channelType: string; platformId: string; err: unknown };
   'container.spawn': { sessionId: string; agentGroupId: string };
   'container.stop': {

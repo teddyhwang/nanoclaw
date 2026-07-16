@@ -162,15 +162,38 @@ export async function _bootForHost(opts: { managedSignals: boolean }): Promise<v
         log.warn('No adapter for channel type', { channelType });
         return;
       }
-      return adapter.deliver(platformId, threadId, {
+      const parsed = JSON.parse(content) as Record<string, unknown>;
+      const deliveredId = await adapter.deliver(platformId, threadId, {
         kind,
-        content: JSON.parse(content),
+        content: parsed,
         files,
         inReplyTo,
         assistantName,
         assistantPrefixSeparator,
         suppressEmbeds,
       });
+      const rawOperation = parsed.operation;
+      const operation =
+        rawOperation === 'edit' || rawOperation === 'delete'
+          ? rawOperation
+          : rawOperation === undefined
+            ? 'send'
+            : null;
+      const messageId =
+        operation === 'send' ? deliveredId : typeof parsed.messageId === 'string' ? parsed.messageId : undefined;
+      if (operation && messageId) {
+        const rawText = parsed.text ?? parsed.markdown;
+        emitEngineEvent('channel.outbound_observed', {
+          channelType,
+          platformId,
+          threadId,
+          messageId,
+          operation,
+          text: typeof rawText === 'string' ? rawText : null,
+          ts: new Date().toISOString(),
+        });
+      }
+      return deliveredId;
     },
     async setTyping(channelType: string, platformId: string, threadId: string | null): Promise<void> {
       const adapter = getChannelAdapter(channelType);
