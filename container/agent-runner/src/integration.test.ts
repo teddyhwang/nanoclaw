@@ -118,6 +118,46 @@ describe('poll loop integration', () => {
     await loopPromise.catch(() => {});
   });
 
+  it('keeps a wrapping retry open when accumulate-only chat arrives before the retry result', async () => {
+    // Live repro: AI Friends 2026-07-18 recovery. The first result contained
+    // a message block with an invalid reply reference, so dispatch dropped it
+    // and pushed the one allowed wrapping retry. Ambient trigger=0 chat then
+    // hit the accumulate gate; resultIndex was already >0 from the dropped
+    // first result, so query.end() killed the retry before it could deliver.
+    insertMessage(
+      'm-wrap-trigger',
+      { sender: 'Teddy', text: '@Optimus answer this' },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
+
+    const provider = new DelayedFollowUpProvider(
+      'unwrapped first answer',
+      '<message to="discord-test">wrapped retry answer</message>',
+    );
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 3500);
+
+    await waitFor(() => provider.pushes === 1, 1500);
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, trigger, platform_id, channel_type, content)
+         VALUES ('m-wrap-ambient', 'chat', datetime('now'), 'pending', 0, 'chan-1', 'discord', ?)`,
+      )
+      .run(JSON.stringify({ sender: 'Bob', text: 'ambient chatter' }));
+
+    await sleep(800);
+    expect(provider.ends).toBe(0);
+    expect(getUndeliveredMessages().filter((row) => row.kind === 'chat')).toHaveLength(0);
+
+    provider.releaseFollowUp();
+    await waitFor(() => getUndeliveredMessages().some((row) => row.kind === 'chat'), 1500);
+    const delivered = getUndeliveredMessages().find((row) => row.kind === 'chat');
+    expect(JSON.parse(delivered!.content).text).toBe('wrapped retry answer');
+
+    controller.abort();
+    await loopPromise.catch(() => {});
+  });
+
   it('should process multiple messages in a batch', async () => {
     insertMessage('m1', { sender: 'Alice', text: 'Hello' });
     insertMessage('m2', { sender: 'Bob', text: 'World' });
@@ -1524,6 +1564,68 @@ describe('poll loop — slash command during active query', () => {
  * Provider whose query never completes until ended/aborted — for testing how
  * the loop interrupts an active stream.
  */
+class DelayedFollowUpProvider {
+  readonly supportsNativeSlashCommands = false;
+  pushes = 0;
+  ends = 0;
+  private released = false;
+  private wake: (() => void) | null = null;
+
+  constructor(
+    private readonly initialResponse: string,
+    private readonly followUpResponse: string,
+  ) {}
+
+  isSessionInvalid(): boolean {
+    return false;
+  }
+
+  releaseFollowUp(): void {
+    this.released = true;
+    this.wake?.();
+  }
+
+  query() {
+    const owner = this;
+    let ended = false;
+    let aborted = false;
+
+    return {
+      push() {
+        owner.pushes += 1;
+        owner.wake?.();
+      },
+      end() {
+        owner.ends += 1;
+        ended = true;
+        owner.wake?.();
+      },
+      abort() {
+        aborted = true;
+        owner.wake?.();
+      },
+      events: (async function* () {
+        yield { type: 'init' as const, continuation: 'delayed-follow-up-session' };
+        yield { type: 'result' as const, text: owner.initialResponse };
+        while ((!owner.released || owner.pushes === 0) && !ended && !aborted) {
+          await new Promise<void>((resolve) => {
+            owner.wake = resolve;
+          });
+          owner.wake = null;
+        }
+        if (ended || aborted) return;
+        yield { type: 'result' as const, text: owner.followUpResponse };
+        while (!ended && !aborted) {
+          await new Promise<void>((resolve) => {
+            owner.wake = resolve;
+          });
+          owner.wake = null;
+        }
+      })(),
+    };
+  }
+}
+
 class DelayedResultProvider {
   readonly supportsNativeSlashCommands = false;
   queries = 0;

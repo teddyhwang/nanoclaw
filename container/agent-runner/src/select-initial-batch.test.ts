@@ -148,4 +148,8 @@ describe('mayEndQueryForDeferredFollowUps', () => {
   it('allows ending after the active turn produced a result', () => {
     expect(mayEndQueryForDeferredFollowUps(true)).toBe(true);
   });
+
+  it('does NOT allow ending while a wrapping retry is still in flight', () => {
+    expect(mayEndQueryForDeferredFollowUps(true, true)).toBe(false);
+  });
 });

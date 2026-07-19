@@ -219,8 +219,8 @@ export function shouldDeferTaskFromChatTurn(activeSender: string | null, followu
  * normal chat turn (Fasting, 2026-07-13), and finally task-turn chat deferral
  * (AI Friends recap + queued mentions, 2026-07-18).
  */
-export function mayEndQueryForDeferredFollowUps(firstResultSeen: boolean): boolean {
-  return firstResultSeen;
+export function mayEndQueryForDeferredFollowUps(firstResultSeen: boolean, wrappingRetryInFlight = false): boolean {
+  return firstResultSeen && !wrappingRetryInFlight;
 }
 
 /**
@@ -1079,6 +1079,9 @@ export async function processQuery(
   let queryContinuation: string | undefined;
   let done = false;
   let unwrappedNudged = false;
+  // Separate from the one-nudge-per-push guard above: once the nudge is sent,
+  // deferred ambient work must not end the query until its retry result lands.
+  let wrappingRetryInFlight = false;
   // Results arrive in push order. Preserve whether each push was directly
   // addressed so a new request pushed into a warm query is not mistaken
   // for ambient continuation (Nook 2026-06-07).
@@ -1328,12 +1331,15 @@ export async function processQuery(
           // and then a normal chat turn (Fasting, 2026-07-13). Leave the
           // accumulate-only rows pending and let the addressed turn finish;
           // after its result, this same gate can unwind the stream cleanly.
-          if (!mayEndQueryForDeferredFollowUps(resultIndex > 0)) {
+          if (!mayEndQueryForDeferredFollowUps(resultIndex > 0, wrappingRetryInFlight)) {
             if (!loggedHoldingForFirstResult) {
               loggedHoldingForFirstResult = true;
+              const holdReason = wrappingRetryInFlight
+                ? 'the wrapping retry is still in flight'
+                : 'the active turn is still in flight (no result yet)';
               log(
                 `Holding active query open — ${newMessages.length} accumulate-only ` +
-                  `follow-up(s) pending but the active turn is still in flight (no result yet)`,
+                  `follow-up(s) pending but ${holdReason}`,
               );
             }
             return;
@@ -1508,12 +1514,15 @@ export async function processQuery(
               // stream is not. If the task has not produced a result yet,
               // query.end() kills Codex during init/generation and leaves the
               // same task + chat triggers pending for an identical retry loop.
-              if (!mayEndQueryForDeferredFollowUps(resultIndex > 0)) {
+              if (!mayEndQueryForDeferredFollowUps(resultIndex > 0, wrappingRetryInFlight)) {
                 if (!loggedHoldingForFirstResult) {
                   loggedHoldingForFirstResult = true;
+                  const holdReason = wrappingRetryInFlight
+                    ? 'the wrapping retry is still in flight'
+                    : 'the task is still in flight (no result yet)';
                   log(
                     `Holding active task query open — ${chatDeferred.length} deferred chat ` +
-                      `follow-up(s) pending but the task is still in flight (no result yet)`,
+                      `follow-up(s) pending but ${holdReason}`,
                   );
                 }
                 return;
@@ -1806,6 +1815,10 @@ export async function processQuery(
           // Claude session with no prior context.
           setContinuation(providerName, event.continuation);
         } else if (event.type === 'result') {
+          // Provider results are ordered with pushes. If the prior result
+          // triggered a wrapping retry, this is that retry's result; deferred
+          // follow-up gates may end the query again after it is processed.
+          wrappingRetryInFlight = false;
           // A result — with or without text — means the turn is done. Mark
           // the initial batch completed now so the host sweep doesn't see
           // stale 'processing' claims while the query stays open for
@@ -1869,6 +1882,7 @@ export async function processQuery(
               });
               if (willRetryWrapping) {
                 unwrappedNudged = true;
+                wrappingRetryInFlight = true;
                 const destinations = getAllDestinations();
                 const names = destinations.map((d) => d.name).join(', ');
                 query.push(
