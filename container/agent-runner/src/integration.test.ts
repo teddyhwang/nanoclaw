@@ -990,6 +990,43 @@ describe('poll loop — task_fires recording', () => {
     await loopPromise.catch(() => {});
   });
 
+  it('keeps a task turn open when trigger chat arrives before its first result', async () => {
+    // Live repro: AI Friends 2026-07-18. OneCLI was offline while a recap
+    // task and several @mentions queued. After OneCLI recovered, the recap
+    // started first and the follow-up poll correctly deferred the chat — but
+    // immediately called query.end() before Codex emitted any result. Codex
+    // exited 0, the recap stayed pending, and every host retry repeated the
+    // same empty turn while the mentions remained blocked behind it.
+    insertTask('t-recap-blocked', 'recap-series-blocked', {
+      prompt: 'daily recap task',
+    });
+
+    const provider = new DelayedResultProvider('<internal>recap complete</internal>');
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 3500);
+
+    await waitFor(() => provider.queries === 1, 1000);
+    insertMessage(
+      'm-midtask-mention',
+      { sender: 'Teddy', text: '@Optimus are you there?' },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
+
+    // Let the 500ms follow-up poll observe and defer the trigger chat. It
+    // must leave the active task query open until that task has a result.
+    await sleep(800);
+    expect(provider.ends).toBe(0);
+    expect(readTaskFires('recap-series-blocked')).toHaveLength(0);
+
+    provider.releaseResult();
+    await waitFor(() => readTaskFires('recap-series-blocked').length === 1, 1500);
+
+    expect(readTaskFires('recap-series-blocked')[0].status).toBe('silent');
+
+    controller.abort();
+    await loopPromise.catch(() => {});
+  });
+
   it('defers chat that arrives mid-task-turn instead of folding it (Bug D follow-up half)', async () => {
     // Bug D follow-up half: a task-only turn is active; chat arrives via
     // the follow-up poll during the task's generation window. Pre-fix it

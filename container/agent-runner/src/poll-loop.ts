@@ -207,21 +207,19 @@ export function shouldDeferTaskFromChatTurn(activeSender: string | null, followu
 }
 
 /**
- * Whether the accumulate-only follow-up gate may END the active query.
+ * Whether a deferred-follow-up gate may END the active query.
  *
- * The gate ends the stream when a freshly-polled follow-up batch contains
- * no trigger=1 work. That is safe only after the active turn has emitted a
- * result. Before the first result, `query.end()` tears down the provider
- * subprocess while it is still initializing or generating, so the trigger
- * remains pending and every host retry repeats identically.
+ * Deferring accumulate-only rows or chat that arrived during a task turn is
+ * safe immediately, but ending the stream is safe only after the active turn
+ * has emitted a result. Before the first result, `query.end()` tears down the
+ * provider subprocess while it is still initializing or generating, so the
+ * trigger remains pending and every host retry repeats identically.
  *
- * This first surfaced for task turns (Degenerates Dream, 2026-06-06), but
- * chat turns have the same lifecycle. The Fasting chat reproduced it on
- * 2026-07-13: one addressed message started a Codex turn while three ambient
- * trigger=0 rows remained pending; the follow-up gate ended Codex before its
- * first output on every retry.
+ * This first surfaced for task turns (Degenerates Dream, 2026-06-06), then a
+ * normal chat turn (Fasting, 2026-07-13), and finally task-turn chat deferral
+ * (AI Friends recap + queued mentions, 2026-07-18).
  */
-export function mayEndQueryForAccumulateOnly(firstResultSeen: boolean): boolean {
+export function mayEndQueryForDeferredFollowUps(firstResultSeen: boolean): boolean {
   return firstResultSeen;
 }
 
@@ -1233,11 +1231,11 @@ export async function processQuery(
   // will kill the container and messages get reset to pending.
   let pollInFlight = false;
   let endedForCommand = false;
-  // One-shot: the accumulate-only "holding open for an in-flight task turn"
-  // log fires once per held turn, not on every poll tick (it would
+  // One-shot: log a first-result hold once per turn, not on every poll tick
+  // (it would
   // otherwise spam ~once/second for the whole dream — 255 lines observed
   // 2026-06-06). Reset implicitly by the query ending (the closure dies).
-  let loggedHoldingForTask = false;
+  let loggedHoldingForFirstResult = false;
   // Wall-clock of the last SDK event consumed on the events for-await
   // below. Initialized at stream open (a half-open stream that never
   // emits anything would otherwise leave this at 0 and let the
@@ -1330,9 +1328,9 @@ export async function processQuery(
           // and then a normal chat turn (Fasting, 2026-07-13). Leave the
           // accumulate-only rows pending and let the addressed turn finish;
           // after its result, this same gate can unwind the stream cleanly.
-          if (!mayEndQueryForAccumulateOnly(resultIndex > 0)) {
-            if (!loggedHoldingForTask) {
-              loggedHoldingForTask = true;
+          if (!mayEndQueryForDeferredFollowUps(resultIndex > 0)) {
+            if (!loggedHoldingForFirstResult) {
+              loggedHoldingForFirstResult = true;
               log(
                 `Holding active query open — ${newMessages.length} accumulate-only ` +
                   `follow-up(s) pending but the active turn is still in flight (no result yet)`,
@@ -1506,8 +1504,22 @@ export async function processQuery(
             );
             newMessages = newMessages.filter((m) => !(m.kind === 'chat' || m.kind === 'chat-sdk'));
             if (newMessages.length === 0) {
+              // Deferring the chat is correct immediately; ending the task's
+              // stream is not. If the task has not produced a result yet,
+              // query.end() kills Codex during init/generation and leaves the
+              // same task + chat triggers pending for an identical retry loop.
+              if (!mayEndQueryForDeferredFollowUps(resultIndex > 0)) {
+                if (!loggedHoldingForFirstResult) {
+                  loggedHoldingForFirstResult = true;
+                  log(
+                    `Holding active task query open — ${chatDeferred.length} deferred chat ` +
+                      `follow-up(s) pending but the task is still in flight (no result yet)`,
+                  );
+                }
+                return;
+              }
               if (!endedForCommand) {
-                log('Only chat follow-ups during a task turn — ending stream so outer loop re-queries them');
+                log('Only chat follow-ups remain after task result — ending stream so outer loop re-queries them');
                 endedForCommand = true;
                 query.end();
               }

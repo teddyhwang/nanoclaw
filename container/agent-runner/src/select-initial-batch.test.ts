@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 
-import { mayEndQueryForAccumulateOnly, selectInitialBatch, shouldDeferTaskFromChatTurn } from './poll-loop.js';
+import { mayEndQueryForDeferredFollowUps, selectInitialBatch, shouldDeferTaskFromChatTurn } from './poll-loop.js';
 import type { MessageInRow } from './db/messages-in.js';
 
 // Pure batch-isolation covers two incidents:
@@ -136,17 +136,16 @@ describe('shouldDeferTaskFromChatTurn', () => {
   });
 });
 
-// The accumulate-only gate must not tear down any in-flight turn before its
-// first result. This first affected a task (Degenerates Dream, 2026-06-06),
-// then a normal chat (Fasting, 2026-07-13): ambient trigger=0 follow-ups made
-// query.end() kill Codex during init/generation, leaving the trigger pending
-// for an identical retry loop.
-describe('mayEndQueryForAccumulateOnly', () => {
+// Deferred-follow-up gates must not tear down any in-flight turn before its
+// first result. This covers accumulate-only rows and chat deferred from an
+// active task: both remain pending while the current turn finishes, then may
+// unwind the stream so the outer loop can process the deferred work.
+describe('mayEndQueryForDeferredFollowUps', () => {
   it('does NOT allow ending while the active turn awaits its first result', () => {
-    expect(mayEndQueryForAccumulateOnly(false)).toBe(false);
+    expect(mayEndQueryForDeferredFollowUps(false)).toBe(false);
   });
 
   it('allows ending after the active turn produced a result', () => {
-    expect(mayEndQueryForAccumulateOnly(true)).toBe(true);
+    expect(mayEndQueryForDeferredFollowUps(true)).toBe(true);
   });
 });
