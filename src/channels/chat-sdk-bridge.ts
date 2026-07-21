@@ -619,9 +619,9 @@ export async function enrichAttachments(attachments: Attachment[]): Promise<Arra
       }
       // Animated content transcode — see media/image-processing.ts for
       // the full rationale. Three cases land here:
-      //   1. Tenor/Giphy "gifv" embeds: att.type='video' mimeType='video/mp4'.
-      //      Discord serves animated content as MP4 even when the user
-      //      pasted a GIF; Anthropic rejects MP4 bytes with a 400.
+      //   1. Tenor/Giphy "gifv" embeds classified as images while carrying
+      //      mimeType='video/mp4'. Real type='video' MP4s bypass this branch
+      //      and reach session-manager's video processing pass.
       //   2. WhatsApp "GIFs": att.type='image' mimeType='image/gif' but
       //      the bytes are MP4-encoded video under Baileys. Same 400.
       //   3. Oversize real GIFs: att.type='image' mimeType='image/gif',

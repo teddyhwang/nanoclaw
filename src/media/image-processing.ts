@@ -94,9 +94,9 @@ export async function maybeResizeImage(buffer: Buffer, mimeType: string | undefi
  * that needs ffmpeg transcoding before Anthropic will accept it.
  *
  * Three cases motivate this path:
- *   1. Tenor/Giphy "gifv" — Discord serves these as `video/mp4` even
- *      though the user pasted a GIF. Anthropic rejects MP4 bytes with
- *      a 400 "Could not process image".
+ *   1. Tenor/Giphy "gifv" represented as an image attachment whose bytes
+ *      are `video/mp4`. Real `type:'video'` MP4 attachments must bypass this
+ *      helper and reach the engine's video-processing pipeline.
  *   2. WhatsApp "GIFs" — Baileys delivers these as MP4-encoded video
  *      under `image/gif` mimeType. Same 400 from Anthropic.
  *   3. Real animated GIFs that exceed `MAX_ANIMATED_GIF_BYTES` — sharp
@@ -106,7 +106,7 @@ export async function maybeResizeImage(buffer: Buffer, mimeType: string | undefi
  */
 export function shouldTranscodeAnimated(type: string | undefined, mimeType: string | undefined, size: number): boolean {
   if (!mimeType) return false;
-  if (mimeType === 'video/mp4') return true;
+  if (mimeType === 'video/mp4') return type === 'image';
   if (mimeType === 'image/gif') {
     // Always transcode — the bytes might be MP4-under-gif-mime (WhatsApp).
     // For real GIFs under budget, ffmpeg is a few hundred ms one-way trip

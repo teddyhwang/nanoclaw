@@ -182,6 +182,27 @@ describe('enrichAttachments', () => {
       },
     ]);
   });
+
+  it('preserves real MP4 bytes for the engine video-processing pass', async () => {
+    const bytes = Buffer.alloc(1024, 0x56);
+    const enriched = await enrichAttachments([
+      {
+        type: 'video',
+        name: 'portrait.MP4',
+        mimeType: 'video/mp4',
+        size: bytes.length,
+        width: 384,
+        height: 832,
+        fetchData: async () => bytes,
+      },
+    ]);
+
+    expect(enriched[0]).toMatchObject({
+      type: 'video',
+      mimeType: 'video/mp4',
+      data: bytes.toString('base64'),
+    });
+  });
 });
 
 describe('rawAttachmentsToSdkAttachments', () => {

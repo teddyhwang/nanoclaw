@@ -39,8 +39,8 @@ vi.mock('child_process', () => {
 import { MAX_ANIMATED_GIF_BYTES, maybeTranscodeAnimated, shouldTranscodeAnimated } from './image-processing.js';
 
 describe('shouldTranscodeAnimated', () => {
-  it('flags video/mp4 (Tenor/Giphy gifv)', () => {
-    expect(shouldTranscodeAnimated('video', 'video/mp4', 500_000)).toBe(true);
+  it('flags image-classified MP4 animation but preserves real videos', () => {
+    expect(shouldTranscodeAnimated('video', 'video/mp4', 500_000)).toBe(false);
     expect(shouldTranscodeAnimated('image', 'video/mp4', 500_000)).toBe(true);
   });
 
