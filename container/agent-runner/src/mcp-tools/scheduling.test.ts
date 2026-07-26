@@ -14,7 +14,15 @@
  */
 import { describe, it, expect } from 'bun:test';
 
-import { validateScriptContract, SCRIPT_FIELD_DESCRIPTION } from './scheduling.js';
+import { inspectScheduledTasks, listTasks, validateScriptContract, SCRIPT_FIELD_DESCRIPTION } from './scheduling.js';
+
+describe('scheduled-task inspection compatibility', () => {
+  it('exposes a deferred-discovery-safe alias with the canonical handler', () => {
+    expect(inspectScheduledTasks.tool.name).toBe('inspect_scheduled_tasks');
+    expect(inspectScheduledTasks.handler).toBe(listTasks.handler);
+    expect(inspectScheduledTasks.tool.description).toMatch(/list_tasks/);
+  });
+});
 
 describe('validateScriptContract', () => {
   it('rejects a script that never mentions wakeAgent', () => {

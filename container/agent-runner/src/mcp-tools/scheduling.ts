@@ -245,6 +245,23 @@ export const listTasks: McpToolDefinition = {
   },
 };
 
+/**
+ * Claude Code's deferred ToolSearch reserves/strongly aliases `TaskList` and
+ * can omit the similarly named MCP `list_tasks` from its search index even
+ * though the MCP server registered it. Keep the canonical tool for existing
+ * callers and expose a semantically explicit alias that survives deferred
+ * discovery. Both names intentionally share one handler.
+ */
+export const inspectScheduledTasks: McpToolDefinition = {
+  tool: {
+    ...listTasks.tool,
+    name: 'inspect_scheduled_tasks',
+    description:
+      'Inspect scheduled task series. Compatibility alias for list_tasks when a provider does not expose that name. Returns the stable series ids expected by update_task / cancel_task / pause_task / resume_task.',
+  },
+  handler: listTasks.handler,
+};
+
 export const cancelTask: McpToolDefinition = {
   tool: {
     name: 'cancel_task',
@@ -390,4 +407,4 @@ export const updateTask: McpToolDefinition = {
   },
 };
 
-registerTools([scheduleTask, listTasks, updateTask, cancelTask, pauseTask, resumeTask]);
+registerTools([scheduleTask, listTasks, inspectScheduledTasks, updateTask, cancelTask, pauseTask, resumeTask]);
