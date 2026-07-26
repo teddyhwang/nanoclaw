@@ -52,7 +52,7 @@ describe('resolveUsageLimitFallback', () => {
   it('maps Claude and Codex to each other with host-supplied models', () => {
     const env = {
       NANOCLAW_USAGE_LIMIT_FALLBACK: '1',
-      NANOCLAW_USAGE_LIMIT_CLAUDE_MODEL: 'claude-opus-5',
+      NANOCLAW_USAGE_LIMIT_CLAUDE_MODEL: 'claude-opus-4-8',
       NANOCLAW_USAGE_LIMIT_CODEX_MODEL: 'gpt-5.6-sol',
     };
     expect(resolveUsageLimitFallback('claude', env)).toEqual({
@@ -61,7 +61,7 @@ describe('resolveUsageLimitFallback', () => {
     });
     expect(resolveUsageLimitFallback('codex', env)).toEqual({
       providerName: 'claude',
-      model: 'claude-opus-5',
+      model: 'claude-opus-4-8',
     });
   });
 
@@ -88,7 +88,7 @@ describe('UsageLimitFallbackProvider', () => {
     const provider = new UsageLimitFallbackProvider({
       primaryName: 'codex',
       fallbackName: 'claude',
-      fallbackModel: 'claude-opus-5',
+      fallbackModel: 'claude-opus-4-8',
       primary,
       fallback,
     });
@@ -103,7 +103,7 @@ describe('UsageLimitFallbackProvider', () => {
     ]);
     expect(primary.aborts).toBe(1);
     expect(fallback.inputs[0].continuation).toBeUndefined();
-    expect(fallback.inputs[0].systemContext?.instructions).toContain('provider claude with model claude-opus-5');
+    expect(fallback.inputs[0].systemContext?.instructions).toContain('provider claude with model claude-opus-4-8');
   });
 
   it('replays queued follow-ups and end state onto a fallback started after quota', async () => {

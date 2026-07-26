@@ -84,7 +84,7 @@ the ones nanoclaw sets marked ✱.
 | `maxTurns` | `number` | Max user↔assistant turns before stopping |
 | `maxBudgetUsd` | `number` | Stop with `error_max_budget_usd` when exceeded |
 | `mcpServers` ✱ | `Record<string, McpServerConfig>` | MCP server configs |
-| `model` ✱ | `string` | e.g. `'claude-sonnet-5'`, `'claude-opus-5'` |
+| `model` ✱ | `string` | e.g. `'claude-sonnet-5'`, `'claude-opus-4-8'` |
 | `outputFormat` | `{ type:'json_schema'; schema }` | Structured output |
 | `pathToClaudeCodeExecutable` ✱ | `string` | Path to the CLI binary |
 | `permissionMode` ✱ | `PermissionMode` | See below |
