@@ -15,9 +15,11 @@
 import fs from 'fs';
 import path from 'path';
 
+import { TIMEZONE } from './config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { resolveGroupDir } from './engine/paths.js';
+import { isValidTimezone } from './timezone.js';
 import type { AgentGroup, ContainerConfigRow } from './types.js';
 
 /**
@@ -83,6 +85,19 @@ export interface ContainerConfig {
    * emoji-only marks (`🤖 text`) or `""` to drop entirely.
    */
   assistantPrefixSeparator?: string;
+  timezone?: string;
+}
+
+/** Effective timezone: valid per-group override, otherwise install default. */
+export function resolveGroupTimezone(agentGroupId: string): string {
+  try {
+    const tz = getContainerConfig(agentGroupId)?.timezone;
+    return tz && isValidTimezone(tz) ? tz : TIMEZONE;
+  } catch {
+    // Pure/unit callers may run before the central DB is initialized. The
+    // install timezone is still the documented fallback in that state.
+    return TIMEZONE;
+  }
 }
 
 /** Build a `ContainerConfig` from a DB row + agent group identity. */
@@ -107,6 +122,7 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
     // baked in at the migration layer (suppress_embeds=1, separator=NULL).
     suppressEmbeds: row.suppress_embeds === 1,
     assistantPrefixSeparator: row.assistant_prefix_separator ?? undefined,
+    timezone: row.timezone && isValidTimezone(row.timezone) ? row.timezone : undefined,
   };
 }
 

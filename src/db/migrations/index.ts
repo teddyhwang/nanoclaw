@@ -24,6 +24,7 @@ import { moduleApprovalsTitleOptions } from './module-approvals-title-options.js
 import { moduleApprovalsConfirmationGrants } from './module-approvals-confirmation-grants.js';
 import { migration018 } from './018-approvals-approver-user-id.js';
 import { migration019 } from './019-wiring-threads.js';
+import { migration020 } from './020-container-config-timezone.js';
 
 export interface Migration {
   version: number;
@@ -61,6 +62,7 @@ export const migrations: Migration[] = [
   migration016Optimus,
   migration017Optimus,
   migration019,
+  migration020,
 ];
 
 /** Row shape of PRAGMA foreign_key_check. Child rowids are stable across a

@@ -42,7 +42,7 @@ vi.mock('../../config.js', async () => {
 
 vi.mock('../../session-manager.js', async () => {
   const actual = await vi.importActual<typeof import('../../session-manager.js')>('../../session-manager.js');
-  return { ...actual, writeSessionMessage: vi.fn() };
+  return { ...actual, writeSessionMessage: vi.fn().mockResolvedValue(undefined) };
 });
 
 const TEST_DIR = '/tmp/nanoclaw-test-reject-reason';

@@ -21,23 +21,16 @@ vi.mock('./container-runner.js', () => ({
 
 vi.mock('./config.js', async () => {
   const actual = await vi.importActual<typeof import('./config.js')>('./config.js');
-  return { ...actual, DATA_DIR: '/tmp/nanoclaw-test-delivery' };
+  return { ...actual, DATA_DIR: '/tmp/nanoclaw-test-delivery', GROUPS_DIR: '/tmp/nanoclaw-test-delivery/groups' };
 });
 
 const TEST_DIR = '/tmp/nanoclaw-test-delivery';
 
-import {
-  initTestDb,
-  getDb,
-  closeDb,
-  runMigrations,
-  createAgentGroup,
-  createMessagingGroup,
-  createMessagingGroupAgent,
-} from './db/index.js';
+import { initTestDb, closeDb, runMigrations, createAgentGroup, createMessagingGroup } from './db/index.js';
 import { getDeliveredIds } from './db/session-db.js';
-import { resolveSession, outboundDbPath, openInboundDb } from './session-manager.js';
+import { resolveSession, resolveTaskSession, outboundDbPath, openInboundDb } from './session-manager.js';
 import { deliverSessionMessages, setDeliveryAdapter } from './delivery.js';
+import { createChannelDeliveryAdapter } from './channels/channel-registry.js';
 
 function now(): string {
   return new Date().toISOString();
@@ -191,6 +184,40 @@ describe('deliverSessionMessages — retry and permanent failure', () => {
     const delivered = getDeliveredIds(inDb);
     inDb.close();
     expect(delivered.has('out-flaky')).toBe(true);
+  });
+
+  it('does not acknowledge a message when no channel adapter is registered (#2995)', async () => {
+    // Regression: the real bridge used to return undefined when the exact
+    // adapter lookup missed, and drainSession marked the row delivered with
+    // platform_message_id=NULL even though no send happened. The bridge must
+    // throw so the row takes the normal retry → failed path. Uses the REAL
+    // createChannelDeliveryAdapter with an empty registry — the state after
+    // an adapter factory returns null (missing credentials) at startup.
+    seedAgentAndChannel();
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound('ag-1', session.id, 'out-offline');
+
+    setDeliveryAdapter(createChannelDeliveryAdapter());
+
+    // Attempt 1 — must NOT be acknowledged as delivered
+    await deliverSessionMessages(session);
+    let inDb = openInboundDb('ag-1', session.id);
+    expect(getDeliveredIds(inDb).has('out-offline')).toBe(false);
+    inDb.close();
+
+    // Attempts 2 and 3 — exhausts MAX_DELIVERY_ATTEMPTS
+    await deliverSessionMessages(session);
+    await deliverSessionMessages(session);
+
+    // The row must end as status='failed', never 'delivered'
+    inDb = openInboundDb('ag-1', session.id);
+    const row = inDb
+      .prepare('SELECT status, platform_message_id FROM delivered WHERE message_out_id = ?')
+      .get('out-offline') as { status: string; platform_message_id: string | null } | undefined;
+    inDb.close();
+    expect(row).toBeDefined();
+    expect(row!.status).toBe('failed');
+    expect(row!.platform_message_id).toBeNull();
   });
 
   it('clears attempt counter on successful delivery', async () => {
@@ -393,46 +420,34 @@ describe('deliverSessionMessages — permission check', () => {
   });
 });
 
-describe('deliverSessionMessages — reply pills', () => {
-  it('preserves native reply pills for agent-shared sessions on mention-sticky wirings', async () => {
+describe('deliverSessionMessages — task_log rows (one-door task delivery)', () => {
+  it('appends to the series run log and never calls the adapter', async () => {
     seedAgentAndChannel();
-    createMessagingGroupAgent({
-      id: 'mga-1',
-      messaging_group_id: 'mg-1',
-      agent_group_id: 'ag-1',
-      engage_mode: 'mention-sticky',
-      engage_pattern: null,
-      sender_scope: 'all',
-      ignored_message_policy: 'accumulate',
-      session_mode: 'agent-shared',
-      priority: 0,
-      created_at: now(),
-    });
+    const { session } = resolveTaskSession('ag-1', 'daily-digest-a1b2');
 
-    const { session } = resolveSession('ag-1', 'mg-1', null, 'agent-shared');
-    getDb().prepare('UPDATE sessions SET messaging_group_id = NULL WHERE id = ?').run(session.id);
-    session.messaging_group_id = null;
-    expect(session.messaging_group_id).toBeNull();
+    const db = new Database(outboundDbPath('ag-1', session.id));
+    db.prepare(
+      `INSERT INTO messages_out (id, timestamp, kind, content)
+       VALUES ('log-1', datetime('now'), 'task_log', ?)`,
+    ).run(JSON.stringify({ text: 'checked feeds; nothing new' }));
+    db.close();
 
-    const outDb = new Database(outboundDbPath('ag-1', session.id));
-    outDb
-      .prepare(
-        `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, in_reply_to, content)
-         VALUES (?, datetime('now'), 'chat', 'telegram:123', 'telegram', ?, ?)`,
-      )
-      .run('out-reply', 'platform-parent:ag-1', JSON.stringify({ text: 'threaded reply' }));
-    outDb.close();
-
-    const inReplyToValues: Array<string | null | undefined> = [];
+    const calls: string[] = [];
     setDeliveryAdapter({
-      async deliver(_channelType, _platformId, _threadId, _kind, _content, _files, inReplyTo) {
-        inReplyToValues.push(inReplyTo);
-        return 'plat-msg-id';
+      async deliver(_c, _p, _t, _k, content) {
+        calls.push(content);
+        return 'pm';
       },
     });
-
     await deliverSessionMessages(session);
 
-    expect(inReplyToValues).toEqual(['platform-parent:ag-1']);
+    expect(calls).toHaveLength(0); // a run-log line is not a delivery
+    const logFile = `${TEST_DIR}/groups/test-agent/tasks/daily-digest-a1b2.md`;
+    expect(fs.existsSync(logFile)).toBe(true);
+    const line = fs.readFileSync(logFile, 'utf8').trim();
+    expect(line).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2} — checked feeds; nothing new$/);
+    // Marked delivered — the row is not retried.
+    const delivered = getDeliveredIds(openInboundDb('ag-1', session.id));
+    expect(delivered.has('log-1')).toBe(true);
   });
 });

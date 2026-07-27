@@ -16,6 +16,7 @@ import {
   CONTAINER_IMAGE_BASE,
   CONTAINER_INSTALL_LABEL,
   CONTAINER_MEMORY_LIMIT,
+  CONTAINER_PIDS_LIMIT,
   DATA_DIR,
   GROUPS_DIR,
   ONECLI_API_KEY,
@@ -77,6 +78,13 @@ const STDERR_TAIL_LINES = 50;
  *                      exit is expected, not a crash, even though it arrives
  *                      as a SIGKILL/non-zero code.
  */
+export function hardeningArgs(pidsLimit: string): string[] {
+  const args = ['--cap-drop=ALL', '--security-opt', 'no-new-privileges', '--init'];
+  const pids = Number(pidsLimit);
+  if (Number.isFinite(pids) && pids > 0) args.push('--pids-limit', String(Math.floor(pids)));
+  return args;
+}
+
 export function classifyExit(
   code: number | null,
   signal: NodeJS.Signals | null,
@@ -781,20 +789,25 @@ export function syncSkillSymlinks(
   // Create symlinks for desired skills (container path targets)
   for (const [skill, target] of skillTargets) {
     const linkPath = path.join(skillsDir, skill);
-    let existingTarget: string | null = null;
+    let entry: fs.Stats | undefined;
     try {
-      existingTarget = fs.readlinkSync(linkPath);
+      entry = fs.lstatSync(linkPath);
     } catch {
-      /* missing or not a symlink */
+      /* missing */
     }
-    if (existingTarget === target) continue;
-    if (existingTarget !== null) {
-      try {
-        fs.unlinkSync(linkPath);
-      } catch {
-        /* fall through, symlink call below will surface the error */
-      }
+    if (!entry) {
+      fs.symlinkSync(target, linkPath);
+      continue;
     }
+    if (!entry.isSymbolicLink()) {
+      log.warn(
+        'Shared skill not symlinked: real entry occupies the path (template overlay or stale pre-refactor copy)',
+        { skill, path: linkPath },
+      );
+      continue;
+    }
+    if (fs.readlinkSync(linkPath) === target) continue;
+    fs.unlinkSync(linkPath);
     fs.symlinkSync(target, linkPath);
   }
 }
@@ -835,9 +848,14 @@ async function buildContainerArgs(
   if (CONTAINER_CPU_LIMIT) args.push('--cpus', CONTAINER_CPU_LIMIT);
   if (CONTAINER_MEMORY_LIMIT) args.push('--memory', CONTAINER_MEMORY_LIMIT);
 
+  // Docker defaults /dev/shm to 64m; third-party browser launchers may not
+  // opt into disk-backed shared memory.
+  args.push('--shm-size=1g');
+  args.push(...hardeningArgs(CONTAINER_PIDS_LIMIT));
+
   // Environment — only vars read by code we don't own.
   // Everything NanoClaw-specific is in container.json (read by runner at startup).
-  args.push('-e', `TZ=${TIMEZONE}`);
+  args.push('-e', `TZ=${containerConfig.timezone ?? TIMEZONE}`);
 
   // Shared-groups manifest — agent-runner reads this to know which groups
   // are mounted under /workspace/shared-groups/. Empty array when no host

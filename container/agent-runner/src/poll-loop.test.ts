@@ -1345,3 +1345,24 @@ describe('isCorruptionError', () => {
     expect(isCorruptionError('')).toBe(false);
   });
 });
+
+// --- Task-run turn wiring: the REAL processQuery path (one-door) ---
+// These drive the actual call sites (autoAppendTaskLog at result-handling,
+// shouldNudgeTaskBlocks gating, and follow-up turn reset). Deleting the wiring
+// — not just the helpers — goes red here.
+
+const TASK_ROUTING = {
+  platformId: null,
+  channelType: null,
+  threadId: 'system:tasks:ser-1',
+  inReplyTo: 't1',
+  taskRun: true,
+};
+
+function taskLogRows(): Array<{ text: string }> {
+  return (
+    getOutboundDb().prepare("SELECT content FROM messages_out WHERE kind = 'task_log' ORDER BY seq").all() as Array<{
+      content: string;
+    }>
+  ).map((r) => JSON.parse(r.content) as { text: string });
+}

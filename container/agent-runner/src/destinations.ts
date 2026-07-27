@@ -21,6 +21,8 @@ export interface DestinationEntry {
   agentGroupId?: string;
 }
 
+export type SessionMode = { kind: 'chat' } | { kind: 'task'; taskId: string };
+
 interface DestRow {
   name: string;
   display_name: string | null;
@@ -150,17 +152,12 @@ function buildRuntimeSection(runtime?: { provider?: string; model?: string }): s
 
 function buildDestinationsSection(): string {
   const all = getAllDestinations();
+  const lines = ['## Sending messages', ''];
 
   if (all.length === 0) {
-    return [
-      '## Sending messages',
-      '',
-      'You currently have no configured destinations. You cannot send messages until an admin wires one up.',
-    ].join('\n');
-  }
-
-  const lines = ['## Sending messages', ''];
-  if (all.length === 1) {
+    lines.push('You currently have no configured destinations. You cannot send messages until an admin wires one up.');
+    return lines.join('\n');
+  } else if (all.length === 1) {
     const d = all[0];
     lines.push(`Your destination is \`${d.name}\`${destinationLabel(d)}.`);
   } else {
@@ -169,7 +166,9 @@ function buildDestinationsSection(): string {
       lines.push(`- \`${d.name}\`${destinationLabel(d)}`);
     }
   }
+
   lines.push('');
+
   lines.push(
     '**All output must be wrapped.** Use `<message to="name">...</message>` for content to send, or `<internal>...</internal>` for scratchpad.',
   );
@@ -201,6 +200,10 @@ function buildDestinationsSection(): string {
   lines.push('');
   lines.push(
     'The `send_message` MCP tool is the same delivery, available mid-turn — handy for a quick acknowledgment ("on it") before a slow tool call. It also accepts `reply_to_message_id` for the same reply-pill behavior. Each `send_message` call and each final-response `<message>` block lands as its own message in the conversation, so they read as a sequence rather than as one combined reply.',
+  );
+  lines.push('');
+  lines.push(
+    'For a short turn, do not narrate. For longer work, send one acknowledgment and then updates only at meaningful milestones, especially before slow operations. Never narrate micro-steps; finish with the outcome, not a play-by-play.',
   );
   return lines.join('\n');
 }

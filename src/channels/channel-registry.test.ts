@@ -253,20 +253,26 @@ describe('channel registry — instance keying', () => {
     // message (instance === channelType after backfill) is dropped, not
     // delivered through the sibling's identity.
     const bridge = reg.createChannelDeliveryAdapter();
-    const result = await bridge.deliver(
-      'slack',
-      'slack:C1',
-      null,
-      'chat',
-      JSON.stringify({ text: 'to the default bot' }),
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      'slack',
-    );
-    expect(result).toBeUndefined();
+    let caught: unknown;
+    try {
+      await bridge.deliver(
+        'slack',
+        'slack:C1',
+        null,
+        'chat',
+        JSON.stringify({ text: 'to the default bot' }),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        'slack',
+      );
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(reg.MissingChannelAdapterError);
+    expect((caught as InstanceType<typeof reg.MissingChannelAdapterError>).channelType).toBe('slack');
     expect(tester.delivered).toHaveLength(0);
 
     // Sanity: the same bridge DOES deliver when the exact instance is live.

@@ -22,6 +22,7 @@ import fs from 'fs';
 import type Database from 'better-sqlite3';
 
 import { registerDeliveryAction } from '../../delivery.js';
+import { unguarded } from '../../guard/index.js';
 import { getDeliveredIds, getDueOutboundMessages, getProcessingClaims } from '../../db/session-db.js';
 import { heartbeatPath, openInboundDb, openOutboundDb } from '../../session-manager.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
@@ -467,7 +468,11 @@ function classifySilentTurn(session: { id: string; messaging_group_id: string | 
   }
 }
 
-registerDeliveryAction('silent_turn_complete', async (_content, session, inDb) => {
-  stopTypingRefresh(session.id);
-  classifySilentTurn(session, inDb);
-});
+registerDeliveryAction(
+  'silent_turn_complete',
+  async (_content, session, inDb) => {
+    stopTypingRefresh(session.id);
+    classifySilentTurn(session, inDb);
+  },
+  unguarded('Telemetry-only action that stops typing and classifies an already-completed turn.'),
+);

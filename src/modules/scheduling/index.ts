@@ -19,6 +19,7 @@
  * module piggybacks on the core schema.
  */
 import { registerDeliveryAction } from '../../delivery.js';
+import { unguarded } from '../../guard/index.js';
 import {
   handleCancelTask,
   handlePauseTask,
@@ -27,8 +28,11 @@ import {
   handleUpdateTask,
 } from './actions.js';
 
-registerDeliveryAction('schedule_task', handleScheduleTask);
-registerDeliveryAction('cancel_task', handleCancelTask);
-registerDeliveryAction('pause_task', handlePauseTask);
-registerDeliveryAction('resume_task', handleResumeTask);
-registerDeliveryAction('update_task', handleUpdateTask);
+const schedulingAction = unguarded(
+  'The container scheduling MCP surface performs its own sensitive-action confirmation before emitting these host actions.',
+);
+registerDeliveryAction('schedule_task', handleScheduleTask, schedulingAction);
+registerDeliveryAction('cancel_task', handleCancelTask, schedulingAction);
+registerDeliveryAction('pause_task', handlePauseTask, schedulingAction);
+registerDeliveryAction('resume_task', handleResumeTask, schedulingAction);
+registerDeliveryAction('update_task', handleUpdateTask, schedulingAction);

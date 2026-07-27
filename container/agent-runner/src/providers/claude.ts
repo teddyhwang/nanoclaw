@@ -6,6 +6,7 @@ import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '
 
 import { clearContainerToolInFlight, setContainerToolInFlight, touchHeartbeat } from '../db/connection.js';
 import { clearContinuationStartedAt, getContinuationStartedAt } from '../db/session-state.js';
+import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
 import { resolvePressureThresholdTokens } from '../pressure-rotation.js';
 import { evaluateRotation } from '../session-rotation.js';
 import { EMPTY_STATS, type SessionStats } from '../session-stats.js';
@@ -83,13 +84,35 @@ export function shouldDeliverAssistantTextForRetryableResult(
   return Boolean(lastAssistantTextWithMessage && isRetryableClaudeApiRateLimitResult(resultText));
 }
 
+export interface SdkRateLimitInfo {
+  status?: string;
+  resetsAt?: number;
+  rateLimitType?: string;
+  utilization?: number;
+  errorCode?: string;
+  overageDisabledReason?: string;
+  overageStatus?: string;
+}
+
+export function classifyRateLimitEvent(
+  info: SdkRateLimitInfo | undefined,
+): { message: string; classification: 'rate_limit' | 'quota' } | null {
+  if (info?.status !== 'rejected' && info?.overageStatus !== 'rejected') return null;
+  const outOfCredits = info.errorCode === 'credits_required' || info.overageDisabledReason === 'out_of_credits';
+  let detail = '';
+  if (typeof info.resetsAt === 'number' && Number.isFinite(info.resetsAt)) {
+    const ms = info.resetsAt < 1e12 ? info.resetsAt * 1000 : info.resetsAt;
+    detail = ` (resets ${new Date(ms).toISOString()})`;
+  }
+  const window = info.rateLimitType ? ` [${info.rateLimitType}]` : '';
+  return {
+    message: `${outOfCredits ? 'Out of credits' : 'Rate limit'}${window}${detail}`,
+    classification: outOfCredits ? 'quota' : 'rate_limit',
+  };
+}
+
 export function isRejectedClaudeRateLimitEvent(message: unknown): boolean {
-  const info = (
-    message as {
-      rate_limit_info?: { status?: string; overageStatus?: string };
-    }
-  ).rate_limit_info;
-  return info?.status === 'rejected' || info?.overageStatus === 'rejected';
+  return classifyRateLimitEvent((message as { rate_limit_info?: SdkRateLimitInfo }).rate_limit_info) !== null;
 }
 
 // Deferred SDK builtins that either sidestep nanoclaw's own scheduling or
@@ -103,6 +126,10 @@ export function isRejectedClaudeRateLimitEvent(message: unknown): boolean {
 //   the question and blocks on the real reply.
 // - EnterPlanMode / ExitPlanMode / EnterWorktree / ExitWorktree: Claude
 //   Code UI affordances; in a headless container they'd appear stuck.
+// - DesignSync: desktop design-tool integration — nothing to sync with in a
+//   headless container (~9.3KB/turn schema).
+// - ReportFindings: code-review-reporting UI affordance with no headless
+//   host surface to receive it (~1.9KB/turn schema).
 const SDK_DISALLOWED_TOOLS = [
   'CronCreate',
   'CronDelete',
@@ -113,6 +140,8 @@ const SDK_DISALLOWED_TOOLS = [
   'ExitPlanMode',
   'EnterWorktree',
   'ExitWorktree',
+  'DesignSync',
+  'ReportFindings',
 ];
 
 // Tool allowlist for NanoClaw agent containers. MCP-tool entries are derived
@@ -397,8 +426,52 @@ function transcriptRotateAgeMs(): number {
 }
 
 function claudeProjectsDir(): string {
-  const base = process.env.CLAUDE_CONFIG_DIR || path.join(process.env.HOME || os.homedir(), '.claude');
-  return path.join(base, 'projects');
+  return path.join(claudeConfigDir(), 'projects');
+}
+
+function claudeConfigDir(): string {
+  return process.env.CLAUDE_CONFIG_DIR || path.join(process.env.HOME || os.homedir(), '.claude');
+}
+
+function writeMemorySessionHook(hook: MemorySessionHookRegistration): void {
+  const configDir = claudeConfigDir();
+  const settingsFile = path.join(configDir, 'settings.json');
+  fs.mkdirSync(configDir, { recursive: true });
+
+  const parsed: unknown = fs.existsSync(settingsFile) ? JSON.parse(fs.readFileSync(settingsFile, 'utf-8')) : {};
+  if (!isRecord(parsed)) throw new Error(`${settingsFile} must contain a JSON object`);
+
+  const hooks = parsed.hooks === undefined ? {} : parsed.hooks;
+  if (!isRecord(hooks)) throw new Error(`${settingsFile} hooks must be a JSON object`);
+
+  const sessionStart = hooks.SessionStart === undefined ? [] : hooks.SessionStart;
+  if (!Array.isArray(sessionStart)) throw new Error(`${settingsFile} hooks.SessionStart must be an array`);
+
+  const memoryCommands = new Set([hook.command, ...hook.legacyCommands]);
+  const nextSessionStart = sessionStart
+    .map((entry) => removeMemoryCommands(entry, memoryCommands))
+    .filter((entry) => entry !== undefined);
+  nextSessionStart.push({
+    matcher: hook.sources.join('|'),
+    hooks: [{ type: 'command', command: hook.command, timeout: 10 }],
+  });
+
+  hooks.SessionStart = nextSessionStart;
+  parsed.hooks = hooks;
+  fs.writeFileSync(settingsFile, JSON.stringify(parsed, null, 2) + '\n');
+}
+
+function removeMemoryCommands(value: unknown, commands: ReadonlySet<string>): unknown {
+  if (!isRecord(value) || !Array.isArray(value.hooks)) return value;
+  const hooks = value.hooks.filter((hook) => {
+    if (!isRecord(hook)) return true;
+    return typeof hook.command !== 'string' || !commands.has(hook.command);
+  });
+  return hooks.length > 0 ? { ...value, hooks } : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 /**
@@ -588,6 +661,7 @@ export class ClaudeProvider implements AgentProvider {
   private additionalDirectories?: string[];
   private model?: string;
   private effort?: string;
+  private memorySessionHook?: MemorySessionHookRegistration;
 
   constructor(options: ProviderOptions = {}) {
     this.assistantName = options.assistantName;
@@ -598,10 +672,16 @@ export class ClaudeProvider implements AgentProvider {
     this.env = {
       ...(options.env ?? {}),
       CLAUDE_CODE_AUTO_COMPACT_WINDOW,
+      CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
       // Bound MCP tool calls / connections so a hung MCP server can't wedge
       // the turn. A host/operator override in options.env still wins.
       ...mcpTimeoutEnv(options.env),
     };
+  }
+
+  registerMemorySessionHook(hook: MemorySessionHookRegistration): void {
+    writeMemorySessionHook(hook);
+    this.memorySessionHook = hook;
   }
 
   isSessionInvalid(err: unknown): boolean {
@@ -723,6 +803,7 @@ export class ClaudeProvider implements AgentProvider {
   }
 
   query(input: QueryInput): AgentQuery {
+    if (!this.memorySessionHook) throw new Error('Claude memory session hook was not registered');
     const stream = new MessageStream();
     stream.push(input.prompt, input.imageBlocks);
 
@@ -827,8 +908,23 @@ export class ClaudeProvider implements AgentProvider {
           // The SDK emits this whenever subscription usage INFO changes,
           // including status=allowed/allowed_warning. Only a rejected window
           // is a real quota failure eligible for cross-harness failover.
-          if (isRejectedClaudeRateLimitEvent(message)) {
-            yield { type: 'error', message: 'Rate limit', retryable: true, classification: 'quota' };
+          const info = (message as { rate_limit_info?: SdkRateLimitInfo }).rate_limit_info;
+          const blocked = classifyRateLimitEvent(info);
+          if (!blocked) {
+            if (info?.status === 'allowed_warning') {
+              log(
+                `rate-limit warning: ${info.rateLimitType ?? 'window'} at ${
+                  info.utilization != null ? `${Math.round(info.utilization * 100)}%` : 'high'
+                } utilization`,
+              );
+            }
+          } else {
+            yield {
+              type: 'error',
+              message: blocked.message,
+              retryable: blocked.classification === 'rate_limit',
+              classification: blocked.classification,
+            };
           }
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'compact_boundary') {
           const meta = (message as { compact_metadata?: { pre_tokens?: number } }).compact_metadata;

@@ -7,7 +7,7 @@
  *   - optional per-skill fragments (skills that ship `instructions.md`)
  *   - optional per-MCP-server fragments (inline `instructions` field in
  *     `container.json`)
- *   - per-group agent memory (`CLAUDE.local.md`, auto-loaded by Claude Code)
+ *   - optional provider-neutral standing instructions
  *
  * Runs on every spawn from `container-runner.buildMounts()`. Deterministic —
  * same inputs produce the same CLAUDE.md, and stale fragments are pruned.
@@ -49,7 +49,8 @@ const SHARED_MCP_TOOLS_CONTAINER_BASE = '/app/src/mcp-tools';
 // migration.
 const KERNEL_IMPORTS = ['IDENTITY.md', 'CURRENT.md', 'KNOWLEDGE.md'] as const;
 
-const COMPOSED_HEADER = '<!-- Composed at spawn — do not edit. Edit CLAUDE.local.md for per-group content. -->';
+const COMPOSED_HEADER =
+  '<!-- Composed at spawn - do not edit. Standing instructions: instructions.prepend.md. Memory: memory/. -->';
 
 /**
  * Resolve the host `container/` source directory the same way container-runner
@@ -71,8 +72,7 @@ function resolveContainerSourceDir(): string {
 
 /**
  * Regenerate `groups/<folder>/CLAUDE.md` from the shared base, enabled skill
- * fragments, and MCP server fragments declared in `container.json`. Creates
- * an empty `CLAUDE.local.md` if missing.
+ * fragments, and MCP server fragments declared in `container.json`.
  */
 export async function composeGroupClaudeMd(group: AgentGroup): Promise<void> {
   const groupDir = resolveGroupDir(group);
@@ -209,27 +209,30 @@ export async function composeGroupClaudeMd(group: AgentGroup): Promise<void> {
   }
   const body = [COMPOSED_HEADER, ...imports, ''].join('\n');
   writeAtomic(path.join(groupDir, 'CLAUDE.md'), body);
-
-  const localFile = path.join(groupDir, 'CLAUDE.local.md');
-  if (!fs.existsSync(localFile)) {
-    fs.writeFileSync(localFile, '');
-  }
 }
 
-/**
- * One-time cutover from the `groups/global/CLAUDE.md` + `.claude-global.md`
- * pattern. Idempotent — safe to run on every host startup.
- *
- * For each group dir:
- *   - remove `.claude-global.md` symlink if present
- *   - rename `CLAUDE.md` → `CLAUDE.local.md` (only if `CLAUDE.local.md`
- *     doesn't already exist — preserves pre-cutover content as per-group
- *     memory; after the first spawn regenerates `CLAUDE.md`, this branch
- *     is skipped because `CLAUDE.local.md` now exists)
- *
- * Globally:
- *   - delete `groups/global/` (content already in `container/CLAUDE.md`)
- */
+function syncSymlink(linkPath: string, target: string): void {
+  let currentTarget: string | null = null;
+  try {
+    currentTarget = fs.readlinkSync(linkPath);
+  } catch {
+    /* missing */
+  }
+  if (currentTarget === target) return;
+  try {
+    fs.unlinkSync(linkPath);
+  } catch {
+    /* missing */
+  }
+  fs.symlinkSync(target, linkPath);
+}
+
+function writeAtomic(filePath: string, content: string): void {
+  const tmp = `${filePath}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, content);
+  fs.renameSync(tmp, filePath);
+}
+
 export function migrateGroupsToClaudeLocal(): void {
   if (!fs.existsSync(GROUPS_DIR)) return;
 
@@ -267,26 +270,4 @@ export function migrateGroupsToClaudeLocal(): void {
   if (actions.length > 0) {
     log.info('Migrated groups to CLAUDE.local.md model', { actions });
   }
-}
-
-function syncSymlink(linkPath: string, target: string): void {
-  let currentTarget: string | null = null;
-  try {
-    currentTarget = fs.readlinkSync(linkPath);
-  } catch {
-    /* missing */
-  }
-  if (currentTarget === target) return;
-  try {
-    fs.unlinkSync(linkPath);
-  } catch {
-    /* missing */
-  }
-  fs.symlinkSync(target, linkPath);
-}
-
-function writeAtomic(filePath: string, content: string): void {
-  const tmp = `${filePath}.tmp-${process.pid}`;
-  fs.writeFileSync(tmp, content);
-  fs.renameSync(tmp, filePath);
 }

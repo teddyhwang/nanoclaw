@@ -85,6 +85,7 @@ export function backfillContainerConfigs(): void {
       // we leave it NULL rather than writing 'enforce' so a later admin
       // 'off' is distinguishable from "never configured" in audits.
       sensitive_gate_mode: null,
+      timezone: null,
       updated_at: new Date().toISOString(),
     };
 

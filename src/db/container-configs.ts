@@ -1,3 +1,4 @@
+import { DEFAULT_AGENT_PROVIDER } from '../config.js';
 import type { ContainerConfigRow, SensitiveGateMode } from '../types.js';
 import { getDb } from './connection.js';
 
@@ -14,6 +15,7 @@ const SCALAR_COLUMNS = new Set([
   'assistant_prefix_separator',
   // Optimus fork patch (migration 017).
   'sensitive_gate_mode',
+  'timezone',
 ]);
 const JSON_COLUMNS = new Set(['skills', 'mcp_servers', 'packages_apt', 'packages_npm', 'additional_mounts']);
 
@@ -48,25 +50,31 @@ export function createContainerConfig(config: ContainerConfigRow): void {
         agent_group_id, provider, model, effort, image_tag, assistant_name,
         max_messages_per_prompt, skills, mcp_servers, packages_apt, packages_npm,
         additional_mounts, cli_scope, suppress_embeds, assistant_prefix_separator,
-        updated_at
+        timezone, updated_at
       ) VALUES (
         @agent_group_id, @provider, @model, @effort, @image_tag, @assistant_name,
         @max_messages_per_prompt, @skills, @mcp_servers, @packages_apt, @packages_npm,
         @additional_mounts, @cli_scope, @suppress_embeds, @assistant_prefix_separator,
-        @updated_at
+        @timezone, @updated_at
       )`,
     )
     .run(config);
 }
 
-/** Create an empty config row with sensible defaults. Idempotent — no-ops if row exists. */
-export function ensureContainerConfig(agentGroupId: string): void {
+/**
+ * Create an empty config row with sensible defaults. Idempotent — existing
+ * rows are untouched. A fresh row follows the instance default unless the
+ * caller supplies a provider; built-in Claude is represented as NULL.
+ */
+export function ensureContainerConfig(agentGroupId: string, provider?: string | null): void {
+  const normalized = (provider ?? DEFAULT_AGENT_PROVIDER).toLowerCase();
+  const stamped = normalized && normalized !== 'claude' ? normalized : null;
   getDb()
     .prepare(
-      `INSERT OR IGNORE INTO container_configs (agent_group_id, updated_at)
-       VALUES (?, ?)`,
+      `INSERT OR IGNORE INTO container_configs (agent_group_id, provider, updated_at)
+       VALUES (?, ?, ?)`,
     )
-    .run(agentGroupId, new Date().toISOString());
+    .run(agentGroupId, stamped, new Date().toISOString());
 }
 
 /** Update scalar fields on a config row. Only touches fields present in `updates`. */
@@ -85,6 +93,7 @@ export function updateContainerConfigScalars(
       | 'suppress_embeds'
       | 'assistant_prefix_separator'
       | 'sensitive_gate_mode'
+      | 'timezone'
     >
   >,
 ): void {

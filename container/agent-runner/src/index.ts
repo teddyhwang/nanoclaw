@@ -27,7 +27,9 @@ import { fileURLToPath } from 'url';
 
 import { loadConfig } from './config.js';
 import { buildSystemPromptAddendum } from './destinations.js';
-import { ensureMemoryScaffold } from './memory-scaffold.js';
+import { getTaskSeriesId } from './db/session-routing.js';
+import { ensureMemoryScaffold } from './memory/scaffold.js';
+import { MEMORY_SESSION_HOOK } from './memory/session-hook.js';
 // Providers barrel — each enabled provider self-registers on import.
 // Provider skills append imports to providers/index.ts. Hosts that ship
 // providers from outside the submodule register them via
@@ -64,6 +66,10 @@ async function main(): Promise<void> {
   const providerName = config.provider.toLowerCase() as ProviderName;
 
   log(`Starting v2 agent-runner (provider: ${providerName})`);
+
+  // Every provider shares the provider-neutral memory scaffold. Legacy imports
+  // remain an explicit operator migration, never an automatic startup action.
+  ensureMemoryScaffold();
 
   // Runtime-generated system-prompt addendum: agent identity (name),
   // the resolved runtime model (so "what model are you on?" has a
@@ -177,11 +183,9 @@ async function main(): Promise<void> {
     );
   }
 
-  // Providers that lack native memory opt in via `usesMemoryScaffold`; for them
-  // the runner creates a persistent memory/ tree in its host-backed workspace at
-  // boot (idempotent). Default off — the trunk default (Claude) omits the flag
-  // and keeps its native memory untouched.
-  if (provider.usesMemoryScaffold) ensureMemoryScaffold();
+  // Every provider receives the shared memory lifecycle hook. Wrapper
+  // providers forward registration to their active provider implementation.
+  provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
 
   await runPollLoop({
     provider,

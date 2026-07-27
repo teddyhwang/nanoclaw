@@ -35,7 +35,7 @@
  */
 import type Database from 'better-sqlite3';
 
-import { TIMEZONE } from '../../config.js';
+import { resolveGroupTimezone } from '../../container-config.js';
 import { log } from '../../log.js';
 import type { Session } from '../../types.js';
 import { materializeOccurrence, sessionHasLiveSeriesRow } from './db.js';
@@ -48,10 +48,10 @@ import { advanceRecurrence, getDueSeries, openScheduleDb, type TaskSeriesRow } f
  * a "0 9 * * *" task written by an agent in a user-local TZ fires at
  * 09:00 UTC instead of 09:00 user-local.
  */
-async function computeNextRun(recurrence: string | null): Promise<string | null> {
+async function computeNextRun(recurrence: string | null, agentGroupId: string): Promise<string | null> {
   if (!recurrence) return null;
   const { CronExpressionParser } = await import('cron-parser');
-  const interval = CronExpressionParser.parse(recurrence, { tz: TIMEZONE });
+  const interval = CronExpressionParser.parse(recurrence, { tz: resolveGroupTimezone(agentGroupId) });
   return interval.next().toISOString();
 }
 
@@ -108,7 +108,7 @@ export async function handleRecurrence(
           });
         }
 
-        const nextRun = await computeNextRun(series.recurrence);
+        const nextRun = await computeNextRun(series.recurrence, session.agent_group_id);
         advanceRecurrence(sched, series.series_id, nextRun, firedAt);
         log.info('Advanced series', {
           seriesId: series.series_id,

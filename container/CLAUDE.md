@@ -36,6 +36,10 @@ These are NOT auto-imported. Read them with the file-read tool when a request to
 
 ### CLAUDE.local.md
 
+The runner also maintains provider-neutral memory under `/workspace/agent/memory/` and may inject its live index and definition at session boundaries. In Optimus groups, the structured agent kernel remains authoritative; use the provider-neutral tree only where it does not duplicate or contradict kernel state.
+
+Standing role or persona text managed through NanoClaw belongs in `/workspace/agent/instructions.prepend.md`; changes take effect after the group container restarts.
+
 Auto-loaded by Claude Code as your per-group scratch memory. Use it for facts that don't deserve a structured kernel home — quick reminders, transient preferences, things you'll know in a week whether they belong in `knowledge/<topic>.md` or can be discarded. If something in `CLAUDE.local.md` grows beyond a few lines, promote it to a proper kernel file (`knowledge/<topic>.md` and add to the `KNOWLEDGE.md` index) and remove the scratch entry.
 
 ### Capturing new information

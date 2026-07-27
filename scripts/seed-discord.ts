@@ -9,11 +9,7 @@ import { DATA_DIR } from '../src/config.js';
 import { initDb } from '../src/db/connection.js';
 import { runMigrations } from '../src/db/migrations/index.js';
 import { createAgentGroup, getAgentGroup } from '../src/db/agent-groups.js';
-import {
-  createMessagingGroup,
-  createMessagingGroupAgent,
-  getMessagingGroup,
-} from '../src/db/messaging-groups.js';
+import { createMessagingGroup, createMessagingGroupAgent, getMessagingGroup } from '../src/db/messaging-groups.js';
 
 const db = initDb(path.join(DATA_DIR, 'v2.db'));
 runMigrations(db);

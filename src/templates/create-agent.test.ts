@@ -18,9 +18,10 @@ vi.mock('../log.js', () => ({
   log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },
 }));
 
-import { closeDb, initTestDb, runMigrations } from '../db/index.js';
+import { closeDb, getAllAgentGroups, initTestDb, runMigrations } from '../db/index.js';
 import { getContainerConfig } from '../db/container-configs.js';
 import { PERSONA_PREPEND_FILE } from '../group-persona.js';
+import { openScheduleDb } from '../modules/scheduling/schedule-store.js';
 import { createAgentFromTemplate } from './create-agent.js';
 
 function writeTemplate(): void {
@@ -36,6 +37,18 @@ function writeTemplate(): void {
   const skillDir = path.join(t, 'skills', 'widget');
   fs.mkdirSync(skillDir, { recursive: true });
   fs.writeFileSync(path.join(skillDir, 'SKILL.md'), '---\nname: widget\n---\n');
+}
+
+function writeTask(name: string, schedule: string, prompt: string, script?: string): void {
+  const dir = path.join(TEMPLATES_DIR, 'sales', 'sdr', 'tasks');
+  fs.mkdirSync(dir, { recursive: true });
+  const scriptBlock = script
+    ? `script: |\n${script
+        .split('\n')
+        .map((line) => `  ${line}`)
+        .join('\n')}\n`
+    : '';
+  fs.writeFileSync(path.join(dir, `${name}.md`), `---\nschedule: "${schedule}"\n${scriptBlock}---\n\n${prompt}\n`);
 }
 
 beforeEach(() => {
@@ -79,5 +92,86 @@ describe('createAgentFromTemplate', () => {
     expect(fs.existsSync(path.join(groupDir, 'playbook.md'))).toBe(true);
     expect(fs.existsSync(path.join(groupDir, 'additional_context', 'faq.md'))).toBe(true);
     expect(fs.existsSync(path.join(groupDir, 'context'))).toBe(false);
+  });
+
+  it('creates template tasks paused in the host-only agent-group schedule', () => {
+    writeTask('weekday-briefing', '0 9 * * 1-5', 'Send the weekday briefing.');
+
+    const g = createAgentFromTemplate('sales/sdr', { name: 'SDR Tasks' });
+    const db = openScheduleDb(g.id);
+    const rows = db.prepare('SELECT status, recurrence, process_after, content FROM task_series').all() as Array<{
+      status: string;
+      recurrence: string;
+      process_after: string;
+      content: string;
+    }>;
+    db.close();
+
+    expect(rows).toHaveLength(1);
+    const row = rows[0];
+    expect(row.status).toBe('paused');
+    expect(row.recurrence).toBe('0 9 * * 1-5');
+    expect(new Date(row.process_after).getTime()).toBeGreaterThan(Date.now());
+    expect(JSON.parse(row.content)).toMatchObject({
+      prompt: 'Send the weekday briefing.',
+      script: null,
+      originSessionId: null,
+    });
+    expect(fs.existsSync(path.join(GROUPS_DIR, g.folder, 'tasks', 'weekday-briefing.md'))).toBe(false);
+  });
+
+  it('stamps a valid timezone onto the config row and grounds template task first runs in it', () => {
+    writeTask('daily-digest', '0 9 * * *', 'Send the digest.');
+
+    const g = createAgentFromTemplate('sales/sdr', { name: 'SDR TZ', timezone: 'Asia/Tokyo' });
+    expect(getContainerConfig(g.id)?.timezone).toBe('Asia/Tokyo');
+
+    const db = openScheduleDb(g.id);
+    const row = db.prepare('SELECT process_after FROM task_series').get() as { process_after: string };
+    db.close();
+
+    // 09:00 in Tokyo (no DST) is always 00:00 UTC. A first run computed in the
+    // install-global timezone would only produce this if the test host itself
+    // ran in JST.
+    expect(row.process_after).toMatch(/T00:00:00/);
+  });
+
+  it('ignores an invalid timezone — the group follows the install default', () => {
+    const g = createAgentFromTemplate('sales/sdr', { name: 'SDR Bad TZ', timezone: 'Not/AZone' });
+    expect(getContainerConfig(g.id)?.timezone).toBeNull();
+  });
+
+  it('forwards multiline scripts unchanged through the shared task creation path', () => {
+    const script = 'count=2\necho \'{"wakeAgent": true, "data": {"count": 2}}\'';
+    writeTask('alert-watch', '*/15 * * * *', 'Investigate new alerts.', script);
+
+    const g = createAgentFromTemplate('sales/sdr', { name: 'Scripted Tasks' });
+    const db = openScheduleDb(g.id);
+    const rows = db.prepare('SELECT status, recurrence, content FROM task_series').all() as Array<{
+      status: string;
+      recurrence: string;
+      content: string;
+    }>;
+    db.close();
+    expect(rows).toHaveLength(1);
+    const row = rows[0];
+
+    expect(row.status).toBe('paused');
+    expect(row.recurrence).toBe('*/15 * * * *');
+    expect(JSON.parse(row.content)).toMatchObject({
+      script: `${script}\n`,
+      originSessionId: null,
+    });
+  });
+
+  it.each([
+    ['invalid cron', 'not a cron', /invalid --recurrence/],
+    ['too-frequent cron', '* * * * *', /has not been scheduled/],
+  ])('rejects %s before creating the agent group', (_case, schedule, expected) => {
+    writeTask('broken', schedule, 'Never created.');
+
+    expect(() => createAgentFromTemplate('sales/sdr', { name: 'Broken Tasks' })).toThrow(expected);
+    expect(getAllAgentGroups()).toEqual([]);
+    expect(fs.existsSync(path.join(GROUPS_DIR, 'broken-tasks'))).toBe(false);
   });
 });

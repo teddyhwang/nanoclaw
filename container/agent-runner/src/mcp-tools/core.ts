@@ -182,10 +182,7 @@ function resolveExplicitReplyTarget(
 /**
  * Resolve a destination name to routing fields.
  *
- * If `to` is omitted, use the session's default reply routing (channel +
- * thread the conversation is in) — the agent replies in place.
- *
- * If `to` is specified, look up the named destination. If it resolves to
+ * Look up the explicitly named destination. If it resolves to
  * the same channel the session is bound to, the session's thread_id is
  * preserved so replies land in the correct thread. Otherwise thread_id
  * is null (a cross-destination send starts a new conversation).

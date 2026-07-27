@@ -1,3 +1,4 @@
+import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
 import type { AgentProvider, AgentQuery, ImageContentBlock, ProviderEvent, QueryInput } from './types.js';
 
 function log(message: string): void {
@@ -59,7 +60,6 @@ export function isUsageLimitEvent(event: ProviderEvent): boolean {
  */
 export class UsageLimitFallbackProvider implements AgentProvider {
   readonly supportsNativeSlashCommands: boolean;
-  readonly usesMemoryScaffold?: boolean;
 
   private readonly primaryName: string;
   private readonly fallbackName: string;
@@ -75,7 +75,11 @@ export class UsageLimitFallbackProvider implements AgentProvider {
     this.primary = config.primary;
     this.fallback = config.fallback;
     this.supportsNativeSlashCommands = config.primary.supportsNativeSlashCommands;
-    this.usesMemoryScaffold = config.primary.usesMemoryScaffold || config.fallback.usesMemoryScaffold;
+  }
+
+  registerMemorySessionHook(hook: MemorySessionHookRegistration): void {
+    this.primary.registerMemorySessionHook(hook);
+    this.fallback.registerMemorySessionHook(hook);
   }
 
   query(input: QueryInput): AgentQuery {
