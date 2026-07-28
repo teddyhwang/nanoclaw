@@ -18,6 +18,16 @@ export interface EngineEventMap {
   'session.resolved': { session: Session };
   'session.cleared': { sessionId: string; agentGroupId: string };
   'inbound.routed': { event: InboundEvent; userId: string | null };
+  /**
+   * Fires when a pre-route interceptor accepts and consumes an inbound
+   * message. Consumed messages never reach `inbound.routed`, but host
+   * projections may still need the accepted user-visible message for
+   * complete conversation history.
+   *
+   * Interceptors emit this only after their own authorization checks pass;
+   * rejected or unrelated messages must not be projected through this seam.
+   */
+  'inbound.intercepted': { event: InboundEvent; userId: string | null; consumer: string };
   'inbound.written': { sessionId: string; agentGroupId: string; messageId: string; trigger: boolean };
   /**
    * Fires when the host applies a `schedule_task` delivery action, after
