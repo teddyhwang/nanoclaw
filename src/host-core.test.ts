@@ -806,6 +806,68 @@ describe('router', () => {
     expect(JSON.parse(row!.content).replyTo.toBot).toBe(true);
   });
 
+  it("wakes on botInChain but does NOT claim authorship of another bot's message", async () => {
+    // Multi-bot channel (AI Friends): a human pill-replies to a DIFFERENT
+    // bot's message that happens to @-mention us. `botInChain` makes that a
+    // legitimate wake — the sub-thread concerns us (2026-05-16) — but the
+    // replied-to message is NOT ours, so `toBot` must stay unset.
+    //
+    // Conflating the two mis-attributes a third party's message to this
+    // agent: the formatter renders `<quoted_message mine="true">` (which
+    // container/CLAUDE.md tells agents to treat as a continuation of their
+    // OWN prior turn), and the container's `isAddressedTurn` returns true,
+    // so a deliberate silence gets overwritten by the addressed-silent
+    // fallback ("I couldn't complete that request"). Observed live
+    // 2026-07-29 in AI Friends.
+    const { routeInbound } = await import('./router.js');
+    const { wakeContainer } = await import('./container-runner.js');
+    const { updateMessagingGroupAgent } = await import('./db/messaging-groups.js');
+    const wakeMock = wakeContainer as ReturnType<typeof vi.fn>;
+    wakeMock.mockClear();
+
+    updateMessagingGroupAgent('mga-1', {
+      engage_mode: 'mention',
+      ignored_message_policy: 'accumulate',
+      session_mode: 'agent-shared',
+    });
+
+    await routeInbound({
+      channelType: 'discord',
+      platformId: 'chan-123',
+      threadId: null,
+      message: {
+        id: 'msg-reply-to-other-bot',
+        kind: 'chat',
+        content: JSON.stringify({
+          sender: 'User',
+          text: 'you should be able to build it yourself',
+          replyTo: {
+            // Never delivered by us — no markDelivered for this id.
+            messageId: 'other-bot-platform-id',
+            text: '<@ourbot> could you place the canonical artifacts somewhere',
+            sender: 'OtherBot',
+            botInChain: true,
+          },
+        }),
+        timestamp: now(),
+      },
+    });
+
+    const routedSession2 = findSessionByAgentGroup('ag-1');
+    expect(routedSession2).toBeDefined();
+    const inDb2 = new Database(inboundDbPath('ag-1', routedSession2!.id));
+    const row2 = inDb2
+      .prepare('SELECT trigger, content FROM messages_in WHERE id = ?')
+      .get('msg-reply-to-other-bot:ag-1') as { trigger: number; content: string } | undefined;
+    inDb2.close();
+
+    expect(row2).toBeDefined();
+    // botInChain is still a wake signal…
+    expect(row2!.trigger).toBe(1);
+    // …but authorship is not claimed.
+    expect(JSON.parse(row2!.content).replyTo.toBot).toBeUndefined();
+  });
+
   it('skips auto-create when an unwired channel sees only backfill', async () => {
     // Replaying a historical @-mention from a now-unwired chat must not
     // spawn a messaging_group row — the relationship was never approved,

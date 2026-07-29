@@ -436,7 +436,17 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     const scopeOk = engages && (!senderScopeGate || senderScopeGate(event, userId, mg, agent).allowed);
 
     if (engages && accessOk && scopeOk) {
-      await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, true, isReplyToBot);
+      await deliverToAgent(
+        agent,
+        agentGroup,
+        mg,
+        event,
+        userId,
+        threadsEnabled,
+        effectiveThreadId,
+        true,
+        isReplyToBotOutbound,
+      );
       engagedCount++;
 
       // Mention-sticky: ask the adapter to subscribe the thread so the
@@ -487,7 +497,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
         threadsEnabled,
         effectiveThreadId,
         false,
-        isReplyToBot,
+        isReplyToBotOutbound,
       );
       accumulatedCount++;
     } else {
@@ -656,7 +666,10 @@ async function deliverToAgent(
   threadsEnabled: boolean,
   effectiveThreadId: string | null,
   wake: boolean,
-  isReplyToBot: boolean,
+  // AUTHORSHIP, not engagement: true only when the replied-to message was
+  // delivered by THIS agent (`isReplyToOurBot`/`wasDeliveredByBot`). Do NOT
+  // pass the broader `isReplyToBot` engage signal here — see stampReplyToBot.
+  isReplyToOwnOutbound: boolean,
 ): Promise<void> {
   // Apply the resolved thread policy (wiring override AND channel declaration
   // AND adapter capability — resolveThreadPolicy at fanout): thread-enabled
@@ -720,7 +733,7 @@ async function deliverToAgent(
   // chat — Nook, Tico, all DMs) looks ambient inside the container because
   // the message has no @mention/replyTo, the agent goes silent, and the user
   // sees the bot as broken (2026-05-27 Nook incident).
-  let content = stampReplyToBot(event.message.content as string, isReplyToBot);
+  let content = stampReplyToBot(event.message.content as string, isReplyToOwnOutbound);
   if (wake) {
     content = stampEngagement(content, agent.engage_mode);
   }
@@ -785,6 +798,25 @@ async function deliverToAgent(
  * `<quoted_message mine="true">`, telling the agent the user is continuing
  * its own prior turn — same signal across Discord / Telegram / WhatsApp
  * regardless of how each platform expresses a pill-reply at the wire level.
+ *
+ * `toBot` is an AUTHORSHIP claim ("I wrote the message being replied to"),
+ * so it must be fed ONLY by `isReplyToBotOutbound` (the this-agent-scoped
+ * `wasDeliveredByBot` lookup) — never by the broader `isReplyToBot` engage
+ * signal, which also includes `replyTo.botInChain` ("some ancestor in this
+ * reply chain @-mentioned me"). Those are different facts, and conflating
+ * them mis-attributes ANOTHER participant's message to this agent. In a
+ * multi-bot channel that is routine: on 2026-07-29 in AI Friends, Teddy
+ * pill-replied to a *different* bot's message that happened to @-mention
+ * Optimus. Optimus was handed `mine="true"` on a message it never wrote —
+ * and container/CLAUDE.md instructs agents to treat `mine="true"` as a
+ * continuation of their own prior turn. It also made the container's
+ * `isAddressedTurn` return true, so when the agent correctly judged the
+ * exchange wasn't for it and stayed silent, the addressed-silent safety net
+ * posted "I couldn't complete that request" into the thread.
+ *
+ * Waking is unaffected: `isReplyToBot` (outbound OR botInChain) still drives
+ * `evaluateEngage`, so the 2026-05-16 botInChain case still wakes the agent.
+ * This only stops the chain signal from claiming authorship.
  *
  * Reserializing matters because event.message.content is shared across the
  * fan-out loop; mutating in place would cross-contaminate sibling agents
