@@ -33,11 +33,12 @@ describe('transcribeAudio', () => {
   it('falls back to openai when gemini key missing but openai present', async () => {
     process.env.OPENAI_API_KEY = 'sk-test';
     process.env.VOICE_TRANSCRIPTION_BACKEND = 'gemini';
+    const create = vi.fn(async () => ({ text: 'mocked transcript' }));
     vi.doMock('openai', () => ({
       default: class {
         audio = {
           transcriptions: {
-            create: async () => 'mocked transcript',
+            create,
           },
         };
         constructor(_: unknown) {}
@@ -46,6 +47,12 @@ describe('transcribeAudio', () => {
     }));
     const out = await transcribeAudio(Buffer.from('a'));
     expect(out).toBe('mocked transcript');
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'gpt-transcribe',
+        response_format: 'json',
+      }),
+    );
   });
 
   it('retries with openai when gemini returns an empty transcript', async () => {
@@ -64,7 +71,7 @@ describe('transcribeAudio', () => {
       default: class {
         audio = {
           transcriptions: {
-            create: async () => 'fallback transcript',
+            create: async () => ({ text: 'fallback transcript' }),
           },
         };
         constructor(_: unknown) {}
@@ -82,7 +89,7 @@ describe('transcribeAudio', () => {
       default: class {
         audio = {
           transcriptions: {
-            create: async () => 'injected-cred transcript',
+            create: async () => ({ text: 'injected-cred transcript' }),
           },
         };
         constructor(_: unknown) {}
@@ -109,7 +116,7 @@ describe('transcribeAudio', () => {
       default: class {
         audio = {
           transcriptions: {
-            create: async () => 'env-fallback transcript',
+            create: async () => ({ text: 'env-fallback transcript' }),
           },
         };
         constructor(_: unknown) {}

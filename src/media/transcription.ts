@@ -75,7 +75,7 @@ export async function transcribeAudio(audioBuffer: Buffer, opts: TranscribeOpts 
       apiKey: openaiKey!,
       filename: opts.filename ?? 'voice.ogg',
       mimeType,
-      model: opts.model ?? 'whisper-1',
+      model: opts.model ?? 'gpt-transcribe',
     });
   };
 
@@ -171,10 +171,10 @@ async function transcribeWithOpenAI(
     const transcription = await openai.audio.transcriptions.create({
       file,
       model,
-      response_format: 'text',
+      response_format: 'json',
     });
 
-    const text = (transcription as unknown as string).trim();
+    const text = transcription.text.trim();
     log.info('Transcribed voice message', {
       backend: 'openai',
       bytes: audioBuffer.length,
