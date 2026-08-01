@@ -1068,7 +1068,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     );
   });
 
-  it('addressed + compacted + internal-only output: notifies after an earlier progress acknowledgement', async () => {
+  it('addressed + compacted + internal-only output: stays silent after tool delivery completed the turn', async () => {
     insertChannelDestination('boys-night');
     const { writeMessageOut } = await import('./db/messages-out.js');
     const turnStartedAt = '2026-06-07 20:04:00';
@@ -1077,7 +1077,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
       kind: 'chat',
       channel_type: ROUTING.channelType,
       platform_id: ROUTING.platformId,
-      content: JSON.stringify({ text: 'On it — checking now.' }),
+      content: JSON.stringify({ text: 'Here are the requested photos.', files: ['one.jpg', 'two.jpg'] }),
     });
 
     dispatchResultText(
@@ -1090,7 +1090,23 @@ describe('dispatchResultText safety net (local fork patch)', () => {
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(2);
-    expect(JSON.parse(out[1].content).text).toContain('compacted before I could send a final status update');
+    expect(JSON.parse(out[1].content)).toEqual({ action: 'silent_turn_complete' });
+  });
+
+  it('addressed + compacted + internal-only output: notifies when nothing was delivered', () => {
+    insertChannelDestination('boys-night');
+
+    dispatchResultText(
+      '<internal>Compacted before the requested action could be confirmed.</internal>',
+      ROUTING,
+      true,
+      '2026-06-07 20:04:00',
+      true,
+    );
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).text).toContain('compacted before I could send a final status update');
   });
 
   it('NOT addressed + zero output: keeps silent_turn_complete (ambient/maintenance unchanged)', () => {

@@ -2374,6 +2374,20 @@ export function dispatchResultText(
   // (e.g. agent emitted only `<internal>...</internal>`, or returned an
   // empty result).
   if (sent === 0) {
+    // Tool delivery is conclusive even when the provider compacted later in
+    // the same turn. Compaction commonly happens after a long sequence of
+    // send_file/send_message calls, just before the internal-only result. In
+    // that case the requested output already reached the user, so the
+    // compaction uncertainty notice would be a false failure report.
+    if (addressedDeliveredViaTool) {
+      log(
+        'addressed turn emitted no <message> blocks but delivered a ' +
+          'chat message via a tool (send_file/send_message) — ending ' +
+          'cleanly, suppressing zero-output fallback',
+      );
+      emitSilentTurnComplete();
+      return { sent, hasUnwrapped, dispatched };
+    }
     if (addressed && compactedDuringTurn) {
       const dest = findByRouting(routing.channelType, routing.platformId);
       if (dest) {
@@ -2408,25 +2422,6 @@ export function dispatchResultText(
       return { sent, hasUnwrapped, dispatched };
     }
     if (addressed) {
-      // Before declaring this an empty turn: did the agent already
-      // deliver something via an MCP tool? `send_file`, `send_message`,
-      // and `generate_image`→send_file all write `kind='chat'` rows
-      // straight to outbound.db — they never appear as `<message>`
-      // blocks in the result text, so `sent` stays 0 even though the
-      // user got a real reply. Firing the degraded "produced no output"
-      // fallback here is a false alarm (2026-05-21: an image delivered
-      // fine in the Discord Teddy DM, then got a bogus failure note).
-      // If a chat row exists since turn start, the turn DID deliver —
-      // end it cleanly with silent_turn_complete instead.
-      if (addressedDeliveredViaTool) {
-        log(
-          'addressed turn emitted no <message> blocks but delivered a ' +
-            'chat message via a tool (send_file/send_message) — ending ' +
-            'cleanly, suppressing degraded fallback',
-        );
-        emitSilentTurnComplete();
-        return { sent, hasUnwrapped, dispatched };
-      }
       // A human @mentioned this agent or replied to it, and the agent
       // produced nothing to send back even after the wrapping retry. Silence
       // is worse than a scoped, honest failure here: the user otherwise sees
