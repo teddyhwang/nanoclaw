@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  canDownscaleFitGeminiInline,
   formatVideoMarker,
+  parseMeanVolumeDb,
   parseGeminiVideoOutput,
   pickFrameCount,
   pickFrameTimestamps,
@@ -49,6 +51,16 @@ describe('pickFrameTimestamps', () => {
   });
 });
 
+describe('canDownscaleFitGeminiInline', () => {
+  it('allows short clips whose target bitrate fits the 18MB ceiling', () => {
+    expect(canDownscaleFitGeminiInline(120)).toBe(true);
+  });
+
+  it('rejects long clips before wasting time on a predictably oversized encode', () => {
+    expect(canDownscaleFitGeminiInline(1020)).toBe(false);
+  });
+});
+
 describe('formatVideoMarker', () => {
   it('renders both transcript and summary', () => {
     expect(formatVideoMarker('hello', 'a wave')).toBe('[Video: hello | Summary: a wave]');
@@ -75,7 +87,7 @@ describe('processVideo guards', () => {
     expect(out).toBeNull();
   });
 
-  it('returns null when no Gemini credential is available', async () => {
+  it('returns null for unreadable media even when no Gemini credential is available', async () => {
     const out = await processVideo(Buffer.from('not a real video'), {
       frameDir: '/tmp/never-used',
       getCredential: () => null,
@@ -91,6 +103,20 @@ describe('processVideo guards', () => {
       },
     });
     expect(out).toBeNull();
+  });
+});
+
+describe('parseMeanVolumeDb', () => {
+  it('parses ffmpeg volumedetect output', () => {
+    expect(parseMeanVolumeDb('[Parsed_volumedetect] mean_volume: -23.4 dB')).toBe(-23.4);
+  });
+
+  it('recognizes digital silence', () => {
+    expect(parseMeanVolumeDb('[Parsed_volumedetect] mean_volume: -inf dB')).toBe(Number.NEGATIVE_INFINITY);
+  });
+
+  it('returns null when ffmpeg emitted no volume measurement', () => {
+    expect(parseMeanVolumeDb('conversion failed')).toBeNull();
   });
 });
 

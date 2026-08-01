@@ -188,6 +188,7 @@ export {
   type ProcessVideoOpts,
   type ProcessVideoResult,
   type ProcessVideoFrame,
+  type VideoTranscriptStatus,
 } from '../media/video.js';
 
 // Messaging group queries for plugins that need to enumerate which

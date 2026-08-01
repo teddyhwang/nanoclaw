@@ -33,6 +33,7 @@ import { promisify } from 'util';
 import { log } from '../log.js';
 
 import { MAX_IMAGE_DIMENSION } from './image-processing.js';
+import { transcribeAudio, VOICE_TRANSCRIPTION_FAILED, VOICE_TRANSCRIPTION_UNAVAILABLE } from './transcription.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -49,6 +50,11 @@ const GEMINI_INLINE_BYTES_LIMIT = 18 * 1024 * 1024;
 const DOWNSCALE_HEIGHT = 720;
 const DOWNSCALE_VIDEO_BITRATE = '1000k';
 const DOWNSCALE_AUDIO_BITRATE = '64k';
+const TRANSCRIPTION_AUDIO_BITRATE = '48k';
+const SILENCE_MEAN_VOLUME_DB = -55;
+const DOWNSCALE_TOTAL_BITS_PER_SECOND = 1_064_000;
+
+export type VideoTranscriptStatus = 'transcribed' | 'no_audio' | 'silent' | 'failed';
 
 export interface ProcessVideoOpts {
   /** Directory the extracted keyframe JPEGs are written into. The caller is
@@ -74,6 +80,9 @@ export interface ProcessVideoFrame {
 export interface ProcessVideoResult {
   /** Spoken-content transcript. Empty string if the video has no speech. */
   transcript: string;
+  /** Why `transcript` is populated or empty. Callers must use this instead
+   *  of treating every empty string as proof that the video was silent. */
+  transcriptStatus: VideoTranscriptStatus;
   /** Short visual summary covering the parts the frames can't show
    *  (motion, on-screen text changes, scene transitions). Always populated
    *  when Gemini succeeds. */
@@ -116,6 +125,12 @@ export function pickFrameTimestamps(durationSeconds: number, count: number): num
   return frames;
 }
 
+export function canDownscaleFitGeminiInline(durationSeconds: number): boolean {
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) return false;
+  const estimatedBytes = (durationSeconds * DOWNSCALE_TOTAL_BITS_PER_SECOND) / 8;
+  return estimatedBytes <= GEMINI_INLINE_BYTES_LIMIT;
+}
+
 async function probeDurationSeconds(filePath: string): Promise<number> {
   const { stdout } = await execFileAsync('ffprobe', [
     '-v',
@@ -128,6 +143,70 @@ async function probeDurationSeconds(filePath: string): Promise<number> {
   ]);
   const seconds = parseFloat(stdout.trim());
   return Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
+}
+
+async function hasAudioStream(filePath: string): Promise<boolean> {
+  const { stdout } = await execFileAsync('ffprobe', [
+    '-v',
+    'error',
+    '-select_streams',
+    'a:0',
+    '-show_entries',
+    'stream=codec_type',
+    '-of',
+    'default=noprint_wrappers=1:nokey=1',
+    filePath,
+  ]);
+  return stdout.trim() === 'audio';
+}
+
+export function parseMeanVolumeDb(output: string): number | null {
+  const match = /mean_volume:\s*(-?(?:\d+(?:\.\d+)?|inf))\s*dB/i.exec(output);
+  if (!match) return null;
+  if (match[1].toLowerCase() === '-inf') return Number.NEGATIVE_INFINITY;
+  const value = Number(match[1]);
+  return Number.isFinite(value) ? value : null;
+}
+
+async function extractAudioForTranscription(inputPath: string): Promise<{
+  bytes: Buffer;
+  silent: boolean;
+  path: string;
+} | null> {
+  const out = `${inputPath}.transcription.mp3`;
+  try {
+    await execFileAsync('ffmpeg', [
+      '-y',
+      '-i',
+      inputPath,
+      '-vn',
+      '-ac',
+      '1',
+      '-ar',
+      '16000',
+      '-c:a',
+      'libmp3lame',
+      '-b:a',
+      TRANSCRIPTION_AUDIO_BITRATE,
+      out,
+    ]);
+    if (!fs.existsSync(out) || fs.statSync(out).size === 0) return null;
+    let silent = false;
+    try {
+      const { stderr } = await execFileAsync('ffmpeg', ['-i', out, '-af', 'volumedetect', '-f', 'null', '-']);
+      const meanVolume = parseMeanVolumeDb(stderr);
+      silent = meanVolume !== null && meanVolume <= SILENCE_MEAN_VOLUME_DB;
+    } catch {
+      // Volume detection is diagnostic only. If it fails, attempt
+      // transcription and conservatively report failure rather than silence.
+    }
+    return { bytes: fs.readFileSync(out), silent, path: out };
+  } catch (err) {
+    log.warn('video: audio extraction failed', {
+      err: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
 }
 
 async function extractFrame(inputPath: string, timestamp: number, outputPath: string): Promise<boolean> {
@@ -339,10 +418,7 @@ export async function processVideo(videoBuffer: Buffer, opts: ProcessVideoOpts):
     });
     apiKey = undefined;
   }
-  if (!apiKey) {
-    log.warn('Gemini API key not set — skipping video processing');
-    return null;
-  }
+  if (!apiKey) log.warn('Gemini API key not set — skipping joint video analysis');
 
   const mimeType = opts.mimeType ?? 'video/mp4';
   const tag = `${Date.now()}-${Math.round(videoBuffer.length % 1e6)
@@ -381,7 +457,13 @@ export async function processVideo(videoBuffer: Buffer, opts: ProcessVideoOpts):
     // Downscale for Gemini if needed. Frames were already extracted from the
     // original (higher-quality source) above.
     if (videoBuffer.length > GEMINI_INLINE_BYTES_LIMIT) {
-      const downscaledPath = await downscaleForGemini(tmpInput);
+      const downscaledPath = canDownscaleFitGeminiInline(durationSeconds) ? await downscaleForGemini(tmpInput) : null;
+      if (!downscaledPath && !canDownscaleFitGeminiInline(durationSeconds)) {
+        log.warn('video: duration cannot fit Gemini inline limit after downscale, using audio-only fallback', {
+          originalBytes: videoBuffer.length,
+          durationSeconds,
+        });
+      }
       if (downscaledPath) {
         const downscaledBuf = fs.readFileSync(downscaledPath);
         if (downscaledBuf.length <= GEMINI_INLINE_BYTES_LIMIT) {
@@ -403,8 +485,49 @@ export async function processVideo(videoBuffer: Buffer, opts: ProcessVideoOpts):
     }
 
     let analysis: GeminiVideoOutput | null = null;
-    if (bytesForGemini.length <= GEMINI_INLINE_BYTES_LIMIT) {
+    if (apiKey && bytesForGemini.length <= GEMINI_INLINE_BYTES_LIMIT) {
       analysis = await analyseWithGemini(bytesForGemini, mimeForGemini, apiKey);
+    }
+
+    let transcript = analysis?.transcript.trim() ?? '';
+    let transcriptStatus: VideoTranscriptStatus = transcript ? 'transcribed' : 'failed';
+    let extractedAudioPath: string | null = null;
+    if (!transcript) {
+      const hasAudio = await hasAudioStream(tmpInput);
+      if (!hasAudio) {
+        transcriptStatus = 'no_audio';
+      } else {
+        const audio = await extractAudioForTranscription(tmpInput);
+        extractedAudioPath = audio?.path ?? null;
+        if (audio?.silent) {
+          transcriptStatus = 'silent';
+        } else if (audio) {
+          const fallbackTranscript = await transcribeAudio(audio.bytes, {
+            filename: 'video-audio.mp3',
+            mimeType: 'audio/mpeg',
+            // Long-form file transcription is OpenAI's dedicated use case.
+            // transcribeAudio automatically falls back to Gemini when the
+            // OpenAI credential is absent or the request fails.
+            backend: 'openai',
+            getCredential: opts.getCredential,
+          });
+          if (
+            fallbackTranscript !== VOICE_TRANSCRIPTION_FAILED &&
+            fallbackTranscript !== VOICE_TRANSCRIPTION_UNAVAILABLE
+          ) {
+            transcript = fallbackTranscript;
+            transcriptStatus = 'transcribed';
+          }
+        }
+      }
+    }
+
+    if (extractedAudioPath) {
+      try {
+        fs.rmSync(extractedAudioPath, { force: true });
+      } catch {
+        /* ignore */
+      }
     }
 
     log.info('video: processed', {
@@ -413,10 +536,12 @@ export async function processVideo(videoBuffer: Buffer, opts: ProcessVideoOpts):
       frames: frames.length,
       downscaled,
       hasAnalysis: !!analysis,
+      transcriptStatus,
     });
 
     return {
-      transcript: analysis?.transcript ?? '',
+      transcript,
+      transcriptStatus,
       summary: analysis?.summary ?? '',
       frames,
       durationSeconds,
