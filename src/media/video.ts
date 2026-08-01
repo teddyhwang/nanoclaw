@@ -387,11 +387,25 @@ async function analyseWithGemini(
  *   - summary only → `[Video: Summary: <summary>]`
  *   - neither → `[Video: (no speech, no visual summary)]`
  */
-export function formatVideoMarker(transcript: string, summary: string): string {
+export function formatVideoMarker(
+  transcript: string,
+  summary: string,
+  transcriptStatus?: VideoTranscriptStatus,
+): string {
   const t = transcript.trim();
   const s = summary.trim();
   if (t && s) return `[Video: ${t} | Summary: ${s}]`;
   if (t) return `[Video: ${t}]`;
+  const audioOutcome =
+    transcriptStatus === 'no_audio'
+      ? 'no audio track'
+      : transcriptStatus === 'silent'
+        ? 'silent audio track'
+        : transcriptStatus === 'failed'
+          ? 'audio transcription failed'
+          : '';
+  if (audioOutcome && s) return `[Video: ${audioOutcome} | Summary: ${s}]`;
+  if (audioOutcome) return `[Video: ${audioOutcome}]`;
   if (s) return `[Video: Summary: ${s}]`;
   return '[Video: (no speech, no visual summary)]';
 }

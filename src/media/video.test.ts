@@ -75,6 +75,12 @@ describe('formatVideoMarker', () => {
     expect(formatVideoMarker('', 'a wave')).toBe('[Video: Summary: a wave]');
   });
 
+  it('distinguishes audio outcomes from an untyped empty transcript', () => {
+    expect(formatVideoMarker('', 'a wave', 'failed')).toBe('[Video: audio transcription failed | Summary: a wave]');
+    expect(formatVideoMarker('', '', 'no_audio')).toBe('[Video: no audio track]');
+    expect(formatVideoMarker('', '', 'silent')).toBe('[Video: silent audio track]');
+  });
+
   it('renders the empty placeholder when neither is present', () => {
     expect(formatVideoMarker('', '')).toBe('[Video: (no speech, no visual summary)]');
     expect(formatVideoMarker('  ', '\n')).toBe('[Video: (no speech, no visual summary)]');

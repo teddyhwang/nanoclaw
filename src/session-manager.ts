@@ -560,7 +560,7 @@ async function extractAttachmentFiles(
         if (result) {
           att.transcript = result.transcript;
           att.summary = result.summary;
-          att.videoMarker = formatVideoMarker(result.transcript, result.summary);
+          att.videoMarker = formatVideoMarker(result.transcript, result.summary, result.transcriptStatus);
           for (const frame of result.frames) {
             syntheticFrames.push({
               type: 'image',
