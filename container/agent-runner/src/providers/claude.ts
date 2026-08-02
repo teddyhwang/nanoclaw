@@ -4,6 +4,7 @@ import path from 'path';
 
 import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 
+import { isAwaitingSensitiveConfirmation, noteToolResult } from '../confirmation-gate-state.js';
 import { clearContainerToolInFlight, setContainerToolInFlight, touchHeartbeat } from '../db/connection.js';
 import { clearContinuationStartedAt, getContinuationStartedAt } from '../db/session-state.js';
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
@@ -326,12 +327,34 @@ const preToolUseHook: HookCallback = async (input) => {
   return { continue: true };
 };
 
+/** Extract plain text from an SDK tool_response of unknown shape. */
+function toolResponseText(response: unknown): string {
+  if (typeof response === 'string') return response;
+  if (Array.isArray(response)) {
+    return response.map((c) => (typeof c === 'string' ? c : ((c as { text?: string })?.text ?? ''))).join(' ');
+  }
+  const r = response as { content?: unknown; text?: string } | null;
+  if (r?.content !== undefined) return toolResponseText(r.content);
+  return typeof r?.text === 'string' ? r.text : '';
+}
+
 /** Clear in-flight tool on PostToolUse / PostToolUseFailure. */
-const postToolUseHook: HookCallback = async () => {
+const postToolUseHook: HookCallback = async (input) => {
   try {
     clearContainerToolInFlight();
   } catch (err) {
     log(`PostToolUse: failed to clear container_state: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // Record whether the sensitive-action gate paused this call. Testing the
+  // TOOL RESULT (emitted verbatim by the gate) rather than the model's later
+  // prose is what makes the addressed-silent suppression reliable — see
+  // confirmation-gate-state.ts for the 2026-08-01 Boys Night false failure
+  // this replaces.
+  try {
+    const i = input as { tool_response?: unknown };
+    noteToolResult(toolResponseText(i.tool_response), isAwaitingSensitiveConfirmation);
+  } catch (err) {
+    log(`PostToolUse: confirmation-gate sniff failed: ${err instanceof Error ? err.message : String(err)}`);
   }
   touchHeartbeat();
   return { continue: true };

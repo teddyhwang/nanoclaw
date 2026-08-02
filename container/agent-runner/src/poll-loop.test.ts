@@ -5,6 +5,11 @@ import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
 import { isCorruptionError, processQuery } from './poll-loop.js';
+import {
+  confirmationGatePaused,
+  noteToolResult,
+  resetConfirmationGateState,
+} from './confirmation-gate-state.js';
 import { MockProvider } from './providers/mock.js';
 import {
   shouldSendErrorResponseForBatch,
@@ -1194,6 +1199,54 @@ describe('isAwaitingSensitiveConfirmation (false-degraded suppression detector)'
     // Mentions "confirm" but not as a pending-gate pause — must not
     // over-match and silence a real reply.
     expect(isAwaitingSensitiveConfirmation('I booked it. Can you confirm the date works for you?')).toBe(false);
+  });
+
+  it('matches the verbatim Boys Night 2026-08-01 text that slipped through', () => {
+    // The live false failure. Every pre-fix pattern missed by a word or a
+    // sentence boundary: the model wrote "Waiting **on**" (not "waiting
+    // for"), and the period right after "prompt" stopped `[^.]*` from
+    // reaching a pending-ish qualifier.
+    expect(
+      isAwaitingSensitiveConfirmation(
+        '<internal>Precedent confirmed: same pattern as August. Waiting on the calendarList ' +
+          'confirmation prompt. Ending turn without commentary per tool instruction.</internal>',
+      ),
+    ).toBe(true);
+  });
+
+  it('matches common paraphrases of the same pause', () => {
+    expect(isAwaitingSensitiveConfirmation('<internal>Waiting on Google confirmation.</internal>')).toBe(true);
+    expect(isAwaitingSensitiveConfirmation('Awaiting your confirmation.')).toBe(true);
+    expect(isAwaitingSensitiveConfirmation('The confirmation card is up.')).toBe(true);
+    expect(isAwaitingSensitiveConfirmation('Ending my turn without commentary.')).toBe(true);
+  });
+});
+
+describe('confirmation-gate state (authoritative tool-result signal)', () => {
+  it('flags the turn from the gate tool result, independent of model prose', () => {
+    resetConfirmationGateState();
+    expect(confirmationGatePaused()).toBe(false);
+    // Verbatim gate pending-result, as the tool returns it.
+    noteToolResult(
+      "`google_call` is awaiting the user's confirmation (a prompt is already shown in chat). " +
+        'Do NOT message the user about it and do NOT re-issue this call. End your turn now without commentary.',
+      isAwaitingSensitiveConfirmation,
+    );
+    expect(confirmationGatePaused()).toBe(true);
+  });
+
+  it('ignores ordinary tool results and resets between turns', () => {
+    resetConfirmationGateState();
+    noteToolResult('{"items":[{"id":"tico","summary":"Tico"}]}', isAwaitingSensitiveConfirmation);
+    noteToolResult('', isAwaitingSensitiveConfirmation);
+    expect(confirmationGatePaused()).toBe(false);
+
+    noteToolResult("is awaiting the user's confirmation", isAwaitingSensitiveConfirmation);
+    expect(confirmationGatePaused()).toBe(true);
+    // Reset is load-bearing: a sticky flag would silence the safety net for
+    // genuinely broken later turns in the same container.
+    resetConfirmationGateState();
+    expect(confirmationGatePaused()).toBe(false);
   });
 });
 

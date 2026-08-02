@@ -1,3 +1,8 @@
+import {
+  confirmationGatePaused,
+  isAwaitingSensitiveConfirmation,
+  resetConfirmationGateState,
+} from './confirmation-gate-state.js';
 import { findByName, findByRouting, getAllDestinations, type DestinationEntry } from './destinations.js';
 import {
   getPendingMessages,
@@ -1118,6 +1123,10 @@ export async function processQuery(
   // those write straight to outbound.db and never appear as <message>
   // blocks. Captured once here, passed to every dispatchResultText call.
   const turnStartedAt = outboundDbNow();
+  // Clear the per-turn confirmation-gate flag. Sticky state here would
+  // suppress the addressed-silent safety net for genuinely broken later
+  // turns — the exact failure the net exists to catch.
+  resetConfirmationGateState();
   // Attribution: result events fold into one provider stream and the SDK
   // does not tag which pushed prompt produced a given <message> block.
   // The ROW COUNT and KEYS are always exact (one row per due task, keyed
@@ -2169,18 +2178,10 @@ interface MessageBlock {
  * does NOT produce this coherent "waiting for confirmation" text, so
  * the real degraded-fallback path is preserved.
  */
-export function isAwaitingSensitiveConfirmation(text: string): boolean {
-  const t = text.toLowerCase();
-  // The gate's pending-result verbatim language (mcp-sensitive-gate-
-  // wrap.ts pendingResult) reflected by the model, OR the model's own
-  // standard "waiting for <provider> confirmation" internal note.
-  return (
-    /awaiting the user'?s confirmation/.test(t) ||
-    /a (confirm|approval) prompt (is|has been) (shown|posted)/.test(t) ||
-    /\bwaiting for\b[^.]*\bconfirm(ation)?\b/.test(t) ||
-    /\bconfirm(ation)? (prompt|card)\b[^.]*\b(pending|posted|shown|in chat)\b/.test(t)
-  );
-}
+// Moved to confirmation-gate-state.ts so the provider's PostToolUse hook
+// can use it without a circular import back into poll-loop. Re-exported
+// here because callers and tests already import it from this module.
+export { isAwaitingSensitiveConfirmation };
 
 export function dispatchResultText(
   text: string,
@@ -2401,7 +2402,11 @@ export function dispatchResultText(
         }
       }
     }
-    if (addressed && isAwaitingSensitiveConfirmation(text)) {
+    // Authoritative signal first: a PostToolUse hook saw the gate's own
+    // pending-confirmation tool result this turn. The text sniff below is
+    // the fallback for providers whose tool results we can't observe
+    // (codex — notes/2026-05-19.md).
+    if (addressed && (confirmationGatePaused() || isAwaitingSensitiveConfirmation(text))) {
       // EXPECTED pause, NOT a failure: the agent hit the sensitive-action
       // gate and is waiting for the user's in-chat Confirm tap. The gate
       // told it to "end your turn now without commentary", so it
