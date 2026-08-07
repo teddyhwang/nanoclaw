@@ -154,6 +154,7 @@ export {
   pauseTask,
   resumeTask,
   updateTask,
+  projectSeriesSnapshot,
   type TaskUpdate,
 } from '../modules/scheduling/db.js';
 // Agent-group-scoped schedule store (the S405 structural fix — task
