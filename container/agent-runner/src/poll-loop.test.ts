@@ -5,11 +5,7 @@ import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
 import { isCorruptionError, processQuery } from './poll-loop.js';
-import {
-  confirmationGatePaused,
-  noteToolResult,
-  resetConfirmationGateState,
-} from './confirmation-gate-state.js';
+import { confirmationGatePaused, noteToolResult, resetConfirmationGateState } from './confirmation-gate-state.js';
 import { MockProvider } from './providers/mock.js';
 import {
   shouldSendErrorResponseForBatch,
@@ -977,6 +973,30 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(degraded).toHaveLength(0);
     const control = out.filter((m) => JSON.parse(m.content).action === 'silent_turn_complete');
     expect(control).toHaveLength(1);
+  });
+
+  it('tool delivery suppresses a wrapping retry without addressed attribution', async () => {
+    const { writeMessageOut } = await import('./db/messages-out.js');
+    const turnStartedAt = '2026-08-11T00:00:00';
+    writeMessageOut({
+      id: 'file-out-with-caption',
+      kind: 'chat',
+      channel_type: ROUTING.channelType,
+      platform_id: ROUTING.platformId,
+      content: JSON.stringify({ text: 'Image caption', files: ['image.png'] }),
+    });
+
+    const result = dispatchResultText(
+      '<internal>File sent with caption.</internal>\n\n<internal-trace>send_file</internal-trace>',
+      ROUTING,
+      false,
+      turnStartedAt,
+    );
+
+    expect(result.hasUnwrapped).toBe(false);
+    const out = getUndeliveredMessages();
+    expect(out.filter((row) => row.kind === 'chat')).toHaveLength(1);
+    expect(out.filter((row) => JSON.parse(row.content).action === 'silent_turn_complete')).toHaveLength(1);
   });
 
   it('task turn: suppresses a final <message> summary to a destination already delivered mid-turn (2026-06-10 AI Friends recap double-post)', async () => {

@@ -2383,13 +2383,13 @@ export function dispatchResultText(
     log(`[scratchpad] ${scratchpad.slice(0, 500)}${scratchpad.length > 500 ? '…' : ''}`);
   }
 
-  // Check this before the unwrapped-text retry. A model can fulfill an
-  // addressed turn through send_message/send_file and still leave stray bare
+  // Check this before the unwrapped-text retry. A model can fulfill a turn
+  // through send_message/send_file and still leave stray bare
   // narration in its final result. Nudging that already-satisfied turn and
   // then forcing a fallback after the retry produces a false failure message.
   // processQuery passes the current push boundary here, so a reply from an
   // earlier turn in the same warm query cannot suppress this turn.
-  const addressedDeliveredViaTool = addressed && !!turnStartedAt && countChatMessagesSince(turnStartedAt) > 0;
+  const deliveredViaTool = !!turnStartedAt && countChatMessagesSince(turnStartedAt) > 0;
 
   // Safety-net only fires when there's user-facing content the runner
   // would otherwise silently drop. `<internal>...</internal>` is the
@@ -2399,9 +2399,9 @@ export function dispatchResultText(
   // doesn't get force-emitted with a degraded label.
   const hasUnwrapped = sent === 0 && !!scratchpad;
   if (hasUnwrapped) {
-    if (addressedDeliveredViaTool) {
+    if (deliveredViaTool) {
       log(
-        'addressed turn emitted unwrapped final text after delivering a ' +
+        'turn emitted unwrapped final text after delivering a ' +
           'chat message via a tool — ending cleanly without a wrapping retry',
       );
       emitSilentTurnComplete();
@@ -2426,9 +2426,9 @@ export function dispatchResultText(
     // send_file/send_message calls, just before the internal-only result. In
     // that case the requested output already reached the user, so the
     // compaction uncertainty notice would be a false failure report.
-    if (addressedDeliveredViaTool) {
+    if (deliveredViaTool) {
       log(
-        'addressed turn emitted no <message> blocks but delivered a ' +
+        'turn emitted no <message> blocks but delivered a ' +
           'chat message via a tool (send_file/send_message) — ending ' +
           'cleanly, suppressing zero-output fallback',
       );
