@@ -46,6 +46,7 @@ import {
 import { computeRotationDate } from './session-rotation.js';
 import { TIMEZONE } from './timezone.js';
 import fs from 'fs';
+import path from 'path';
 import {
   formatMessages,
   extractRouting,
@@ -2097,6 +2098,13 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
     case 'result':
       log(`Result: ${event.text ? event.text.slice(0, 200) : '(empty)'}`);
       break;
+    case 'generated_image':
+      try {
+        deliverGeneratedImage(event.path, _routing);
+      } catch (err) {
+        log(`Generated image delivery failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      break;
     case 'error':
       log(
         `Error: ${event.message} (retryable: ${event.retryable}${event.classification ? `, ${event.classification}` : ''})`,
@@ -2106,6 +2114,44 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
       log(`Progress: ${event.message}`);
       break;
   }
+}
+
+const CODEX_GENERATED_IMAGES_ROOT = '/home/node/.codex/generated_images';
+const GENERATED_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
+
+/** Stage a provider-generated image in the session outbox and enqueue it for normal channel delivery. */
+export function deliverGeneratedImage(
+  generatedPath: string,
+  routing: RoutingContext,
+  allowedRoot = CODEX_GENERATED_IMAGES_ROOT,
+): void {
+  const root = fs.realpathSync(allowedRoot);
+  const resolved = fs.realpathSync(generatedPath);
+  const relative = path.relative(root, resolved);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new Error(`Refusing generated image outside provider output root: ${generatedPath}`);
+  }
+  const stat = fs.statSync(resolved);
+  const extension = path.extname(resolved).toLowerCase();
+  if (!stat.isFile() || !GENERATED_IMAGE_EXTENSIONS.has(extension)) {
+    throw new Error(`Refusing invalid generated image: ${generatedPath}`);
+  }
+
+  const id = generateId();
+  const filename = path.basename(resolved);
+  const outboxDir = path.join('/workspace/outbox', id);
+  fs.mkdirSync(outboxDir, { recursive: true });
+  fs.copyFileSync(resolved, path.join(outboxDir, filename));
+  writeMessageOut({
+    id,
+    in_reply_to: routing.inReplyTo,
+    kind: 'chat',
+    platform_id: routing.platformId,
+    channel_type: routing.channelType,
+    thread_id: routing.threadId,
+    content: JSON.stringify({ text: '', files: [filename] }),
+  });
+  log(`Generated image staged for automatic delivery: ${filename}`);
 }
 
 /**

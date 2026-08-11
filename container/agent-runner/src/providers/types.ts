@@ -188,6 +188,8 @@ export interface AgentQuery {
 
 export type ProviderEvent =
   | { type: 'init'; continuation: string }
+  /** A provider-native image generator completed and saved this image. */
+  | { type: 'generated_image'; path: string }
   /**
    * Turn finished. `tokensUsed`, when the provider can supply it, is the
    * total context size (input + cache + output tokens of the turn's last
