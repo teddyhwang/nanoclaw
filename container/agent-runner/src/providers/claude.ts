@@ -12,6 +12,7 @@ import { resolvePressureThresholdTokens } from '../pressure-rotation.js';
 import { evaluateRotation } from '../session-rotation.js';
 import { EMPTY_STATS, type SessionStats } from '../session-stats.js';
 import { TIMEZONE, formatLocalStamp } from '../timezone.js';
+import { shimCwd } from './cwd-shim.js';
 import { registerProvider } from './provider-registry.js';
 import type {
   AgentProvider,
@@ -125,18 +126,25 @@ export function isRejectedClaudeRateLimitEvent(message: unknown): boolean {
 // - AskUserQuestion: SDK returns a placeholder instead of blocking on a
 //   real answer — we have mcp__nanoclaw__ask_user_question that persists
 //   the question and blocks on the real reply.
+// - SendMessage: addresses Claude Code's own in-session subagents, which are
+//   unrelated to NanoClaw agent groups — but the name reads as the obvious
+//   way to message another agent, so an agent that just called
+//   mcp__nanoclaw__create_agent reaches for it and gets "No agent named 'x'
+//   is currently addressable". mcp__nanoclaw__send_message is the real
+//   agent-to-agent path (it resolves the destination map in inbound.db).
 // - EnterPlanMode / ExitPlanMode / EnterWorktree / ExitWorktree: Claude
 //   Code UI affordances; in a headless container they'd appear stuck.
 // - DesignSync: desktop design-tool integration — nothing to sync with in a
 //   headless container (~9.3KB/turn schema).
 // - ReportFindings: code-review-reporting UI affordance with no headless
 //   host surface to receive it (~1.9KB/turn schema).
-const SDK_DISALLOWED_TOOLS = [
+export const SDK_DISALLOWED_TOOLS = [
   'CronCreate',
   'CronDelete',
   'CronList',
   'ScheduleWakeup',
   'AskUserQuestion',
+  'SendMessage',
   'EnterPlanMode',
   'ExitPlanMode',
   'EnterWorktree',
@@ -150,7 +158,7 @@ const SDK_DISALLOWED_TOOLS = [
 // added via `add_mcp_server` (or wired in container.json directly) is
 // reachable to the agent — without this, the SDK's allowedTools filter
 // silently drops every MCP namespace not listed here.
-const TOOL_ALLOWLIST = [
+export const TOOL_ALLOWLIST = [
   'Bash',
   'Read',
   'Write',
@@ -164,7 +172,6 @@ const TOOL_ALLOWLIST = [
   'TaskStop',
   'TeamCreate',
   'TeamDelete',
-  'SendMessage',
   'TodoWrite',
   'ToolSearch',
   'Skill',
@@ -688,7 +695,9 @@ export class ClaudeProvider implements AgentProvider {
 
   constructor(options: ProviderOptions = {}) {
     this.assistantName = options.assistantName;
-    this.mcpServers = options.mcpServers ?? {};
+    this.mcpServers = Object.fromEntries(
+      Object.entries(options.mcpServers ?? {}).map(([name, server]) => [name, shimCwd(server)]),
+    );
     this.additionalDirectories = options.additionalDirectories;
     this.model = options.model;
     this.effort = options.effort;

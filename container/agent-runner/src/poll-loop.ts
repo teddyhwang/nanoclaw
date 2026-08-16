@@ -780,6 +780,16 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // try/finally to decide, on a shutdown-cut-short turn, between completing
     // the rows (work happened) and leaving them pending (work didn't).
     let sawResult = false;
+    // Forward a loop stop to the ACTIVE query. The stream deliberately stays
+    // open between turns, so the loop can be parked inside processQuery when
+    // config.signal fires; without this, the "stopped" loop's query — and its
+    // 500ms follow-up poller — outlives the stop and keeps polling (and
+    // claiming) messages from whatever inbound DB the process points at. In
+    // tests that leaked one immortal poller per loop-driven test, which could
+    // steal a later test's follow-up message into a dead query.
+    const abortActiveQuery = () => query.abort();
+    if (config.signal?.aborted) abortActiveQuery();
+    else config.signal?.addEventListener('abort', abortActiveQuery, { once: true });
     try {
       const result = await processQuery(
         query,
@@ -903,6 +913,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       // stray off-turn send, and prevents a finished turn's target from
       // leaking onto the next turn before poll-loop republishes.
       clearCurrentBatchReplyTarget();
+      config.signal?.removeEventListener('abort', abortActiveQuery);
     }
 
     // Ensure completed even if processQuery ended without a result event

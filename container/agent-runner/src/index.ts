@@ -36,6 +36,7 @@ import { MEMORY_SESSION_HOOK } from './memory/session-hook.js';
 // `loadProviderPlugins()` (awaited in main() before createProvider).
 import './providers/index.js';
 import { createProvider, type ProviderName } from './providers/factory.js';
+import { resolvePluginServer } from './plugin-mcp.js';
 import type { AgentProvider, McpServerConfig, ProviderOptions } from './providers/types.js';
 import { resolveUsageLimitFallback, UsageLimitFallbackProvider } from './providers/usage-limit-fallback.js';
 import { loadProviderPlugins } from './engine/provider-plugins.js';
@@ -128,18 +129,23 @@ async function main(): Promise<void> {
   // authenticates instead of silently 401ing every HTTP MCP call.
   const mcpBearer = process.env.CYBERTRON_MCP_TOKEN ?? process.env.OPTIMUS_MCP_TOKEN;
   for (const [name, serverConfig] of Object.entries(config.mcpServers)) {
-    if (serverConfig.type === 'http' && mcpBearer) {
+    // Plugin-shipped servers get ${PLUGIN_ROOT}/${PLUGIN_DATA} expansion and
+    // the two injected env vars; everything else passes through untouched.
+    // Runs BEFORE the bearer-header injection below so a plugin-shipped HTTP
+    // server still gets the Authorization header layered on its resolved form.
+    const resolved = resolvePluginServer(serverConfig);
+    if (resolved.type === 'http' && mcpBearer) {
       mcpServers[name] = {
-        ...serverConfig,
+        ...resolved,
         headers: {
-          ...(serverConfig.headers ?? {}),
+          ...(resolved.headers ?? {}),
           Authorization: `Bearer ${mcpBearer}`,
         },
       };
     } else {
-      mcpServers[name] = serverConfig;
+      mcpServers[name] = resolved;
     }
-    const detail = serverConfig.type === 'http' ? `http ${serverConfig.url}` : `stdio ${serverConfig.command}`;
+    const detail = resolved.type === 'http' ? `http ${resolved.url}` : `stdio ${resolved.command}`;
     log(`Additional MCP server: ${name} (${detail})`);
   }
 

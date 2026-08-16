@@ -15,6 +15,7 @@ vi.mock('./log.js', () => ({
 }));
 
 import { closeDb, createAgentGroup, initTestDb, runMigrations } from './db/index.js';
+import { _resetEnginePathsForTests, setEnginePaths } from './engine/paths.js';
 import { initGroupFilesystem } from './group-init.js';
 import type { AgentGroup } from './types.js';
 
@@ -27,12 +28,29 @@ function makeGroup(id: string): AgentGroup {
 beforeEach(() => {
   fs.rmSync(TEST_ROOT, { recursive: true, force: true });
   fs.mkdirSync(TEST_ROOT, { recursive: true });
+  // Fork divergence: group dirs resolve through the engine paths registry
+  // (engine/paths.ts), not config.js's GROUPS_DIR const — mocking the module
+  // alone leaves resolveGroupDir pointing at the real tree.
+  setEnginePaths({
+    projectRoot: TEST_ROOT,
+    dataDir: path.join(TEST_ROOT, 'data'),
+    groupsDir: path.join(TEST_ROOT, 'groups'),
+  });
   runMigrations(initTestDb());
 });
 
 afterEach(() => {
   closeDb();
+  _resetEnginePathsForTests();
   fs.rmSync(TEST_ROOT, { recursive: true, force: true });
+});
+
+describe('group filesystem scaffold', () => {
+  it('creates plugins/ so the read-only plugins mount is unconditional', () => {
+    const ag = makeGroup('ag-plugins');
+    initGroupFilesystem(ag, {});
+    expect(fs.statSync(path.join(TEST_ROOT, 'groups', ag.folder, 'plugins')).isDirectory()).toBe(true);
+  });
 });
 
 describe('default settings.json for new groups', () => {

@@ -26,7 +26,8 @@ import { log } from '../log.js';
 import { initChannelAdapters, teardownChannelAdapters, getChannelAdapter } from '../channels/channel-registry.js';
 import type { ChannelAdapter, ChannelSetup } from '../channels/adapter.js';
 import { handleChatMigrated } from '../channels/chat-migration.js';
-import { getResponseHandlers, getShutdownCallbacks, type ResponsePayload } from '../response-registry.js';
+import { getResponseHandlers, type ResponsePayload } from '../response-registry.js';
+import { stopHostModules } from '../host-lifecycle.js';
 
 // Channel barrel — each enabled channel self-registers on import.
 import '../channels/index.js';
@@ -238,13 +239,10 @@ export async function _bootForHost(opts: { managedSignals: boolean }): Promise<v
 
 export async function _shutdownForHost(reason: string): Promise<void> {
   log.info('Shutdown requested', { reason });
-  for (const cb of getShutdownCallbacks()) {
-    try {
-      await cb();
-    } catch (err) {
-      log.error('Shutdown callback threw', { err });
-    }
-  }
+  // Unified lifecycle registry (upstream v2.2.0 replaced response-registry's
+  // onShutdown/getShutdownCallbacks). Runs callbacks LIFO with per-callback
+  // error isolation — same guarantee the inline loop here used to give.
+  await stopHostModules();
   stopDeliveryPolls();
   stopHostSweep();
   try {
