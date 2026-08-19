@@ -20,6 +20,7 @@ import {
 } from '../db/messages-out.js';
 import { getCurrentBatchReplyTarget, getCurrentInReplyTo } from '../db/session-state.js';
 import { getSessionRouting } from '../db/session-routing.js';
+import { attachLocalFileLinks, outboxDirFor, sweepLocalFileLinks } from '../local-file-links.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
@@ -262,6 +263,11 @@ export const sendMessage: McpToolDefinition = {
     if ('error' in explicitReply) return err(explicitReply.error);
 
     const id = generateId();
+    // A `sandbox:`/`file://` markdown link is a file handoff the model
+    // believes it just made. No channel resolves those, so turn it into a
+    // real attachment (see local-file-links.ts).
+    const swept = sweepLocalFileLinks(text);
+    const files = attachLocalFileLinks(swept.links, id, { log });
     const seq = writeMessageOut({
       id,
       in_reply_to: explicitReply.inReplyTo ?? resolveInReplyTo(routing.channel_type, routing.platform_id),
@@ -269,10 +275,17 @@ export const sendMessage: McpToolDefinition = {
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,
       thread_id: routing.thread_id,
-      content: JSON.stringify({ text }),
+      content: JSON.stringify(files.length > 0 ? { text: swept.text, files } : { text: swept.text }),
     });
 
     log(`send_message: #${seq} → ${routing.resolvedName}`);
+    if (files.length > 0) {
+      return ok(
+        `Message sent to ${routing.resolvedName} (id: ${seq}). ` +
+          `${files.length} local-file link(s) in your text were delivered as real attachments (${files.join(', ')}) ` +
+          `and the unusable link markup was removed — use send_file directly next time.`,
+      );
+    }
     return ok(`Message sent to ${routing.resolvedName} (id: ${seq})`);
   },
 };
@@ -310,9 +323,19 @@ export const sendFile: McpToolDefinition = {
     const id = generateId();
     const filename = (args.filename as string) || path.basename(resolvedPath);
 
-    const outboxDir = path.join('/workspace/outbox', id);
+    const outboxDir = outboxDirFor(id);
     fs.mkdirSync(outboxDir, { recursive: true });
     fs.copyFileSync(resolvedPath, path.join(outboxDir, filename));
+
+    // A caption often re-links the very file being sent (and sometimes a
+    // sibling the model meant to send too). Strip the unusable markup; attach
+    // any *other* real file it pointed at rather than dropping it silently.
+    const swept = sweepLocalFileLinks((args.text as string) || '');
+    const extraFiles = attachLocalFileLinks(swept.links, id, {
+      log,
+      skipPaths: [resolvedPath],
+      reservedNames: [filename],
+    });
 
     writeMessageOut({
       id,
@@ -321,11 +344,11 @@ export const sendFile: McpToolDefinition = {
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,
       thread_id: routing.thread_id,
-      content: JSON.stringify({ text: (args.text as string) || '', files: [filename] }),
+      content: JSON.stringify({ text: swept.text, files: [filename, ...extraFiles] }),
     });
 
-    log(`send_file: ${id} → ${routing.resolvedName} (${filename})`);
-    const caption = (args.text as string) || '';
+    log(`send_file: ${id} → ${routing.resolvedName} (${[filename, ...extraFiles].join(', ')})`);
+    const caption = swept.text;
     const captionLine = caption
       ? ` Caption already posted to chat: ${JSON.stringify(caption.length > 80 ? caption.slice(0, 80) + '…' : caption)}. Do not re-send this content in a follow-up <message>.`
       : '';
@@ -360,16 +383,29 @@ export const editMessage: McpToolDefinition = {
     }
 
     const id = generateId();
+    // Strip-only: an edit rewrites an already-delivered message's text, so
+    // there is nothing to attach to. Leaving a dead `sandbox:` link in place
+    // would just re-post the unusable markup the sweep exists to remove.
+    const swept = sweepLocalFileLinks(text);
+    if (swept.links.length > 0) {
+      log(`edit_message: stripped ${swept.links.length} unusable local-file link(s) — an edit cannot carry files`);
+    }
     writeMessageOut({
       id,
       kind: 'chat',
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,
       thread_id: routing.thread_id,
-      content: JSON.stringify({ operation: 'edit', messageId: platformId, text }),
+      content: JSON.stringify({ operation: 'edit', messageId: platformId, text: swept.text }),
     });
 
     log(`edit_message: #${seq} → ${platformId}`);
+    if (swept.links.length > 0) {
+      return ok(
+        `Message edit queued for #${seq}. Local-file links were removed — an edit cannot carry ` +
+          `attachments; use send_file to deliver the file.`,
+      );
+    }
     return ok(`Message edit queued for #${seq}`);
   },
 };

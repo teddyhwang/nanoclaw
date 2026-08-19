@@ -20,6 +20,10 @@ Pass `reply_to_message_id` as a visible `#N`/`N` message id when the new outboun
 
 Use `mcp__nanoclaw__send_file({ to, path, text?, filename? })` to deliver a file from your workspace. `path` is absolute or relative to `/workspace/agent/`; `filename` overrides the display name shown in chat (defaults to the file's basename); `text` is an optional accompanying message. Use this for artifacts you produce (charts, PDFs, generated images, reports) rather than dumping contents into chat.
 
+**`send_file` is the only way a file reaches the user.** You are not in a hosted sandbox UI — there is no download pane and no link resolver. A local path written into message text is dead on every channel, whatever you dress it as: `sandbox:/workspace/agent/output/card.pdf`, `[Print-ready PDF](sandbox:...)`, `file:///...`, `computer:///...`, or a bare `/workspace/...` path. The user sees unopenable text and has to ask again. Never link a file — send it. If you produced three artifacts, that's three `send_file` calls (or one, if only one is actually useful to them).
+
+The runner catches this when it can: a `sandbox:`/`file://`-style link in an outgoing message is stripped down to its label, and if it points at a real file, that file is attached for you. Treat that as a backstop, not a workflow — it can only rescue links whose file still exists, it caps the number and size of files it will rescue, and it cannot rescue an `edit_message`.
+
 ### Reacting to messages (`add_reaction` / `remove_reaction`)
 
 Use `mcp__nanoclaw__add_reaction({ messageId, emoji })` to react to a specific inbound message by its `#N` id — pass `messageId` as an integer (e.g. `22`, not `"22"`). Good for lightweight acknowledgment (`eyes` = seen, `white_check_mark` = done) when a full reply would be noise. `emoji` is the shortcode name (e.g. `thumbs_up`, `heart`), not the raw character.

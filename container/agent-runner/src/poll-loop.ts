@@ -44,6 +44,7 @@ import {
   type PressureState,
 } from './pressure-rotation.js';
 import { computeRotationDate } from './session-rotation.js';
+import { attachLocalFileLinks, outboxDirFor, sweepLocalFileLinks, type DetectedFileLink } from './local-file-links.js';
 import { TIMEZONE } from './timezone.js';
 import fs from 'fs';
 import path from 'path';
@@ -2150,7 +2151,7 @@ export function deliverGeneratedImage(
 
   const id = generateId();
   const filename = path.basename(resolved);
-  const outboxDir = path.join('/workspace/outbox', id);
+  const outboxDir = outboxDirFor(id);
   fs.mkdirSync(outboxDir, { recursive: true });
   fs.copyFileSync(resolved, path.join(outboxDir, filename));
   writeMessageOut({
@@ -2332,7 +2333,13 @@ export function dispatchResultText(
     }
     const toName = block.to;
     const nestedInternal = block.body.includes('<internal>');
-    const body = stripInternalTags(block.body);
+    const rawBody = stripInternalTags(block.body);
+    // Sweep unusable local-file links BEFORE the dedup checks below, so the
+    // text compared here is the text that will actually be delivered (an MCP
+    // send_message earlier in the turn stored the swept form too — comparing
+    // raw against swept would leak a duplicate through).
+    const swept = sweepLocalFileLinks(rawBody);
+    const body = swept.text;
     if (nestedInternal) {
       if (body.length === 0) {
         log(
@@ -2376,9 +2383,9 @@ export function dispatchResultText(
       }
     }
     seen.add(dedupKey);
-    const sentOk = sendToDestination(dest, body, routing, block.replyToSeq);
-    if (!sentOk) {
-      scratchpadParts.push(`[dropped: invalid reply target for "${toName}"] ${body}`);
+    const sentOk = sendToDestination(dest, body, routing, block.replyToSeq, swept.links);
+    if (!sentOk.sent) {
+      scratchpadParts.push(`[dropped: ${sentOk.reason} for "${toName}"] ${rawBody}`);
       continue;
     }
     dispatched.push({ destination: toName, body });
@@ -2452,7 +2459,7 @@ export function dispatchResultText(
         const body =
           'My session compacted before I could send a final status update. ' +
           'I may have completed the work; please ask me to confirm the result before relying on it.';
-        if (sendToDestination(dest, body, routing)) {
+        if (sendToDestination(dest, body, routing).sent) {
           dispatched.push({ destination: dest.name, body });
           sent++;
           return { sent, hasUnwrapped, dispatched };
@@ -2494,7 +2501,7 @@ export function dispatchResultText(
       const dest = findByRouting(routing.channelType, routing.platformId);
       if (dest) {
         const body = "I couldn't complete that request or produce a reliable reply. Please try again.";
-        if (sendToDestination(dest, body, routing)) {
+        if (sendToDestination(dest, body, routing).sent) {
           log(`WARNING: addressed turn produced no deliverable output — sent scoped failure fallback`);
           dispatched.push({ destination: dest.name, body });
           sent++;
@@ -2618,7 +2625,11 @@ function sendToDestination(
   body: string,
   routing: RoutingContext,
   explicitReplyToSeq: number | null = null,
-): boolean {
+  // Local-file links the caller already swept out of `body`. Each one that
+  // resolves to a real file is staged into this message's outbox so the user
+  // gets the actual attachment instead of an unopenable `sandbox:` link.
+  fileLinks: DetectedFileLink[] = [],
+): { sent: boolean; reason?: string } {
   const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
   const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
   // Task fires: an explicitly-addressed final-text block is either the echo of
@@ -2630,7 +2641,7 @@ function sendToDestination(
     log(`Dropping turn-final echo of an already-sent task message to ${dest.name}`);
     // The content WAS delivered (by the MCP send this echoes) — report
     // success so the caller doesn't treat the block as undelivered.
-    return true;
+    return { sent: true };
   }
   // Resolve thread_id per-destination from the most recent inbound message
   // that came from this same channel+platform. In agent-shared sessions,
@@ -2643,18 +2654,27 @@ function sendToDestination(
   });
   if (explicitReplyToSeq != null && inReplyTo == null) {
     log(`Invalid reply_to_message_id #${explicitReplyToSeq} for <message to="${dest.name}">, dropping block`);
-    return false;
+    return { sent: false, reason: 'invalid reply target' };
+  }
+  const id = generateId();
+  const files = attachLocalFileLinks(fileLinks, id, { log });
+  if (body.length === 0 && files.length === 0) {
+    // Sweeping a link-only block can empty the body. With no file to show for
+    // it there is nothing to deliver — posting a blank message would just read
+    // as the bot glitching.
+    log(`Nothing left to deliver to ${dest.name} after removing unusable local-file link(s), dropping block`);
+    return { sent: false, reason: 'no deliverable content after local-file-link sweep' };
   }
   writeMessageOut({
-    id: generateId(),
+    id,
     in_reply_to: inReplyTo,
     kind: 'chat',
     platform_id: platformId,
     channel_type: channelType,
     thread_id: destRouting?.threadId ?? null,
-    content: JSON.stringify({ text: body }),
+    content: JSON.stringify(files.length > 0 ? { text: body, files } : { text: body }),
   });
-  return true;
+  return { sent: true };
 }
 
 function parseMessageBlock(attrs: string, rawBody: string): MessageBlock | null {

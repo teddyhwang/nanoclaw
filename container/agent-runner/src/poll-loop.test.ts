@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb } from './db/connection.js';
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
@@ -1488,3 +1491,95 @@ function taskLogRows(): Array<{ text: string }> {
     }>
   ).map((r) => JSON.parse(r.content) as { text: string });
 }
+
+/**
+ * Local-file-link salvage on the `<message>` dispatch path (2026-08-19,
+ * Nicole DM). The MCP `send_message` path is covered in mcp-tools/core.test.ts;
+ * this is the other writer of agent-authored chat text.
+ */
+describe('dispatchResultText — local-file-link salvage', () => {
+  const ROUTING: RoutingContext = {
+    platformId: 'telegram:8669837947',
+    channelType: 'telegram',
+    threadId: null,
+    inReplyTo: 'm1',
+  };
+
+  let tmp: string;
+
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'poll-loop-file-links-'));
+    fs.mkdirSync(path.join(tmp, 'agent'), { recursive: true });
+    process.env.NANOCLAW_OUTBOX_ROOT = path.join(tmp, 'outbox');
+    process.env.NANOCLAW_WORKSPACE_ROOT = path.join(tmp, 'agent');
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+         VALUES ('nicole-dm', 'nicole-dm', 'channel', ?, ?, NULL)`,
+      )
+      .run(ROUTING.channelType!, ROUTING.platformId!);
+  });
+
+  afterEach(() => {
+    delete process.env.NANOCLAW_OUTBOX_ROOT;
+    delete process.env.NANOCLAW_WORKSPACE_ROOT;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const workspaceFile = (name: string, contents = 'bytes'): string => {
+    const full = path.join(tmp, 'agent', name);
+    fs.writeFileSync(full, contents);
+    return full;
+  };
+
+  it('delivers the linked files as attachments and drops the sandbox: markup', () => {
+    const pdf = workspaceFile('card-print.pdf', 'PDF');
+    const png = workspaceFile('card-300dpi.png', 'PNG');
+
+    const result = dispatchResultText(
+      `<message to="nicole-dm">Done — recreated at standard business-card size.\n\n` +
+        `[Print-ready PDF](sandbox:${pdf})\n\n[300-DPI PNG](sandbox:${png})</message>`,
+      ROUTING,
+    );
+
+    expect(result.sent).toBe(1);
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    const content = JSON.parse(out[0].content);
+    expect(content.files).toEqual(['card-print.pdf', 'card-300dpi.png']);
+    expect(content.text).not.toContain('sandbox:');
+    expect(content.text).toContain('Print-ready PDF');
+    // The bytes actually landed where the host will look for them.
+    expect(fs.readFileSync(path.join(tmp, 'outbox', out[0].id, 'card-print.pdf'), 'utf-8')).toBe('PDF');
+  });
+
+  it('drops a link-only block whose file does not exist rather than posting a blank message', () => {
+    const result = dispatchResultText('<message to="nicole-dm">sandbox:/workspace/agent/gone.pdf</message>', ROUTING);
+
+    expect(result.sent).toBe(0);
+    const out = getUndeliveredMessages();
+    // Only the silent-turn control row — no empty chat message.
+    expect(out.every((m) => m.kind === 'system')).toBe(true);
+  });
+
+  it('still delivers surrounding prose when the linked file is missing', () => {
+    dispatchResultText(
+      '<message to="nicole-dm">Here you go: [the PDF](sandbox:/workspace/agent/gone.pdf)</message>',
+      ROUTING,
+    );
+
+    const chat = getUndeliveredMessages().filter((m) => m.kind === 'chat');
+    expect(chat).toHaveLength(1);
+    const content = JSON.parse(chat[0].content);
+    expect(content.text).toBe('Here you go: the PDF');
+    expect(content.files).toBeUndefined();
+  });
+
+  it('leaves an ordinary message untouched', () => {
+    dispatchResultText('<message to="nicole-dm">See [the docs](https://example.com/x).</message>', ROUTING);
+
+    const content = JSON.parse(getUndeliveredMessages()[0].content);
+    expect(content.text).toBe('See [the docs](https://example.com/x).');
+    expect(content.files).toBeUndefined();
+  });
+});

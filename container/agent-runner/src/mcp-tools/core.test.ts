@@ -12,6 +12,9 @@
  * via any in-memory helper, so they exercise the real process boundary.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '../db/connection.js';
 import { getUndeliveredMessages } from '../db/messages-out.js';
@@ -21,7 +24,7 @@ import {
   setCurrentBatchReplyTarget,
   clearCurrentBatchReplyTarget,
 } from '../db/session-state.js';
-import { sendMessage, addReaction, removeReaction } from './core.js';
+import { sendMessage, sendFile, editMessage, addReaction, removeReaction } from './core.js';
 
 /**
  * Publish the a2a reply stamp the way the poll loop does: a direct write to
@@ -500,5 +503,102 @@ describe('send_message MCP tool — origin-default routing (57dad14)', () => {
     // Must refuse and name the options — never silently pick one.
     expect(res.isError).toBe(true);
     expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+});
+
+/**
+ * Local-file-link salvage (2026-08-19, Nicole DM). A model that produced a
+ * file often "delivers" it as a `sandbox:`/`file://` markdown link, which no
+ * channel can resolve. The outbound tools sweep that markup out and turn a
+ * link pointing at a real file into a genuine attachment. See
+ * ../local-file-links.ts.
+ */
+describe('core MCP tools — local-file-link salvage', () => {
+  let tmp: string;
+
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'core-file-links-'));
+    fs.mkdirSync(path.join(tmp, 'agent'), { recursive: true });
+    process.env.NANOCLAW_OUTBOX_ROOT = path.join(tmp, 'outbox');
+    process.env.NANOCLAW_WORKSPACE_ROOT = path.join(tmp, 'agent');
+  });
+
+  afterEach(() => {
+    delete process.env.NANOCLAW_OUTBOX_ROOT;
+    delete process.env.NANOCLAW_WORKSPACE_ROOT;
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const workspaceFile = (name: string, contents = 'bytes'): string => {
+    const full = path.join(tmp, 'agent', name);
+    fs.writeFileSync(full, contents);
+    return full;
+  };
+
+  it('send_message converts a sandbox: link into a real attachment', async () => {
+    const pdf = workspaceFile('card.pdf', 'pdf-bytes');
+
+    const res = await sendMessage.handler({ to: 'peer', text: `Done. [Print-ready PDF](sandbox:${pdf})` });
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    const content = JSON.parse(out[0].content);
+    expect(content.files).toEqual(['card.pdf']);
+    expect(content.text).not.toContain('sandbox:');
+    expect(content.text).toContain('Print-ready PDF');
+    // The tool result tells the model what happened so it stops reaching for links.
+    expect(res.content[0].text).toContain('real attachments');
+  });
+
+  it('send_message strips a dead link when the file is gone, and still sends the text', async () => {
+    await sendMessage.handler({ to: 'peer', text: 'Here you go: [PDF](sandbox:/workspace/agent/missing.pdf)' });
+
+    const content = JSON.parse(getUndeliveredMessages()[0].content);
+    expect(content.files).toBeUndefined();
+    expect(content.text).toBe('Here you go: PDF');
+  });
+
+  it('send_message leaves an ordinary message untouched', async () => {
+    await sendMessage.handler({ to: 'peer', text: 'See [the docs](https://example.com/x).' });
+
+    const content = JSON.parse(getUndeliveredMessages()[0].content);
+    expect(content.files).toBeUndefined();
+    expect(content.text).toBe('See [the docs](https://example.com/x).');
+  });
+
+  it('send_file strips a caption link to its own file without re-attaching it', async () => {
+    const pdf = workspaceFile('card.pdf');
+
+    await sendFile.handler({ to: 'peer', path: pdf, text: `Here: [the PDF](sandbox:${pdf})` });
+
+    const content = JSON.parse(getUndeliveredMessages()[0].content);
+    expect(content.files).toEqual(['card.pdf']);
+    expect(content.text).toBe('Here: the PDF');
+  });
+
+  it('send_file also delivers a sibling file the caption linked', async () => {
+    const pdf = workspaceFile('card.pdf');
+    const png = workspaceFile('card.png');
+
+    await sendFile.handler({ to: 'peer', path: pdf, text: `Also: [the PNG](sandbox:${png})` });
+
+    const content = JSON.parse(getUndeliveredMessages()[0].content);
+    expect(content.files).toEqual(['card.pdf', 'card.png']);
+    expect(content.text).toBe('Also: the PNG');
+  });
+
+  it('edit_message strips links (an edit cannot carry attachments)', async () => {
+    const pdf = workspaceFile('card.pdf');
+    await sendMessage.handler({ to: 'peer', text: 'original' });
+    const seq = getUndeliveredMessages()[0].seq!;
+
+    const res = await editMessage.handler({ messageId: seq, text: `Fixed: [PDF](sandbox:${pdf})` });
+
+    const edit = getUndeliveredMessages().find((m) => JSON.parse(m.content).operation === 'edit');
+    expect(edit).toBeDefined();
+    const content = JSON.parse(edit!.content);
+    expect(content.text).toBe('Fixed: PDF');
+    expect(content.files).toBeUndefined();
+    expect(res.content[0].text).toContain('use send_file');
   });
 });
