@@ -153,3 +153,64 @@ describe('mayEndQueryForDeferredFollowUps', () => {
     expect(mayEndQueryForDeferredFollowUps(true, true)).toBe(false);
   });
 });
+
+// Reaction-only-wake isolation (2026-08-20 shit-talk): a 😂 on the agent's
+// own message is a soft trigger, not a request to answer four minutes of
+// ambient chat that accumulated since the agent last spoke.
+describe('selectInitialBatch — reaction-only wake', () => {
+  it('defers accumulate-only chat when the only trigger is a reaction', () => {
+    const reaction = row('r1', 'reaction', { trigger: 1 });
+    const ambient = [row('c1', 'chat-sdk', { trigger: 0 }), row('c2', 'chat-sdk', { trigger: 0 })];
+    const { batch, logs } = selectInitialBatch([...ambient, reaction]);
+
+    expect(batch).toEqual([reaction]);
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toContain('Reaction-only wake');
+    expect(logs[0]).toContain('deferring 2 accumulate-only chat row(s)');
+  });
+
+  it('does NOT isolate when a real chat trigger is also present', () => {
+    // An @mention alongside the reaction makes this a genuine chat turn —
+    // the ambient rows are legitimate context for answering it.
+    const m = [
+      row('c1', 'chat-sdk', { trigger: 0 }),
+      row('c2', 'chat-sdk', { trigger: 1 }),
+      row('r1', 'reaction', { trigger: 1 }),
+    ];
+    const { batch, logs } = selectInitialBatch(m);
+
+    expect(batch).toEqual(m);
+    expect(logs).toEqual([]);
+  });
+
+  it('keeps a reaction-only batch with no ambient rows untouched', () => {
+    const m = [row('r1', 'reaction', { trigger: 1 })];
+    const { batch, logs } = selectInitialBatch(m);
+
+    expect(batch).toEqual(m);
+    expect(logs).toEqual([]);
+  });
+
+  it('keeps trigger=0 reactions as silent context alongside the trigger', () => {
+    // Reactions between other people are ambient, but they are cheap and
+    // carry the same "someone reacted" shape — only chat rows are deferred.
+    const m = [
+      row('r0', 'reaction', { trigger: 0 }),
+      row('r1', 'reaction', { trigger: 1 }),
+      row('c1', 'chat-sdk', { trigger: 0 }),
+    ];
+    const { batch } = selectInitialBatch(m);
+
+    expect(batch.map((b) => b.id)).toEqual(['r0', 'r1']);
+  });
+
+  it('replays the shit-talk incident batch: 1 reaction trigger + 7 ambient', () => {
+    const ambient = Array.from({ length: 7 }, (_, i) => row(`amb${i}`, 'chat-sdk', { trigger: 0 }));
+    const reaction = row('laugh', 'reaction', { trigger: 1 });
+    const { batch } = selectInitialBatch([...ambient, reaction]);
+
+    // Pre-fix this was all 8 rows, and the ambient "We should ask Hyung"
+    // became an implicit prompt to reply.
+    expect(batch).toEqual([reaction]);
+  });
+});

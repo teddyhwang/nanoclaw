@@ -150,6 +150,27 @@ export function shouldKeepaliveBridge(args: { lastEventAt: number; now: number; 
  *    "Silent fire — no output captured" for a dream that ran correctly.
  *    The dream is silent-by-design — deferring co-arrivers costs at
  *    most one poll tick before they get their own clean stream.
+ *
+ * 3. Reaction-only-wake isolation — if the only trigger=1 rows are
+ *    reactions, defer every trigger=0 chat row. A reaction on the agent's
+ *    own message is a deliberately *soft* trigger (`evaluateReactionEngage`
+ *    on the host): someone acknowledged something the agent said. It is not
+ *    a request to answer the conversation that happened since. Without this
+ *    layer the soft wake flushes the entire accumulated ambient backlog into
+ *    the turn as fresh input, and the model — correctly seeing unanswered
+ *    human messages — replies to them.
+ *      - 2026-08-20 13:25 (shit-talk): four minutes of ambient chat
+ *        accumulated as trigger=0 after the agent's last answer. A 😂 on
+ *        the agent's OWN earlier message woke it; all 7 accumulated rows
+ *        rode along, and the agent posted an unprompted joke about Teddy's
+ *        ambient "We should ask Hyung". Teddy: "you responded even though
+ *        you weren't triggered to."
+ *    Same shape as layer 1's 2026-05-11 shit-talk incident (accumulate
+ *    dragged into a maintenance wake), one layer over. The deferred rows
+ *    stay pending and are picked up by the next real trigger, so no context
+ *    is lost — it just stops being an implicit licence to reply. A trigger=1
+ *    chat row (a real @mention / reply-to-bot) anywhere in the batch means
+ *    this is a genuine chat turn and no isolation applies.
  */
 export function selectInitialBatch(messages: MessageInRow[]): {
   batch: MessageInRow[];
@@ -183,6 +204,19 @@ export function selectInitialBatch(messages: MessageInRow[]): {
           `deferring ${nonDream.length} non-dream row(s) — left pending for next wake`,
       );
       batch = dreamRows;
+    }
+  }
+
+  const triggers = batch.filter((m) => m.trigger === 1);
+  const reactionOnlyWake = triggers.length > 0 && triggers.every((m) => m.kind === 'reaction');
+  if (reactionOnlyWake) {
+    const ambient = batch.filter((m) => isChatRow(m) && m.trigger !== 1);
+    if (ambient.length > 0) {
+      logs.push(
+        `Reaction-only wake: isolating ${triggers.length} reaction trigger(s), ` +
+          `deferring ${ambient.length} accumulate-only chat row(s) — left pending for next chat wake`,
+      );
+      batch = batch.filter((m) => !(isChatRow(m) && m.trigger !== 1));
     }
   }
 
