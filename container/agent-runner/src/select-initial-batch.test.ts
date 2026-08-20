@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'bun:test';
 
-import { mayEndQueryForDeferredFollowUps, selectInitialBatch, shouldDeferTaskFromChatTurn } from './poll-loop.js';
+import {
+  mayEndQueryForDeferredFollowUps,
+  selectInitialBatch,
+  shouldDeferTaskFromChatTurn,
+  supersedeCurrentChatPush,
+} from './poll-loop.js';
 import type { MessageInRow } from './db/messages-in.js';
 
 // Pure batch-isolation covers two incidents:
@@ -99,6 +104,20 @@ describe('selectInitialBatch', () => {
     expect(logs.some((l) => l.includes('Task trigger present'))).toBe(true);
     // Step 2 has nothing to defer (batch is already just the dream).
     expect(logs.some((l) => l.includes('Dream trigger'))).toBe(false);
+  });
+});
+
+describe('supersedeCurrentChatPush', () => {
+  it('marks the unresolved provider push stale when a chat follow-up arrives', () => {
+    const superseded = [false];
+    supersedeCurrentChatPush(superseded, 0);
+    expect(superseded).toEqual([true]);
+  });
+
+  it('does not rewrite an already-consumed push', () => {
+    const superseded = [false];
+    supersedeCurrentChatPush(superseded, 1);
+    expect(superseded).toEqual([false]);
   });
 });
 

@@ -115,6 +115,21 @@ export function shouldKeepaliveBridge(args: { lastEventAt: number; now: number; 
 }
 
 /**
+ * A same-sender chat follow-up pushed before the current provider result makes
+ * that result stale. Providers such as Codex implement push as a subsequent
+ * turn, so the in-flight turn cannot see the newly queued details and may emit
+ * a now-wrong reply (for example, "I didn't receive the order") immediately
+ * before processing the order that arrived seconds later.
+ *
+ * Only the currently unresolved push can be superseded. Results already
+ * consumed remain deliverable history, while task/system pushes retain their
+ * independent delivery semantics.
+ */
+export function supersedeCurrentChatPush(superseded: boolean[], resultIndex: number): void {
+  if (resultIndex < superseded.length) superseded[resultIndex] = true;
+}
+
+/**
  * Pure batch-selection for the initial wake. Decides which rows ride
  * this provider turn and which are deferred (left pending for the next
  * wake). Returns the chosen batch plus any log lines the caller should
@@ -1138,6 +1153,10 @@ export async function processQuery(
   // addressed so a new request pushed into a warm query is not mistaken
   // for ambient continuation (Nook 2026-06-07).
   const pushAddressed: boolean[] = [addressed];
+  // Parallel to pushAddressed. A same-sender chat follow-up that arrives
+  // before the current result supersedes that result: the provider queued the
+  // follow-up as the next turn, so the current turn cannot know its contents.
+  const pushSuperseded: boolean[] = [false];
   let resultIndex = 0;
   // Pressure-rotation state machine: 'idle' until a result reports context
   // tokens above the threshold → push ONE handoff turn ('handoff-requested')
@@ -1767,7 +1786,11 @@ export async function processQuery(
           .map((m) => taskFireContexts.find((c) => c.taskId === m.id))
           .filter((c): c is TaskFireContext => c !== undefined);
         registerPushContexts(pushTaskContexts);
+        if (keep.some((m) => m.kind === 'chat' || m.kind === 'chat-sdk')) {
+          supersedeCurrentChatPush(pushSuperseded, resultIndex);
+        }
         pushAddressed.push(isAddressedTurn(keep, assistantName));
+        pushSuperseded.push(false);
         query.push(prompt, followupImageBlocks.length > 0 ? followupImageBlocks : undefined);
         archivePrompts.push(prompt);
         markCompleted(keptIds);
@@ -1883,8 +1906,22 @@ export async function processQuery(
           // at all — either way the turn is finished.
           //
           const resultAddressed = pushAddressed[resultIndex] ?? false;
+          const resultSuperseded = pushSuperseded[resultIndex] ?? false;
           resultIndex++;
           markCompleted(initialBatchIds);
+          if (resultSuperseded) {
+            log('Suppressing superseded chat result — a same-sender follow-up arrived before completion');
+            notifyExchangeComplete(onExchangeComplete, {
+              prompt: archivePrompts[0] ?? initialPrompt,
+              result: event.text,
+              continuation: queryContinuation ?? initialContinuation,
+              status: 'undelivered',
+            });
+            archivePrompts.shift();
+            compactedSinceLastResult = false;
+            resultBoundaryAt = outboundDbNow();
+            continue;
+          }
           if (event.text) {
             // Attribute this result push-scoped: the newest unwritten
             // context in the OLDEST push that still has one. The SDK
@@ -1948,6 +1985,7 @@ export async function processQuery(
                     `Please re-send your response with the correct wrapping.</system>`,
                 );
                 pushAddressed.push(resultAddressed);
+                pushSuperseded.push(false);
               } else if (hasUnwrapped && resultAddressed) {
                 // The model ignored the one allowed wrapping retry. Convert
                 // the exhausted addressed turn into the same deterministic

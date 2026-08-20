@@ -118,6 +118,41 @@ describe('poll loop integration', () => {
     await loopPromise.catch(() => {});
   });
 
+  it('suppresses a stale result when same-sender details arrive before completion', async () => {
+    // Live repro: Nook Catering 2026-08-20. Janyce sent "create labels for
+    // the following order", then the order four seconds later. Codex queues
+    // push() as a second turn, so its first turn replied "details missing"
+    // even though the order was already waiting for the next turn.
+    insertMessage(
+      'm-intro',
+      { sender: 'Janyce', text: 'create labels for the following order' },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
+
+    const provider = new SupersededResultProvider();
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 3000);
+
+    await waitFor(() => provider.queries === 1, 1000);
+    insertMessage(
+      'm-details',
+      { sender: 'Janyce', text: 'Maple Walnut Chicken, Glass Noodle, Mango Slaw' },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
+
+    await waitFor(() => provider.pushes === 1, 1500);
+    provider.releaseResults();
+    await waitFor(() => getUndeliveredMessages().some((row) => row.kind === 'chat'), 1500);
+
+    const chat = getUndeliveredMessages().filter((row) => row.kind === 'chat');
+    expect(chat).toHaveLength(1);
+    expect(JSON.parse(chat[0].content).text).toBe('labels created from the order details');
+    expect(chat[0].in_reply_to).toBe('m-details');
+
+    controller.abort();
+    await loopPromise.catch(() => {});
+  });
+
   it('keeps a wrapping retry open when accumulate-only chat arrives before the retry result', async () => {
     // Live repro: AI Friends 2026-07-18 recovery. The first result contained
     // a message block with an invalid reply reference, so dispatch dropped it
@@ -1620,6 +1655,65 @@ class DelayedFollowUpProvider {
         }
         if (ended || aborted) return;
         yield { type: 'result' as const, text: owner.followUpResponse };
+        while (!ended && !aborted) {
+          await new Promise<void>((resolve) => {
+            owner.wake = resolve;
+          });
+          owner.wake = null;
+        }
+      })(),
+    };
+  }
+}
+
+class SupersededResultProvider {
+  readonly supportsNativeSlashCommands = false;
+  queries = 0;
+  pushes = 0;
+  private released = false;
+  private wake: (() => void) | null = null;
+
+  isSessionInvalid(): boolean {
+    return false;
+  }
+
+  releaseResults(): void {
+    this.released = true;
+    this.wake?.();
+  }
+
+  query() {
+    const owner = this;
+    owner.queries += 1;
+    let ended = false;
+    let aborted = false;
+    return {
+      push() {
+        owner.pushes += 1;
+        owner.wake?.();
+      },
+      end() {
+        ended = true;
+        owner.wake?.();
+      },
+      abort() {
+        aborted = true;
+        owner.wake?.();
+      },
+      events: (async function* () {
+        yield { type: 'init' as const, continuation: 'superseded-result-session' };
+        while (!owner.released && !ended && !aborted) {
+          await new Promise<void>((resolve) => {
+            owner.wake = resolve;
+          });
+          owner.wake = null;
+        }
+        if (ended || aborted) return;
+        yield { type: 'result' as const, text: '<message to="discord-test">details missing</message>' };
+        yield {
+          type: 'result' as const,
+          text: '<message to="discord-test">labels created from the order details</message>',
+        };
         while (!ended && !aborted) {
           await new Promise<void>((resolve) => {
             owner.wake = resolve;
