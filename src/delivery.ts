@@ -21,7 +21,7 @@ import { getAgentGroup } from './db/agent-groups.js';
 import { configFromDb } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { getDb, hasTable } from './db/connection.js';
-import { getMessagingGroup, getMessagingGroupByPlatform, getMessagingGroupAgentByPair } from './db/messaging-groups.js';
+import { getMessagingGroup, getMessagingGroupByPlatform } from './db/messaging-groups.js';
 import {
   getDueOutboundMessages,
   getDeliveredIds,
@@ -502,22 +502,10 @@ async function deliverMessage(
       ? readOutboxFiles(session.agent_group_id, session.id, msg.id, content.files as string[])
       : undefined;
 
-  // Gate the native reply pill on engage_mode. Only trigger-required wirings
-  // (mention / mention-sticky — v1's `requires_trigger=true` equivalent)
-  // should render a reply chain on outbound. Always-engaged wirings (engage
-  // mode `pattern`, including DMs with the catch-all `.` pattern) post
-  // flat — replying with a pill on every DM message is visual noise.
-  // agent-runner stamps in_reply_to on every outbound regardless, so we drop
-  // it here when the wiring isn't trigger-required.
-  let inReplyTo: string | null = msg.in_reply_to;
-  if (inReplyTo) {
-    const messagingGroupId = session.messaging_group_id ?? deliveryMessagingGroup?.id ?? null;
-    const wiring = messagingGroupId
-      ? getMessagingGroupAgentByPair(messagingGroupId, session.agent_group_id)
-      : undefined;
-    const triggerRequired = wiring?.engage_mode === 'mention' || wiring?.engage_mode === 'mention-sticky';
-    if (!triggerRequired) inReplyTo = null;
-  }
+  // `in_reply_to` is the runner's turn-authoritative triggering message.
+  // Preserve it for every engage mode: how a wiring decides to wake must not
+  // change whether readers can see which inbound the agent is answering.
+  // Task and accumulate-only turns publish null upstream, so they stay flat.
 
   // Resolve per-session assistant brand from the agent group's
   // container.json. Adapters that prefix outbound text (WhatsApp
@@ -548,7 +536,7 @@ async function deliverMessage(
     msg.kind,
     msg.content,
     files,
-    inReplyTo,
+    msg.in_reply_to,
     assistantName,
     assistantPrefixSeparator,
     suppressEmbeds,

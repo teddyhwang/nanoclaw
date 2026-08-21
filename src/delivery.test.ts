@@ -26,7 +26,14 @@ vi.mock('./config.js', async () => {
 
 const TEST_DIR = '/tmp/nanoclaw-test-delivery';
 
-import { initTestDb, closeDb, runMigrations, createAgentGroup, createMessagingGroup } from './db/index.js';
+import {
+  initTestDb,
+  closeDb,
+  runMigrations,
+  createAgentGroup,
+  createMessagingGroup,
+  createMessagingGroupAgent,
+} from './db/index.js';
 import { getDeliveredIds } from './db/session-db.js';
 import { resolveSession, resolveTaskSession, outboundDbPath, openInboundDb } from './session-manager.js';
 import { deliverSessionMessages, setDeliveryAdapter } from './delivery.js';
@@ -55,12 +62,12 @@ function seedAgentAndChannel(): void {
   });
 }
 
-function insertOutbound(agentGroupId: string, sessionId: string, msgId: string): void {
+function insertOutbound(agentGroupId: string, sessionId: string, msgId: string, inReplyTo: string | null = null): void {
   const db = new Database(outboundDbPath(agentGroupId, sessionId));
   db.prepare(
-    `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, content)
-     VALUES (?, datetime('now'), 'chat', 'telegram:123', 'telegram', ?)`,
-  ).run(msgId, JSON.stringify({ text: 'hello' }));
+    `INSERT INTO messages_out (id, in_reply_to, timestamp, kind, platform_id, channel_type, content)
+     VALUES (?, ?, datetime('now'), 'chat', 'telegram:123', 'telegram', ?)`,
+  ).run(msgId, inReplyTo, JSON.stringify({ text: 'hello' }));
   db.close();
 }
 
@@ -245,6 +252,42 @@ describe('deliverSessionMessages — retry and permanent failure', () => {
     // Attempt 3 — not called, message already delivered
     await deliverSessionMessages(session);
     expect(callCount).toBe(2);
+  });
+});
+
+describe('deliverSessionMessages — native reply target', () => {
+  it.each([
+    ['pattern', '.'],
+    ['mention', null],
+    ['mention-sticky', null],
+  ] as const)('preserves the triggering message in %s engage mode', async (engageMode, engagePattern) => {
+    seedAgentAndChannel();
+    createMessagingGroupAgent({
+      id: 'mga-1',
+      messaging_group_id: 'mg-1',
+      agent_group_id: 'ag-1',
+      engage_mode: engageMode,
+      engage_pattern: engagePattern,
+      sender_scope: 'all',
+      ignored_message_policy: 'drop',
+      session_mode: 'shared',
+      priority: 0,
+      created_at: now(),
+    });
+    const { session } = resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertOutbound('ag-1', session.id, `out-${engageMode}`, 'trigger-msg');
+
+    const replyTargets: Array<string | null | undefined> = [];
+    setDeliveryAdapter({
+      async deliver(_ct, _pid, _tid, _kind, _content, _files, inReplyTo) {
+        replyTargets.push(inReplyTo);
+        return `plat-${engageMode}`;
+      },
+    });
+
+    await deliverSessionMessages(session);
+
+    expect(replyTargets).toEqual(['trigger-msg']);
   });
 });
 
