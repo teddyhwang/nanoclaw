@@ -80,8 +80,7 @@ export function findByRouting(
   const row =
     channelType === 'agent'
       ? (db.prepare("SELECT * FROM destinations WHERE type = 'agent' AND agent_group_id = ?").get(platformId) as
-          | DestRow
-          | undefined)
+          DestRow | undefined)
       : (db
           .prepare("SELECT * FROM destinations WHERE type = 'channel' AND channel_type = ? AND platform_id = ?")
           .get(channelType, platformId) as DestRow | undefined);
@@ -199,7 +198,11 @@ function buildDestinationsSection(): string {
   );
   lines.push('');
   lines.push(
-    'The `send_message` MCP tool is the same delivery, available mid-turn — handy for a quick acknowledgment ("on it") before a slow tool call. It also accepts `reply_to_message_id` for the same reply-pill behavior. Each `send_message` call and each final-response `<message>` block lands as its own message in the conversation, so they read as a sequence rather than as one combined reply.',
+    'The `send_message` MCP tool is the same delivery, available mid-turn. It also accepts `reply_to_message_id` for the same reply-pill behavior. Each `send_message` call and each final-response `<message>` block lands as its own message in the conversation, so they read as a sequence rather than as one combined reply.',
+  );
+  lines.push('');
+  lines.push(
+    'An acknowledgment is only an acknowledgment if it arrives BEFORE the slow work. A `<message>` block in your final response is NOT an acknowledgment: nothing in your final response is delivered until the whole turn finishes, so an "on it" written there lands at the same moment as the result — seconds apart, and often AFTER the result if you already delivered it with `send_file` or `send_message`. The user sees two messages arrive together and reasonably concludes the ack was pointless. So: if you are about to call a tool that takes more than a few seconds (generating an image, browsing, a long search), send the acknowledgment with `send_message` FIRST, then make the slow call. Never put the ack in your final response and never repeat it there afterwards.',
   );
   lines.push('');
   lines.push(

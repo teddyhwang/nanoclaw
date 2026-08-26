@@ -140,4 +140,22 @@ describe('buildSystemPromptAddendum — runtime model identity', () => {
     expect(buildSystemPromptAddendum('Casa')).not.toContain('# Your runtime');
     expect(buildSystemPromptAddendum('Casa', { provider: '', model: '' })).not.toContain('# Your runtime');
   });
+
+  // 2026-08-26 New York Crew: the agent wrote its "Got it, reworking it
+  // now" ack as a final-response <message> instead of calling
+  // send_message before the slow generate_image call. Nothing in the
+  // final response is delivered until the turn ends, so the ack landed
+  // 0.2s after the finished image — and ordered AFTER it, because the
+  // image had already gone out via send_file. The addendum must state
+  // that a final-response block is not an acknowledgment.
+  it('tells the agent to acknowledge before slow work, not in the final response', () => {
+    seedDestination('casa', 'Casa', 'whatsapp', 'group-1@g.us');
+    const prompt = buildSystemPromptAddendum('Casa');
+    expect(prompt).toContain('An acknowledgment is only an acknowledgment if it arrives BEFORE the slow work');
+    expect(prompt).toContain('A `<message>` block in your final response is NOT an acknowledgment');
+    expect(prompt).toContain('send the acknowledgment with `send_message` FIRST');
+    // The old wording framed mid-turn send_message as a mere convenience
+    // ("handy for"), which is what let the habit win.
+    expect(prompt).not.toContain('handy for a quick acknowledgment');
+  });
 });
