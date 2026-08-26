@@ -118,6 +118,40 @@ describe('poll loop integration', () => {
     await loopPromise.catch(() => {});
   });
 
+  it('delivers a Claude result that absorbed a same-sender follow-up', async () => {
+    // Live repro: Danielle DM 2026-08-25. Claude absorbed "make me a meal
+    // plan" into the pending result and generated the plan, but the Codex-
+    // motivated supersede guard discarded it and Claude emitted no later
+    // result for that push.
+    insertMessage(
+      'm-handout',
+      { sender: 'Danielle', text: 'Here is the dietician handout' },
+      { platformId: 'chan-1', channelType: 'telegram' },
+    );
+
+    const provider = new MergedFollowUpProvider();
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 3000, 'claude');
+
+    await waitFor(() => provider.queries === 1, 1000);
+    insertMessage(
+      'm-plan',
+      { sender: 'Danielle', text: 'based on this, can you make me a meal plan?' },
+      { platformId: 'chan-1', channelType: 'telegram' },
+    );
+
+    await waitFor(() => provider.pushes === 1, 1500);
+    provider.releaseResult();
+    await waitFor(() => getUndeliveredMessages().some((row) => row.kind === 'chat'), 1500);
+
+    const chat = getUndeliveredMessages().filter((row) => row.kind === 'chat');
+    expect(chat).toHaveLength(1);
+    expect(JSON.parse(chat[0].content).text).toBe('3-day meal plan');
+
+    controller.abort();
+    await loopPromise.catch(() => {});
+  });
+
   it('suppresses a stale result when same-sender details arrive before completion', async () => {
     // Live repro: Nook Catering 2026-08-20. Janyce sent "create labels for
     // the following order", then the order four seconds later. Codex queues
@@ -131,7 +165,7 @@ describe('poll loop integration', () => {
 
     const provider = new SupersededResultProvider();
     const controller = new AbortController();
-    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 3000);
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 3000, 'codex');
 
     await waitFor(() => provider.queries === 1, 1000);
     insertMessage(
@@ -786,11 +820,16 @@ describe('poll loop integration', () => {
 });
 
 // Helper: run poll loop until aborted or timeout
-async function runPollLoopWithTimeout(provider: MockProvider, signal: AbortSignal, timeoutMs: number): Promise<void> {
+async function runPollLoopWithTimeout(
+  provider: MockProvider,
+  signal: AbortSignal,
+  timeoutMs: number,
+  providerName = 'mock',
+): Promise<void> {
   return Promise.race([
     runPollLoop({
       provider,
-      providerName: 'mock',
+      providerName,
       cwd: '/tmp',
       signal,
     }),
@@ -1714,6 +1753,60 @@ class SupersededResultProvider {
           type: 'result' as const,
           text: '<message to="discord-test">labels created from the order details</message>',
         };
+        while (!ended && !aborted) {
+          await new Promise<void>((resolve) => {
+            owner.wake = resolve;
+          });
+          owner.wake = null;
+        }
+      })(),
+    };
+  }
+}
+
+class MergedFollowUpProvider {
+  readonly supportsNativeSlashCommands = false;
+  queries = 0;
+  pushes = 0;
+  private released = false;
+  private wake: (() => void) | null = null;
+
+  isSessionInvalid(): boolean {
+    return false;
+  }
+
+  releaseResult(): void {
+    this.released = true;
+    this.wake?.();
+  }
+
+  query() {
+    const owner = this;
+    owner.queries += 1;
+    let ended = false;
+    let aborted = false;
+    return {
+      push() {
+        owner.pushes += 1;
+      },
+      end() {
+        ended = true;
+        owner.wake?.();
+      },
+      abort() {
+        aborted = true;
+        owner.wake?.();
+      },
+      events: (async function* () {
+        yield { type: 'init' as const, continuation: 'merged-follow-up-session' };
+        while (!owner.released && !ended && !aborted) {
+          await new Promise<void>((resolve) => {
+            owner.wake = resolve;
+          });
+          owner.wake = null;
+        }
+        if (ended || aborted) return;
+        yield { type: 'result' as const, text: '<message to="discord-test">3-day meal plan</message>' };
         while (!ended && !aborted) {
           await new Promise<void>((resolve) => {
             owner.wake = resolve;

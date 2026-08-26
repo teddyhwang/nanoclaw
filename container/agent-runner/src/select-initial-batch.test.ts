@@ -119,6 +119,12 @@ describe('supersedeCurrentChatPush', () => {
     supersedeCurrentChatPush(superseded, 1);
     expect(superseded).toEqual([false]);
   });
+
+  it('keeps Claude results deliverable because pushed input can join the pending result', () => {
+    const superseded = [false];
+    supersedeCurrentChatPush(superseded, 0, 'claude');
+    expect(superseded).toEqual([false]);
+  });
 });
 
 // Reverse isolation: a task trigger arriving as a FOLLOW-UP during an active

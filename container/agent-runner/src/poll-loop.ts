@@ -125,8 +125,12 @@ export function shouldKeepaliveBridge(args: { lastEventAt: number; now: number; 
  * consumed remain deliverable history, while task/system pushes retain their
  * independent delivery semantics.
  */
-export function supersedeCurrentChatPush(superseded: boolean[], resultIndex: number): void {
-  if (resultIndex < superseded.length) superseded[resultIndex] = true;
+export function supersedeCurrentChatPush(superseded: boolean[], resultIndex: number, providerName = 'codex'): void {
+  // Codex queues push() as a subsequent turn. Claude's streaming input can
+  // instead fold the new user message into the pending result. Suppressing
+  // that result drops the fully updated answer and leaves no later result to
+  // deliver (Danielle DM, 2026-08-25).
+  if (providerName === 'codex' && resultIndex < superseded.length) superseded[resultIndex] = true;
 }
 
 /**
@@ -1787,7 +1791,7 @@ export async function processQuery(
           .filter((c): c is TaskFireContext => c !== undefined);
         registerPushContexts(pushTaskContexts);
         if (keep.some((m) => m.kind === 'chat' || m.kind === 'chat-sdk')) {
-          supersedeCurrentChatPush(pushSuperseded, resultIndex);
+          supersedeCurrentChatPush(pushSuperseded, resultIndex, providerName);
         }
         pushAddressed.push(isAddressedTurn(keep, assistantName));
         pushSuperseded.push(false);
