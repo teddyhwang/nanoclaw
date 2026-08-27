@@ -50,6 +50,8 @@ jobs:
         include: ${{ fromJSON(needs.discover.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
+      - name: Configure canonical registry remote
+        run: git remote add registry https://github.com/nanocoai/nanoclaw.git
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -62,6 +64,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Apply and test ${{ matrix.skill }}
         env:
+          NANOCLAW_REGISTRY_REMOTE: registry
           REGISTRY_CHANNELS_SHA: ${{ needs.discover.outputs.channels }}
           REGISTRY_PROVIDERS_SHA: ${{ needs.discover.outputs.providers }}
         run: pnpm exec tsx scripts/test-registry-skills.ts "${{ matrix.skill }}"
