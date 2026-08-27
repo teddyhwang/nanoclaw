@@ -31,9 +31,14 @@ jobs:
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
       - id: refs
         run: |
-          git fetch origin channels providers
-          echo "channels=$(git rev-parse origin/channels)" >> "$GITHUB_OUTPUT"
-          echo "providers=$(git rev-parse origin/providers)" >> "$GITHUB_OUTPUT"
+          # Forks normally carry only main. Registry skills still compose against
+          # NanoClaw's canonical channel/provider branches, so fetch those refs
+          # directly instead of assuming this fork mirrors them on origin.
+          git fetch --no-tags https://github.com/nanocoai/nanoclaw.git \
+            +refs/heads/channels:refs/remotes/registry/channels \
+            +refs/heads/providers:refs/remotes/registry/providers
+          echo "channels=$(git rev-parse refs/remotes/registry/channels)" >> "$GITHUB_OUTPUT"
+          echo "providers=$(git rev-parse refs/remotes/registry/providers)" >> "$GITHUB_OUTPUT"
 
   test:
     needs: discover
