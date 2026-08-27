@@ -1,14 +1,8 @@
 /**
- * Outbound message delivery.
- * Polls session outbound DBs for undelivered messages, delivers through channel adapters.
- *
- * Two-DB architecture:
- *   - Reads messages_out from outbound.db (container-owned, opened read-only)
- *   - Tracks delivery in inbound.db's `delivered` table (host-owned)
- *   - Never writes to outbound.db — preserves single-writer-per-file invariant
+ * Poll outbound mailboxes and deliver undelivered messages through channel adapters.
+ * SQLite reads runner-owned outbound state read-only and records delivery in
+ * host-owned inbound state; other implementations preserve that ownership.
  */
-import type Database from 'better-sqlite3';
-
 import {
   getRunningSessions,
   getActiveSessions,
@@ -21,23 +15,22 @@ import { getAgentGroup } from './db/agent-groups.js';
 import { configFromDb } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { getDb, hasTable } from './db/connection.js';
-import { getMessagingGroup, getMessagingGroupByPlatform } from './db/messaging-groups.js';
 import {
-  getDueOutboundMessages,
-  getDeliveredIds,
-  markDelivered,
-  markDeliveryFailed,
-  migrateDeliveredTable,
-} from './db/session-db.js';
+  getMessagingGroup,
+  getMessagingGroupByPlatform,
+  getMessagingGroupForOwnDestination,
+} from './db/messaging-groups.js';
 import { runGuarded, type DeliveryGuardSpec, type GuardedDeliveryHandler } from './delivery-guard.js';
 import { emitEngineEvent } from './engine/events.js';
 import { isUnguarded, type Unguarded } from './guard/index.js';
+import { fanOutboundMessage } from './modules/cross-session-context/index.js';
 import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
-import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';
+import { clearOutbox, readOutboxFiles, withExistingMailboxSession } from './session-manager.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
 import type { OutboundFile } from './channels/adapter.js';
 import type { PendingApproval, Session } from './types.js';
+import type { OutboundMessage } from './mailbox/index.js';
 
 const ACTIVE_POLL_MS = 1000;
 const SWEEP_POLL_MS = 60_000;
@@ -69,31 +62,26 @@ export interface ChannelDeliveryAdapter {
     kind: string,
     content: string,
     files?: OutboundFile[],
+    /** Turn-authoritative triggering inbound message id, when present. */
     inReplyTo?: string | null,
-    /**
-     * Per-session assistant name from the agent group's container.json.
-     * Adapters that prefix outbound text (WhatsApp shared-number) use this
-     * over the host-wide `ASSISTANT_NAME` env so each group can brand
-     * itself independently. Optional — undefined falls back to the env.
-     */
+    /** Per-session assistant brand from the agent group's container config. */
     assistantName?: string,
-    /**
-     * Separator between the assistant name and the message body. Defaults
-     * to `": "` when undefined. Operator-controlled per group.
-     */
+    /** Separator used by shared-number adapters when prefixing the brand. */
     assistantPrefixSeparator?: string,
-    /**
-     * Per-agent-group suppress-link-previews flag (Discord SUPPRESS_EMBEDS).
-     * Read from container.json `suppressEmbeds` (mirrors cybertron's
-     * workspace_agent_groups.suppress_embeds). Optional — adapters whose
-     * platform has no embed concept ignore it.
-     */
+    /** Per-agent-group link-preview suppression. */
     suppressEmbeds?: boolean,
     /** Delivering adapter instance (defaults to channelType downstream).
      *  Host-internal only — containers never see instance. */
     instance?: string,
   ): Promise<string | undefined>;
-  setTyping?(channelType: string, platformId: string, threadId: string | null, instance?: string): Promise<void>;
+  setTyping?(
+    channelType: string,
+    platformId: string,
+    threadId: string | null,
+    instance?: string,
+    status?: string,
+    statusKind?: 'auto' | 'agent',
+  ): Promise<void>;
 }
 
 let deliveryAdapter: ChannelDeliveryAdapter | null = null;
@@ -143,21 +131,21 @@ export function setDeliveryAdapter(adapter: ChannelDeliveryAdapter): void {
 export function startActiveDeliveryPoll(): void {
   if (activePolling) return;
   activePolling = true;
-  pollActive();
+  void pollActive();
 }
 
 /** Start the sweep poll loop (~60s). */
 export function startSweepDeliveryPoll(): void {
   if (sweepPolling) return;
   sweepPolling = true;
-  pollSweep();
+  void pollSweep();
 }
 
 async function pollActive(): Promise<void> {
   if (!activePolling) return;
 
   try {
-    const sessions = getRunningSessions();
+    const sessions = await getRunningSessions();
     for (const session of sessions) {
       await deliverSessionMessages(session);
     }
@@ -165,14 +153,14 @@ async function pollActive(): Promise<void> {
     log.error('Active delivery poll error', { err });
   }
 
-  setTimeout(pollActive, ACTIVE_POLL_MS);
+  setTimeout(() => void pollActive(), ACTIVE_POLL_MS);
 }
 
 async function pollSweep(): Promise<void> {
   if (!sweepPolling) return;
 
   try {
-    const sessions = getActiveSessions();
+    const sessions = await getActiveSessions();
     for (const session of sessions) {
       await deliverSessionMessages(session);
     }
@@ -180,7 +168,7 @@ async function pollSweep(): Promise<void> {
     log.error('Sweep delivery poll error', { err });
   }
 
-  setTimeout(pollSweep, SWEEP_POLL_MS);
+  setTimeout(() => void pollSweep(), SWEEP_POLL_MS);
 }
 
 export async function deliverSessionMessages(session: Session): Promise<void> {
@@ -197,131 +185,145 @@ export async function deliverSessionMessages(session: Session): Promise<void> {
 }
 
 async function drainSession(session: Session): Promise<void> {
-  const agentGroup = getAgentGroup(session.agent_group_id);
+  const agentGroup = await getAgentGroup(session.agent_group_id);
   if (!agentGroup) return;
 
-  let outDb: Database.Database;
-  let inDb: Database.Database;
+  // Read the queue in one short mailbox session, then deliver with NO
+  // session held open: delivery handlers may open this same mailbox key.
+  let delivered: Set<string>;
+  let pending: OutboundMessage[];
   try {
-    outDb = openOutboundDb(agentGroup.id, session.id);
-    inDb = openInboundDb(agentGroup.id, session.id);
-  } catch {
-    return; // DBs might not exist yet
+    const existing = await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) => {
+      const delivered = mailbox.getDeliveredIds();
+      return {
+        delivered,
+        pending: mailbox.getDueMessages(delivered).filter((candidate) => !delivered.has(candidate.id)),
+      };
+    });
+    if (!existing) return;
+    ({ delivered, pending } = existing);
+  } catch (err) {
+    // A runner-owned SQLite mailbox can briefly need rollback recovery while
+    // the host is opening it read-only. That SQLITE_READONLY*/SQLITE_BUSY*
+    // family is a retry-next-poll soft skip; every other mailbox fault is real.
+    const code = (err as { code?: string } | null)?.code ?? '';
+    if (code.startsWith('SQLITE_READONLY') || code.startsWith('SQLITE_BUSY')) {
+      log.debug('Session mailbox busy mid-journal, will retry next poll', {
+        agentGroupId: agentGroup.id,
+        sessionId: session.id,
+        code,
+      });
+    } else {
+      log.error('Session mailbox delivery failed', {
+        agentGroupId: agentGroup.id,
+        sessionId: session.id,
+        err,
+      });
+    }
+    return;
   }
 
-  try {
-    // Read all due messages from outbound.db (read-only).
-    //
-    // Transient-journal guard: the host opens outbound.db `{ readonly: true }`
-    // but the container writes it in journal_mode=DELETE. When a container is
-    // torn down mid-write (idle-timeout SIGKILL, fleet restart, claim-stuck
-    // recovery) outbound.db can momentarily carry a hot rollback journal.
-    // SQLite must roll that journal back to produce a consistent read, and
-    // rollback is a *write* — which a readonly handle refuses with
-    // SQLITE_READONLY ("attempt to write a readonly database"). SQLITE_BUSY
-    // is the sibling case (writer mid-commit). Both are expected, self-
-    // healing, and lose nothing: the throw skips this session for one tick,
-    // deliveryAttempts is untouched (it only increments in the per-message
-    // catch below, which we never reach), and the next ~25s poll retries
-    // once the journal clears. Logging it at ERROR with a full stack on
-    // every fleet restart only pollutes the error log and trains the eye
-    // to ignore real failures (it cost a full mis-triage during the
-    // 2026-05-18 RSS investigation). Treat it as a debug-level soft skip;
-    // let any other error propagate to the existing ERROR path unchanged.
-    let allDue;
+  for (const hook of batchPreviewHooks) {
     try {
-      allDue = getDueOutboundMessages(outDb);
+      await hook(
+        pending.map(({ kind, content }) => ({ kind, content })),
+        session,
+      );
     } catch (err) {
-      // Match the whole SQLITE_READONLY* / SQLITE_BUSY* extended-code
-      // family by prefix. The production teardown race surfaces as
-      // SQLITE_READONLY_ROLLBACK (readonly handle can't replay the hot
-      // journal) — matching only the bare 'SQLITE_READONLY' would miss it
-      // and re-introduce the exact ERROR-log spam this guards against.
-      const code = (err as { code?: string } | null)?.code ?? '';
-      if (code.startsWith('SQLITE_READONLY') || code.startsWith('SQLITE_BUSY')) {
-        log.debug('outbound.db busy mid-journal (container teardown), will retry next poll', {
-          sessionId: session.id,
-          agentGroupId: session.agent_group_id,
-          code,
-        });
-        return;
-      }
-      throw err;
+      log.warn('Delivery batch-preview hook failed', { sessionId: session.id, err });
     }
-    if (allDue.length === 0) return;
+  }
 
-    // Filter out already-delivered messages using inbound.db's delivered table
-    const delivered = getDeliveredIds(inDb);
-    const undelivered = allDue.filter((m) => !delivered.has(m.id));
-    if (undelivered.length === 0) return;
+  for (const msg of pending) {
+    try {
+      // Stop a concurrent typing tick before the channel HTTP request lands.
+      if (msg.kind !== 'system' && msg.channelType !== 'agent') {
+        pauseTypingRefreshAfterDelivery(session.id);
+      }
 
-    // Ensure platform_message_id column exists (migration for existing sessions)
-    migrateDeliveredTable(inDb);
+      const platformMsgId = await deliverMessage(msg, session);
+      const marked = await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) => {
+        mailbox.markDelivered(msg.id, platformMsgId ?? null);
+        return true;
+      });
+      if (marked === undefined) throw new Error(`mailbox disappeared before marking ${msg.id} delivered`);
 
-    for (const msg of undelivered) {
-      try {
-        // Pause the typing refresh *before* dispatching to the channel so
-        // any tick firing concurrently with deliverMessage's HTTP call
-        // skips its own setTyping. Without this, a tick that entered
-        // triggerTyping ~1s before delivery can land at Discord after
-        // the message, leaving the indicator visible for several
-        // seconds. Same guard as the post-success call, but earlier.
-        // Skip for internal traffic — same reasoning as below.
-        if (msg.kind !== 'system' && msg.channel_type !== 'agent') {
-          pauseTypingRefreshAfterDelivery(session.id);
+      const firstDelivery = delivered.size === 0;
+      delivered.add(msg.id);
+      deliveryAttempts.delete(msg.id);
+      emitEngineEvent('outbound.delivered', {
+        sessionId: session.id,
+        agentGroupId: session.agent_group_id,
+        channelType: msg.channelType ?? '',
+        platformId: msg.platformId ?? '',
+      });
+
+      if (msg.kind !== 'system' && msg.channelType !== 'agent') {
+        pauseTypingRefreshAfterDelivery(session.id);
+        if (msg.kind !== 'task_log') {
+          await fanOutboundMessage(
+            {
+              id: msg.id,
+              kind: msg.kind,
+              platform_id: msg.platformId,
+              channel_type: msg.channelType,
+              content: msg.content,
+            },
+            session,
+            agentGroup,
+          );
+          for (const hook of postDeliveryHooks) {
+            try {
+              await hook(msg, session, { firstDelivery });
+            } catch (err) {
+              log.warn('Post-delivery hook failed', { messageId: msg.id, sessionId: session.id, err });
+            }
+          }
         }
-        const platformMsgId = await deliverMessage(msg, session, inDb);
-        markDelivered(inDb, msg.id, platformMsgId ?? null);
-        deliveryAttempts.delete(msg.id);
-        emitEngineEvent('outbound.delivered', {
+      }
+    } catch (err) {
+      const attempts = (deliveryAttempts.get(msg.id) ?? 0) + 1;
+      deliveryAttempts.set(msg.id, attempts);
+      if (attempts >= MAX_DELIVERY_ATTEMPTS) {
+        log.error('Message delivery failed permanently, giving up', {
+          messageId: msg.id,
           sessionId: session.id,
-          agentGroupId: session.agent_group_id,
-          channelType: msg.channel_type ?? '',
-          platformId: msg.platform_id ?? '',
+          attempts,
+          err,
         });
-
-        // Pause the typing indicator after a real user-facing message
-        // lands on the user's screen, so the client has time to visually
-        // clear the indicator before the next heartbeat tick brings it
-        // back. Skip the pause for internal traffic (system actions,
-        // agent-to-agent routing) — the user doesn't see those and
-        // shouldn't get a gap in their typing indicator for them.
-        if (msg.kind !== 'system' && msg.channel_type !== 'agent') {
-          pauseTypingRefreshAfterDelivery(session.id);
-        }
-      } catch (err) {
-        const attempts = (deliveryAttempts.get(msg.id) ?? 0) + 1;
-        deliveryAttempts.set(msg.id, attempts);
-        if (attempts >= MAX_DELIVERY_ATTEMPTS) {
-          log.error('Message delivery failed permanently, giving up', {
-            messageId: msg.id,
-            sessionId: session.id,
-            attempts,
-            err,
+        try {
+          const marked = await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) => {
+            mailbox.markDeliveryFailed(msg.id);
+            return true;
           });
-          markDeliveryFailed(inDb, msg.id);
+          if (marked === undefined) {
+            throw new Error(`mailbox disappeared before marking ${msg.id} failed`, { cause: err });
+          }
           deliveryAttempts.delete(msg.id);
           emitEngineEvent('outbound.failed', {
             sessionId: session.id,
             agentGroupId: session.agent_group_id,
-            channelType: msg.channel_type ?? '',
-            platformId: msg.platform_id ?? '',
+            channelType: msg.channelType ?? '',
+            platformId: msg.platformId ?? '',
             err,
           });
-        } else {
-          log.warn('Message delivery failed, will retry', {
+        } catch (markErr) {
+          log.error('Failed to record permanent delivery failure', {
             messageId: msg.id,
             sessionId: session.id,
-            attempt: attempts,
-            maxAttempts: MAX_DELIVERY_ATTEMPTS,
-            err,
+            err: markErr,
           });
         }
+      } else {
+        log.warn('Message delivery failed, will retry', {
+          messageId: msg.id,
+          sessionId: session.id,
+          attempt: attempts,
+          maxAttempts: MAX_DELIVERY_ATTEMPTS,
+          err,
+        });
       }
     }
-  } finally {
-    outDb.close();
-    inDb.close();
   }
 }
 
@@ -329,14 +331,13 @@ async function deliverMessage(
   msg: {
     id: string;
     kind: string;
-    platform_id: string | null;
-    channel_type: string | null;
-    thread_id: string | null;
+    platformId: string | null;
+    channelType: string | null;
+    threadId: string | null;
     content: string;
-    in_reply_to: string | null;
+    inReplyTo: string | null;
   },
   session: Session,
-  inDb: Database.Database,
 ): Promise<string | undefined> {
   if (!deliveryAdapter) {
     log.warn('No delivery adapter configured, dropping message', { id: msg.id });
@@ -347,7 +348,7 @@ async function deliverMessage(
 
   // System actions — handle internally (cli_request, etc.)
   if (msg.kind === 'system') {
-    await handleSystemAction(content, session, inDb);
+    await handleSystemAction(content, session);
     return;
   }
 
@@ -359,7 +360,7 @@ async function deliverMessage(
     if (session.messaging_group_id === null && isTaskThread(session.thread_id) && session.thread_id) {
       const series = session.thread_id.slice(`${TASKS_SYSTEM_THREAD_ID}:`.length);
       try {
-        appendRunLog(session.agent_group_id, series, typeof content.text === 'string' ? content.text : '');
+        await appendRunLog(session.agent_group_id, series, typeof content.text === 'string' ? content.text : '');
       } catch (err) {
         log.warn('Failed to append task run log', { id: msg.id, sessionId: session.id, err });
       }
@@ -373,12 +374,20 @@ async function deliverMessage(
   // Guarded by the channel_type check. If the module isn't installed the
   // `agent_destinations` table won't exist and `routeAgentMessage`'s permission
   // check will throw, which falls into the normal retry → mark-failed path.
-  if (msg.channel_type === 'agent') {
-    if (!hasTable(getDb(), 'agent_destinations')) {
+  if (msg.channelType === 'agent') {
+    if (!(await hasTable(getDb(), 'agent_destinations'))) {
       throw new Error(`agent-to-agent module not installed — cannot route message ${msg.id}`);
     }
     const { routeAgentMessage } = await import('./modules/agent-to-agent/agent-route.js');
-    await routeAgentMessage(msg, session);
+    await routeAgentMessage(
+      {
+        id: msg.id,
+        platform_id: msg.platformId,
+        content: msg.content,
+        in_reply_to: msg.inReplyTo,
+      },
+      session,
+    );
     return;
   }
 
@@ -398,72 +407,64 @@ async function deliverMessage(
   // path in deliverSessionMessages and eventually marks the message as failed
   // (instead of marking it delivered when nothing was actually delivered,
   // which was the pre-refactor bug).
-  // Resolve the messaging group ORIGIN-SESSION-FIRST: when the message
-  // targets the session's own chat address, the origin row wins even if
-  // sibling instances share the same (channel_type, platform_id) — so the
-  // reply goes out through the instance the message came in on. Otherwise
-  // fall back to the by-platform lookup (default-instance-first).
-  const originMg = session.messaging_group_id ? getMessagingGroup(session.messaging_group_id) : undefined;
-  const deliveryMessagingGroup =
-    msg.channel_type && msg.platform_id
-      ? originMg && originMg.channel_type === msg.channel_type && originMg.platform_id === msg.platform_id
-        ? originMg
-        : getMessagingGroupByPlatform(msg.channel_type, msg.platform_id)
-      : undefined;
   let deliverInstance: string | undefined;
-  if (msg.channel_type && msg.platform_id) {
-    if (!deliveryMessagingGroup) {
-      throw new Error(`unknown messaging group for ${msg.channel_type}/${msg.platform_id} (message ${msg.id})`);
+  if (msg.channelType && msg.platformId) {
+    // Resolve origin first, then this agent's destination-owned instance,
+    // then the platform fallback. Every central lookup is awaited.
+    const originMg = session.messaging_group_id ? await getMessagingGroup(session.messaging_group_id) : undefined;
+    const mg =
+      originMg && originMg.channel_type === msg.channelType && originMg.platform_id === msg.platformId
+        ? originMg
+        : ((await getMessagingGroupForOwnDestination(session.agent_group_id, msg.channelType, msg.platformId)) ??
+          (await getMessagingGroupByPlatform(msg.channelType, msg.platformId)));
+    if (!mg) {
+      throw new Error(`unknown messaging group for ${msg.channelType}/${msg.platformId} (message ${msg.id})`);
     }
-    const isOriginChat = session.messaging_group_id === deliveryMessagingGroup.id;
-    // Guarded: without the agent-to-agent module, `agent_destinations`
-    // doesn't exist and we permit all non-origin channel sends (the
-    // origin-chat case is always allowed regardless). Inlined SQL instead
-    // of importing `hasDestination` so core doesn't depend on the module.
-    if (!isOriginChat && hasTable(getDb(), 'agent_destinations')) {
-      const row = getDb()
-        .prepare(
-          'SELECT local_name FROM agent_destinations WHERE agent_group_id = ? AND target_type = ? AND target_id = ? LIMIT 1',
-        )
-        .get(session.agent_group_id, 'channel', deliveryMessagingGroup.id) as { local_name: string } | undefined;
+    if (mg.detached_at) {
+      throw new Error(
+        `messaging group ${mg.id} is detached (bot removed from ${mg.channel_type}/${mg.platform_id} at ${mg.detached_at})`,
+      );
+    }
+
+    const isOriginChat = session.messaging_group_id === mg.id;
+    if (!isOriginChat && (await hasTable(getDb(), 'agent_destinations'))) {
+      const row = await getDb().get<{ local_name: string }>(
+        'SELECT local_name FROM agent_destinations WHERE agent_group_id = ? AND target_type = ? AND target_id = ? LIMIT 1',
+        session.agent_group_id,
+        'channel',
+        mg.id,
+      );
       if (!row) {
         throw new Error(
-          `unauthorized channel destination: ${session.agent_group_id} cannot send to ${deliveryMessagingGroup.channel_type}/${deliveryMessagingGroup.platform_id}`,
+          `unauthorized channel destination: ${session.agent_group_id} cannot send to ${mg.channel_type}/${mg.platform_id}`,
         );
       }
-      // Static row passed. Now run any registered host guards — these
-      // re-validate dynamic claims (e.g. Optimus's `shared:*` rows
-      // re-checking membership at send-time, since the static row is a
-      // session-creation snapshot and membership can flip mid-session).
-      // Guards run for every channel send so non-prefixed hosts can also
-      // register policy if they want; pure no-op cost when none are
-      // registered. Hosts that only care about specific local_name
-      // patterns gate themselves inside the guard fn.
+
       const { runDestinationGuards } = await import('./engine/destination-guards.js');
       const verdict = await runDestinationGuards({
         agentGroupId: session.agent_group_id,
         sessionId: session.id,
-        messagingGroup: deliveryMessagingGroup,
+        messagingGroup: mg,
         destination: {
           localName: row.local_name,
           targetType: 'channel',
-          targetId: deliveryMessagingGroup.id,
+          targetId: mg.id,
         },
       });
       if (!verdict.allowed) {
         throw new Error(
-          `destination guard rejected: ${session.agent_group_id} → ${deliveryMessagingGroup.channel_type}/${deliveryMessagingGroup.platform_id} (${row.local_name}) — ${verdict.reason}`,
+          `destination guard rejected: ${session.agent_group_id} → ${mg.channel_type}/${mg.platform_id} (${row.local_name}) — ${verdict.reason}`,
         );
       }
     }
-    deliverInstance = deliveryMessagingGroup.instance;
+    deliverInstance = mg.instance;
   }
 
   // Track pending questions for ask_user_question flow.
   // Guarded: without the interactive module, `pending_questions` doesn't
   // exist and we skip persistence — the card still delivers to the user,
   // but the response path has nowhere to land and will log unclaimed.
-  if (content.type === 'ask_question' && content.questionId && hasTable(getDb(), 'pending_questions')) {
+  if (content.type === 'ask_question' && content.questionId && (await hasTable(getDb(), 'pending_questions'))) {
     const title = content.title as string | undefined;
     const rawOptions = content.options as unknown;
     if (!title || !Array.isArray(rawOptions)) {
@@ -471,13 +472,13 @@ async function deliverMessage(
         questionId: content.questionId,
       });
     } else {
-      const inserted = createPendingQuestion({
+      const inserted = await createPendingQuestion({
         question_id: content.questionId,
         session_id: session.id,
         message_out_id: msg.id,
-        platform_id: msg.platform_id,
-        channel_type: msg.channel_type,
-        thread_id: msg.thread_id,
+        platform_id: msg.platformId,
+        channel_type: msg.channelType,
+        thread_id: msg.threadId,
         title,
         options: normalizeOptions(rawOptions as never),
         created_at: new Date().toISOString(),
@@ -489,7 +490,7 @@ async function deliverMessage(
   }
 
   // Channel delivery
-  if (!msg.channel_type || !msg.platform_id) {
+  if (!msg.channelType || !msg.platformId) {
     log.warn('Message missing routing fields', { id: msg.id });
     return;
   }
@@ -502,41 +503,32 @@ async function deliverMessage(
       ? readOutboxFiles(session.agent_group_id, session.id, msg.id, content.files as string[])
       : undefined;
 
-  // `in_reply_to` is the runner's turn-authoritative triggering message.
-  // Preserve it for every engage mode: how a wiring decides to wake must not
-  // change whether readers can see which inbound the agent is answering.
-  // Task and accumulate-only turns publish null upstream, so they stay flat.
-
-  // Resolve per-session assistant brand from the agent group's
-  // container.json. Adapters that prefix outbound text (WhatsApp
-  // shared-number) use this in place of the host-wide ASSISTANT_NAME so
-  // each group brands itself independently.
   let assistantName: string | undefined;
   let assistantPrefixSeparator: string | undefined;
   let suppressEmbeds: boolean | undefined;
   try {
-    const agentGroup = getAgentGroup(session.agent_group_id);
-    if (agentGroup) {
-      const row = getContainerConfig(agentGroup.id);
+    const currentAgentGroup = await getAgentGroup(session.agent_group_id);
+    if (currentAgentGroup) {
+      const row = await getContainerConfig(currentAgentGroup.id);
       if (row) {
-        const cfg = configFromDb(row, agentGroup);
+        const cfg = configFromDb(row, currentAgentGroup);
         assistantName = cfg.assistantName;
         assistantPrefixSeparator = cfg.assistantPrefixSeparator;
         suppressEmbeds = cfg.suppressEmbeds;
       }
     }
   } catch (err) {
-    log.debug('Failed to resolve per-session assistantName', { err, sessionId: session.id });
+    log.debug('Failed to resolve per-session assistant brand', { err, sessionId: session.id });
   }
 
   const platformMsgId = await deliveryAdapter.deliver(
-    msg.channel_type,
-    msg.platform_id,
-    msg.thread_id,
+    msg.channelType,
+    msg.platformId,
+    msg.threadId,
     msg.kind,
     msg.content,
     files,
-    msg.in_reply_to,
+    msg.inReplyTo,
     assistantName,
     assistantPrefixSeparator,
     suppressEmbeds,
@@ -544,8 +536,8 @@ async function deliverMessage(
   );
   log.info('Message delivered', {
     id: msg.id,
-    channelType: msg.channel_type,
-    platformId: msg.platform_id,
+    channelType: msg.channelType,
+    platformId: msg.platformId,
     platformMsgId,
     fileCount: files?.length,
   });
@@ -553,6 +545,37 @@ async function deliverMessage(
   clearOutbox(session.agent_group_id, session.id, msg.id);
 
   return platformMsgId;
+}
+
+/**
+ * Post-delivery hooks.
+ *
+ * Registered modules observe each successfully delivered user-facing
+ * message (non-system, non-agent, non-task_log) right after it is marked
+ * delivered, with a first-delivery flag. This gives channel modules a
+ * supported seam for one-time follow-through on a session's first outbound
+ * message (e.g. onboarding affordances) without hardcoding platform
+ * behavior in the delivery core.
+ *
+ * Hooks are decoration only: each invocation is wrapped in try/catch, so a
+ * failing hook can never affect delivery, markDelivered, or retries.
+ */
+export interface PostDeliveryInfo {
+  /**
+   * True when this is the first message ever marked delivered in this
+   * session — exactly one row per session carries it. Every delivered row
+   * counts toward the flag (including system rows the hook itself never
+   * fires for); the hook only ever observes user-facing rows.
+   */
+  firstDelivery: boolean;
+}
+
+export type PostDeliveryHook = (msg: OutboundMessage, session: Session, info: PostDeliveryInfo) => void | Promise<void>;
+
+const postDeliveryHooks: PostDeliveryHook[] = [];
+
+export function registerPostDeliveryHook(hook: PostDeliveryHook): void {
+  postDeliveryHooks.push(hook);
 }
 
 /**
@@ -573,11 +596,13 @@ async function deliverMessage(
  * not representable, so the decision to run unguarded is visible, and
  * justified, at the registration site.
  */
-export type DeliveryActionHandler = (
-  content: Record<string, unknown>,
-  session: Session,
-  inDb: Database.Database,
-) => Promise<void>;
+/**
+ * Handlers run with NO mailbox session held — they (and anything they call,
+ * e.g. writeSessionMessage or dispatch) open their own sessions. Never
+ * accept or capture an open MailboxSession here: implementations may
+ * serialize session() per key, and a held session would deadlock them.
+ */
+export type DeliveryActionHandler = (content: Record<string, unknown>, session: Session) => Promise<void>;
 
 type DeliveryEntry =
   | { guard: Unguarded; handler: DeliveryActionHandler }
@@ -594,6 +619,16 @@ function getDeliveryActions(): Map<string, DeliveryEntry> {
 
 function isUnguardedEntry(entry: DeliveryEntry): entry is Extract<DeliveryEntry, { guard: Unguarded }> {
   return isUnguarded(entry.guard);
+}
+
+/** See the batch-preview invocation in the delivery poll for semantics. */
+type DeliveryBatchPreviewHook = (
+  batch: Array<{ kind: string; content: string }>,
+  session: Session,
+) => void | Promise<void>;
+const batchPreviewHooks: DeliveryBatchPreviewHook[] = [];
+export function registerDeliveryBatchPreview(hook: DeliveryBatchPreviewHook): void {
+  batchPreviewHooks.push(hook);
 }
 
 export function registerDeliveryAction(action: string, handler: DeliveryActionHandler, unguardedDecl: Unguarded): void;
@@ -657,17 +692,13 @@ export function getDeliveryAction(action: string): DeliveryActionHandler | undef
  * These are written to messages_out because the container can't write to inbound.db.
  * The host applies them to inbound.db here.
  */
-async function handleSystemAction(
-  content: Record<string, unknown>,
-  session: Session,
-  inDb: Database.Database,
-): Promise<void> {
+async function handleSystemAction(content: Record<string, unknown>, session: Session): Promise<void> {
   const action = content.action as string;
   log.info('System action from agent', { sessionId: session.id, action });
 
   const registered = getDeliveryAction(action);
   if (registered) {
-    await registered(content, session, inDb);
+    await registered(content, session);
     return;
   }
 

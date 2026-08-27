@@ -5,8 +5,9 @@ import path from 'path';
 import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 
 import { isAwaitingSensitiveConfirmation, noteToolResult } from '../confirmation-gate-state.js';
-import { clearContainerToolInFlight, setContainerToolInFlight, touchHeartbeat } from '../db/connection.js';
+import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/container-state.js';
 import { clearContinuationStartedAt, getContinuationStartedAt } from '../db/session-state.js';
+import { touchHeartbeat } from '../heartbeat.js';
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
 import { resolvePressureThresholdTokens } from '../pressure-rotation.js';
 import { evaluateRotation } from '../session-rotation.js';
@@ -29,7 +30,6 @@ function log(msg: string): void {
 }
 
 const MESSAGE_BLOCK_RE = /<message\s+[^>]*\bto="[^"]+"[^>]*>[\s\S]*?<\/message>/;
-const INTERNAL_BLOCK_RE = /<internal>[\s\S]*?<\/internal>/g;
 
 export function extractAssistantText(message: unknown): string | null {
   const maybeMessage = message as {
@@ -49,21 +49,10 @@ export function extractAssistantText(message: unknown): string | null {
     })
     .filter((text): text is string => !!text);
 
-  return parts.length > 0 ? parts.join('\n') : null;
-}
-
-export function selectResultTextForDelivery(
-  resultText: string | null,
-  lastAssistantTextWithMessage: string | null,
-): string | null {
-  if (resultText && MESSAGE_BLOCK_RE.test(resultText)) return resultText;
-
-  const publicResultText = (resultText ?? '').replace(INTERNAL_BLOCK_RE, '').trim();
-  if (!publicResultText && lastAssistantTextWithMessage) {
-    return lastAssistantTextWithMessage;
-  }
-
-  return resultText;
+  // The SDK result reports an assistant message's text blocks as adjacent
+  // output. Join with no invented separator so streamed text is byte-for-byte
+  // aligned with that result-door containment premise.
+  return parts.length > 0 ? parts.join('') : null;
 }
 
 export function isRetryableClaudeApiRateLimitResult(resultText: string | null): boolean {
@@ -77,13 +66,6 @@ export function isRetryableClaudeApiRateLimitResult(resultText: string | null): 
     text.includes('exceeded your current quota') ||
     text.includes('quota exceeded')
   );
-}
-
-export function shouldDeliverAssistantTextForRetryableResult(
-  resultText: string | null,
-  lastAssistantTextWithMessage: string | null,
-): boolean {
-  return Boolean(lastAssistantTextWithMessage && isRetryableClaudeApiRateLimitResult(resultText));
 }
 
 export interface SdkRateLimitInfo {
@@ -684,6 +666,21 @@ export function contextTokensFromUsage(usage: ApiUsageShape | undefined): number
 
 export class ClaudeProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = true;
+  /**
+   * Static capability, not runtime state: this provider yields a `text`
+   * event for every assistant message that carries non-empty text (see the
+   * assistant-message branch in query() — one event per message, text blocks
+   * joined). The SDK's result text repeats the final assistant message's
+   * text, so the final result is expected to repeat an already-streamed
+   * segment. NOTE this containment is an SDK premise, not something this
+   * provider enforces: the result event's text is taken verbatim from the
+   * SDK's own `result` / `errors[]` fields, which the provider cannot prove
+   * equal to streamed content. The poll-loop keys its one-door mid-turn
+   * delivery on this flag; the result door never delivers content — if the
+   * streaming door missed everything (premise violation), the poll-loop
+   * fires the wrap-nudge so the model re-sends through the mid-turn door.
+   */
+  readonly emitsMidTurnText = true;
 
   private assistantName?: string;
   private mcpServers: Record<string, McpServerConfig>;
@@ -885,7 +882,7 @@ export class ClaudeProvider implements AgentProvider {
 
     async function* translateEvents(): AsyncGenerator<ProviderEvent> {
       let messageCount = 0;
-      let lastAssistantTextWithMessage: string | null = null;
+      let assistantTextThisTurn = '';
       // Live context size, refreshed from each assistant message's API
       // usage block. The LAST assistant call's prompt+output tokens are
       // the thread's current context footprint — attached to `result`
@@ -905,9 +902,17 @@ export class ClaudeProvider implements AgentProvider {
           const usage = (message as { message?: { usage?: ApiUsageShape } }).message?.usage;
           const contextTokens = contextTokensFromUsage(usage);
           if (contextTokens !== undefined) lastContextTokens = contextTokens;
+
+          // ONE text event per assistant message, with adjacent text blocks
+          // joined in content order. The poll-loop assembles blocks that span
+          // assistant messages and owns harness/internal stripping and echo
+          // suppression; the provider only preserves the SDK stream exactly.
           const assistantText = extractAssistantText(message);
-          if (assistantText && MESSAGE_BLOCK_RE.test(assistantText)) {
-            lastAssistantTextWithMessage = assistantText;
+          if (assistantText) {
+            // Buffer only for the legacy rate-limit outcome decision below;
+            // delivery remains event-by-event through the poll-loop's assembler.
+            assistantTextThisTurn += assistantText;
+            yield { type: 'text', text: assistantText };
           }
         } else if (message.type === 'result') {
           // `result` text exists only on subtype:"success"; error subtypes
@@ -916,13 +921,18 @@ export class ClaudeProvider implements AgentProvider {
           // billing/quota notice to the user rather than dropping the turn.
           const m = message as { result?: string; is_error?: boolean; errors?: string[] };
           const rawText = m.result ?? (m.errors && m.errors.length > 0 ? m.errors.join('\n') : null);
-          if (shouldDeliverAssistantTextForRetryableResult(rawText, lastAssistantTextWithMessage)) {
-            const text = lastAssistantTextWithMessage;
-            lastAssistantTextWithMessage = null;
-            yield { type: 'result', text, tokensUsed: lastContextTokens };
-            continue;
-          }
+          const hadAssistantMessageBlock = MESSAGE_BLOCK_RE.test(assistantTextThisTurn);
+          assistantTextThisTurn = '';
           if (isRetryableClaudeApiRateLimitResult(rawText)) {
+            if (hadAssistantMessageBlock) {
+              // Optimus historically kept an earlier wrapped answer when the
+              // SDK ended on a rate-limit string. That answer has now already
+              // streamed through the one content door, so emit only an empty
+              // completion signal here: the turn completes without replaying
+              // the block at the result door or misclassifying it as failed.
+              yield { type: 'result', text: null, tokensUsed: lastContextTokens };
+              continue;
+            }
             yield {
               type: 'error',
               message: rawText ?? 'Claude API rate limit',
@@ -931,9 +941,10 @@ export class ClaudeProvider implements AgentProvider {
             };
             continue;
           }
-          const text = selectResultTextForDelivery(rawText, lastAssistantTextWithMessage);
-          lastAssistantTextWithMessage = null;
-          yield { type: 'result', text, tokensUsed: lastContextTokens, isError: m.is_error === true };
+          // Assistant text has already gone through the single mid-turn door.
+          // Keep the SDK result verbatim for status/error accounting, but never
+          // replay an earlier assistant <message> from this result branch.
+          yield { type: 'result', text: rawText, tokensUsed: lastContextTokens, isError: m.is_error === true };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };
         } else if (message.type === 'rate_limit_event') {

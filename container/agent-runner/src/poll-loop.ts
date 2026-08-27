@@ -15,14 +15,16 @@ import {
   countChatMessagesSince,
   hasChatMessageTextSince,
   hasChatMessageToDestinationSince,
-  hasIdenticalSend,
   getReplyTargetMessageIdBySeq,
   getRoutingBySeq,
+  getUndeliveredMessages,
   outboundDbNow,
   writeMessageOut,
 } from './db/messages-out.js';
 import { writeTaskFire, type TaskFireDispatch } from './db/task-fires.js';
-import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
+import { clearStaleProcessingAcks } from './db/container-state.js';
+import { touchHeartbeat } from './heartbeat.js';
+import { getAgentMailbox } from './mailbox/index.js';
 import {
   clearAllSessionTrackingState,
   clearContinuation,
@@ -58,11 +60,13 @@ import {
   categorizeMessage,
   isClearCommand,
   isRunnerCommand,
+  isSessionEcho,
   stripInternalTags,
   type InboundImageRef,
   type RoutingContext,
 } from './formatter.js';
 import { getConfig } from './config.js';
+import { stripHarnessTagArtifacts } from './harness-tag-strip.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
 import type {
   AgentProvider,
@@ -318,29 +322,8 @@ export function pickPushScopedContext(pushes: TaskFireContext[][]): TaskFireCont
   return null;
 }
 
-/**
- * Number of consecutive `database disk image is malformed` errors after which
- * the follow-up poll gives up and exits the process. At ACTIVE_POLL_INTERVAL_MS
- * = 500ms this is roughly 5 seconds — long enough to dodge a transient torn
- * read during a host write, short enough to recover quickly from a poisoned
- * page cache (host-sweep then respawns with a fresh mount).
- */
-const CORRUPTION_STREAK_EXIT = 10;
-
-/**
- * True for SQLite errors that indicate a corrupt READ view — almost always a
- * cross-mount page-cache coherency issue on Docker Desktop macOS rather than
- * actual file damage (host-side integrity_check passes). Reopening the DB
- * handle inside this process does NOT recover; only a fresh container mount
- * does. Caller's job is to exit so host-sweep respawns the container.
- */
-export function isCorruptionError(msg: string): boolean {
-  return (
-    msg.includes('database disk image is malformed') ||
-    msg.includes('SQLITE_CORRUPT') ||
-    msg.includes('file is not a database')
-  );
-}
+/** Consecutive driver-classified failures before a fresh runner is required. */
+const MAILBOX_FAILURE_STREAK_EXIT = 10;
 
 function log(msg: string): void {
   console.error(`[poll-loop] ${msg}`);
@@ -461,10 +444,10 @@ export interface PollLoopConfig {
 /**
  * Main poll loop. Runs indefinitely until the process is killed.
  *
- * 1. Poll messages_in for pending rows
+ * 1. Poll the mailbox for pending messages
  * 2. Format into prompt, call provider.query()
  * 3. While query active: continue polling, push new messages via provider.push()
- * 4. On result: write messages_out
+ * 4. On result: write outbound messages
  * 5. Mark messages completed
  * 6. Loop
  */
@@ -549,7 +532,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // query. Without this gate, a warm container keeps processing
     // (and potentially responding to) every accumulate-only batch, defeating
     // the "store as context, don't engage" contract. Host-side countDueMessages
-    // gates the same way for wake-from-cold (see src/db/session-db.ts).
+    // gates the same way for wake-from-cold through countDueMessages().
     if (!messages.some((m) => m.trigger === 1)) {
       await sleep(POLL_INTERVAL_MS);
       continue;
@@ -625,7 +608,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         continuation = undefined;
         clearContinuation(config.providerName);
         clearContinuationStartedAt(config.providerName);
-        writeMessageOut({
+        await writeMessageOut({
           id: generateId(),
           kind: 'chat',
           platform_id: routing.platformId,
@@ -636,9 +619,11 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         commandIds.push(msg.id);
         continue;
       }
-      if ((msg.kind === 'chat' || msg.kind === 'chat-sdk') && isUploadTraceCommand(msg)) {
+      // isSessionEcho guard: a copied "/upload-trace" from another session is
+      // ambient context, never a runner command (isClearCommand self-guards).
+      if ((msg.kind === 'chat' || msg.kind === 'chat-sdk') && !isSessionEcho(msg) && isUploadTraceCommand(msg)) {
         log('Uploading session trace to Hugging Face');
-        writeMessageOut({
+        await writeMessageOut({
           id: generateId(),
           kind: 'chat',
           platform_id: routing.platformId,
@@ -860,6 +845,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         config.provider.onExchangeComplete?.bind(config.provider),
         prompt,
         continuation,
+        config.provider.emitsMidTurnText === true,
       );
       sawResult = Boolean(result.sawResult);
       if (result.pressureRotated) {
@@ -921,7 +907,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         // Write error response so the user knows something went wrong.
         // Task-only failures stay in logs: scheduled maintenance prompts are
         // often explicitly silent and should not leak raw runtime errors to chat.
-        writeMessageOut({
+        await writeMessageOut({
           id: generateId(),
           kind: 'chat',
           platform_id: routing.platformId,
@@ -1120,33 +1106,61 @@ export function dropUnrunTaskContexts(contexts: TaskFireContext[], rows: Message
   }
 }
 
-export async function processQuery(
+export function processQuery(
   query: AgentQuery,
   routing: RoutingContext,
   initialBatchIds: string[],
   providerName: string,
   activeSender: string | null,
-  // True when the initial batch directly addressed this agent.
-  // Follow-up pushes compute and queue their own addressed bit below;
-  // a warm query can receive a completely new direct request.
   addressed: boolean,
   assistantName: string,
-  // Shared by reference with the follow-up poll closure so a follow-up
-  // task that survives its pre-task script can register its own fire
-  // context (see the scheduling-pre-task-followup hook). Pre-bug this was
-  // a single nullable context captured once from the initial batch, so
-  // every follow-up task fire (the dream/maintenance common case, since
-  // those agents are usually already-active) was silently never recorded.
   taskFireContexts: TaskFireContext[],
-  // Context-pressure threshold (tokens) above which a consolidate-then-
-  // rotate handoff runs before the provider's own auto-compaction can fire
-  // (see pressure-rotation.ts). Null disables: dream runs (ephemeral
-  // thread) and providers without a `tokensUsed` signal.
-  pressureThresholdTokens: number | null = null,
+  pressureThresholdTokens?: number | null,
   onExchangeComplete?: ((exchange: ProviderExchange) => void) | undefined,
-  initialPrompt = '',
-  initialContinuation: string | undefined = undefined,
+  initialPrompt?: string,
+  initialContinuation?: string,
+  emitsMidTurnText?: boolean,
+): Promise<QueryResult>;
+/** Compatibility overload retained for the staged upstream mid-turn suites. */
+export function processQuery(
+  query: AgentQuery,
+  routing: RoutingContext,
+  initialBatchIds: string[],
+  providerName: string,
+  onExchangeComplete?: ((exchange: ProviderExchange) => void) | undefined,
+  initialPrompt?: string,
+  initialContinuation?: string,
+  emitsMidTurnText?: boolean,
+): Promise<QueryResult>;
+export async function processQuery(
+  query: AgentQuery,
+  routing: RoutingContext,
+  initialBatchIds: string[],
+  providerName: string,
+  activeSenderOrHook: string | null | ((exchange: ProviderExchange) => void) | undefined = null,
+  addressedOrPrompt: boolean | string = false,
+  assistantNameOrContinuation: string | undefined = '',
+  taskFireContextsOrCapability: TaskFireContext[] | boolean = [],
+  pressureThresholdTokensArg: number | null = null,
+  onExchangeCompleteArg?: ((exchange: ProviderExchange) => void) | undefined,
+  initialPromptArg = '',
+  initialContinuationArg: string | undefined = undefined,
+  emitsMidTurnTextArg = false,
 ): Promise<QueryResult> {
+  const upstreamCallShape = typeof addressedOrPrompt === 'string' || typeof taskFireContextsOrCapability === 'boolean';
+  const activeSender = upstreamCallShape ? null : (activeSenderOrHook as string | null);
+  const addressed = upstreamCallShape ? false : (addressedOrPrompt as boolean);
+  const assistantName = upstreamCallShape ? '' : (assistantNameOrContinuation ?? '');
+  const taskFireContexts = upstreamCallShape ? [] : (taskFireContextsOrCapability as TaskFireContext[]);
+  const pressureThresholdTokens = upstreamCallShape ? null : pressureThresholdTokensArg;
+  const onExchangeComplete = upstreamCallShape
+    ? typeof activeSenderOrHook === 'function'
+      ? activeSenderOrHook
+      : undefined
+    : onExchangeCompleteArg;
+  const initialPrompt = upstreamCallShape ? (addressedOrPrompt as string) : initialPromptArg;
+  const initialContinuation = upstreamCallShape ? assistantNameOrContinuation : initialContinuationArg;
+  const emitsMidTurnText = upstreamCallShape ? taskFireContextsOrCapability === true : emitsMidTurnTextArg;
   let queryContinuation: string | undefined;
   let done = false;
   let unwrappedNudged = false;
@@ -1296,6 +1310,11 @@ export async function processQuery(
       }
     }
   };
+  // Per-turn streamed-delivery state. The buffer and cursors reset at
+  // each result boundary so later turns may deliberately repeat content.
+  let midTurnSent = 0;
+  let turnStartSeq = maxOutboundSeq();
+  let midTurnTail = '';
   // Prompt queue for the exchange hook — each result event consumes the
   // oldest unanswered prompt, except a wrapping-retry result, which answers
   // the same prompt again. Unused (and unmaintained) when the provider
@@ -1351,7 +1370,7 @@ export async function processQuery(
     if (!shouldKeepaliveBridge({ lastEventAt, now: Date.now(), inactivityMs: STREAM_INACTIVITY_MS })) return;
     touchHeartbeat();
   }, QUERY_KEEPALIVE_MS);
-  let corruptionStreak = 0;
+  let mailboxFailureStreak = 0;
   const pollHandle = setInterval(() => {
     if (done || pollInFlight || endedForCommand) return;
     pollInFlight = true;
@@ -1384,7 +1403,11 @@ export async function processQuery(
         // everything. Filtering on thread_id here caused deadlocks when the
         // initial batch and follow-ups had mismatched thread_ids (e.g. a
         // host-generated welcome trigger with null thread vs a Discord DM reply).
-        let newMessages = pending.filter((m) => m.kind !== 'system');
+        // Accumulated trigger=0 context rows do not enter a live turn by
+        // themselves. They ride only with a real trigger follow-up, then the
+        // local isolation/script gates below may further defer them.
+        const hasFollowUpTrigger = pending.some((m) => m.kind !== 'system' && m.trigger === 1);
+        let newMessages = pending.filter((m) => m.kind !== 'system' && (m.trigger === 1 || hasFollowUpTrigger));
         if (newMessages.length === 0) return;
 
         // Accumulate gate (mirror of the cold-start gate above): if the
@@ -1846,18 +1869,12 @@ export async function processQuery(
         const errMsg = err instanceof Error ? err.message : String(err);
         log(`Follow-up poll error: ${errMsg}`);
 
-        // Detect SQLite cross-mount corruption (Docker Desktop macOS virtiofs /
-        // gRPC-FUSE coherency bug — the kernel page cache for the inbound.db
-        // bind mount can latch a torn snapshot mid-host-write, after which
-        // every fresh openInboundDb() in this process sees the same broken
-        // view. Reopening inside the container does NOT recover; only a fresh
-        // container mount does. Exit so the host sweep respawns us.
-        if (isCorruptionError(errMsg)) {
-          corruptionStreak += 1;
-          if (corruptionStreak >= CORRUPTION_STREAK_EXIT) {
+        if (getAgentMailbox().shouldRestartAfter?.(err)) {
+          mailboxFailureStreak += 1;
+          if (mailboxFailureStreak >= MAILBOX_FAILURE_STREAK_EXIT) {
             log(
-              `Follow-up poll: ${corruptionStreak} consecutive '${errMsg}' errors — ` +
-                `inbound.db page cache is poisoned. Exiting so host respawns with a fresh mount.`,
+              `Follow-up poll: ${mailboxFailureStreak} consecutive '${errMsg}' errors — ` +
+                `mailbox driver requested a fresh runner. Exiting so the host respawns it.`,
             );
             // Stop touching the heartbeat so host-sweep stale detection fires
             // promptly even if exit() races with in-flight async work.
@@ -1868,7 +1885,7 @@ export async function processQuery(
             setTimeout(() => process.exit(75), 100);
           }
         } else {
-          corruptionStreak = 0;
+          mailboxFailureStreak = 0;
         }
       } finally {
         pollInFlight = false;
@@ -1884,7 +1901,7 @@ export async function processQuery(
       // in the finally below AND an 'error' row in the outer caller's
       // catch, double-counting the fire.
       for await (const event of query.events) {
-        handleEvent(event, routing);
+        await handleEvent(event, routing);
         touchHeartbeat();
         lastEventAt = Date.now();
 
@@ -1897,6 +1914,20 @@ export async function processQuery(
           // effectively orphaned and the next message started a blank
           // Claude session with no prior context.
           setContinuation(providerName, event.continuation);
+        } else if (event.type === 'text') {
+          if (emitsMidTurnText) {
+            const fireCtx = mostRecentTaskContext();
+            const resultAddressed = pushAddressed[resultIndex] ?? false;
+            const taskTurn = !!fireCtx && !resultAddressed;
+            const scan = await deliverMidTurnBlocks(event.text, routing, turnStartSeq, midTurnTail, {
+              turnStartedAt: resultBoundaryAt,
+              taskTurn,
+              taskTurnDedupSince: resultBoundaryAt,
+            });
+            midTurnSent += scan.delivered;
+            midTurnTail = scan.tail;
+            if (fireCtx && scan.dispatched.length > 0) fireCtx.dispatched.push(...scan.dispatched);
+          }
         } else if (event.type === 'result') {
           // Provider results are ordered with pushes. If the prior result
           // triggered a wrapping retry, this is that retry's result; deferred
@@ -1924,6 +1955,9 @@ export async function processQuery(
             archivePrompts.shift();
             compactedSinceLastResult = false;
             resultBoundaryAt = outboundDbNow();
+            midTurnSent = 0;
+            turnStartSeq = maxOutboundSeq();
+            midTurnTail = '';
             continue;
           }
           if (event.text) {
@@ -1939,7 +1973,7 @@ export async function processQuery(
             // must not append a final summary block to a destination they
             // already delivered to mid-turn via send_message/send_file.
             const isTaskTurn = !!fireCtx && !resultAddressed;
-            const { hasUnwrapped, dispatched } = dispatchResultText(
+            const { hasUnwrapped, dispatched, resultBlocks } = await dispatchResultText(
               event.text,
               routing,
               resultAddressed,
@@ -1947,18 +1981,24 @@ export async function processQuery(
               compactedSinceLastResult,
               isTaskTurn,
               resultBoundaryAt,
+              {
+                midTurnSent,
+                suppressDelivery: emitsMidTurnText,
+                turnDelivered: emitsMidTurnText ? midTurnSent > 0 || chatRowWrittenSince(turnStartSeq) : undefined,
+                errorResult: event.isError === true,
+              },
             );
             if (fireCtx && dispatched.length > 0) {
               fireCtx.dispatched.push(...dispatched);
             }
-            if (dispatched.length === 0 && event.isError === true) {
+            if (resultBlocks === 0 && event.isError === true) {
               // Non-retryable error turn (e.g. both provider accounts are at
               // quota) with no <message> envelope: deliver the notice for an
               // interactive chat instead of dropping it as scratchpad. Task-
               // only failures remain silent in-channel, matching the outer
               // provider-throw path and scheduled-maintenance contract.
               if (!isTaskTurn) {
-                deliverErrorResult(event.text, routing);
+                await deliverErrorResult(event.text, routing);
               } else {
                 log(`Suppressing user-visible error result for task-only turn: ${event.text ?? '(empty)'}`);
               }
@@ -1997,7 +2037,7 @@ export async function processQuery(
                 // pass the stream-wide turnStartedAt: an earlier push may
                 // legitimately have replied in this warm query, but that
                 // must not make this later follow-up look answered.
-                const fallback = dispatchResultText('', routing, true);
+                const fallback = await dispatchResultText('', routing, true);
                 if (fireCtx && fallback.dispatched.length > 0) {
                   fireCtx.dispatched.push(...fallback.dispatched);
                 }
@@ -2006,14 +2046,14 @@ export async function processQuery(
               // queued so the retry archives against it, not the nudge text.
               if (!willRetryWrapping) archivePrompts.shift();
             }
-          } else if (resultAddressed) {
+          } else if (resultAddressed && midTurnSent === 0 && !chatRowWrittenSince(turnStartSeq)) {
             // A result event with no text is still a completed provider turn.
             // Retryable provider failures use the separate error-event path;
             // a genuinely empty addressed result must not disappear silently.
             // Scope tool-delivery detection to this push so an earlier warm-
             // query reply cannot suppress the fallback for this follow-up.
             const fireCtx = mostRecentTaskContext();
-            const fallback = dispatchResultText('', routing, true, resultBoundaryAt, compactedSinceLastResult);
+            const fallback = await dispatchResultText('', routing, true, resultBoundaryAt, compactedSinceLastResult);
             if (fireCtx && fallback.dispatched.length > 0) {
               fireCtx.dispatched.push(...fallback.dispatched);
             }
@@ -2115,6 +2155,11 @@ export async function processQuery(
             endedForCommand = true;
             query.end();
           }
+          // Streamed-delivery state is turn-scoped. Advance the durable
+          // cursor only after the result's nudge/dedupe decisions consumed it.
+          midTurnSent = 0;
+          turnStartSeq = maxOutboundSeq();
+          midTurnTail = '';
         } else if (event.type === 'progress' && event.message.startsWith('Context compacted')) {
           compactedSinceLastResult = true;
         } else if (event.type === 'error' && event.retryable && resultIndex === 0) {
@@ -2178,7 +2223,7 @@ function notifyExchangeComplete(
   }
 }
 
-function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
+async function handleEvent(event: ProviderEvent, routing: RoutingContext): Promise<void> {
   switch (event.type) {
     case 'init':
       log(`Session: ${event.continuation}`);
@@ -2187,11 +2232,10 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
       log(`Result: ${event.text ? event.text.slice(0, 200) : '(empty)'}`);
       break;
     case 'generated_image':
-      try {
-        deliverGeneratedImage(event.path, _routing);
-      } catch (err) {
-        log(`Generated image delivery failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
+      await deliverGeneratedImage(event.path, routing);
+      break;
+    case 'file':
+      await deliverProviderFile(event.path, routing);
       break;
     case 'error':
       log(
@@ -2201,6 +2245,9 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
     case 'progress':
       log(`Progress: ${event.message}`);
       break;
+    case 'text':
+    case 'activity':
+      break;
   }
 }
 
@@ -2208,11 +2255,11 @@ const CODEX_GENERATED_IMAGES_ROOT = '/home/node/.codex/generated_images';
 const GENERATED_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
 
 /** Stage a provider-generated image in the session outbox and enqueue it for normal channel delivery. */
-export function deliverGeneratedImage(
+export async function deliverGeneratedImage(
   generatedPath: string,
   routing: RoutingContext,
   allowedRoot = CODEX_GENERATED_IMAGES_ROOT,
-): void {
+): Promise<void> {
   const root = fs.realpathSync(allowedRoot);
   const resolved = fs.realpathSync(generatedPath);
   const relative = path.relative(root, resolved);
@@ -2230,7 +2277,7 @@ export function deliverGeneratedImage(
   const outboxDir = outboxDirFor(id);
   fs.mkdirSync(outboxDir, { recursive: true });
   fs.copyFileSync(resolved, path.join(outboxDir, filename));
-  writeMessageOut({
+  await writeMessageOut({
     id,
     in_reply_to: routing.inReplyTo,
     kind: 'chat',
@@ -2242,6 +2289,28 @@ export function deliverGeneratedImage(
   log(`Generated image staged for automatic delivery: ${filename}`);
 }
 
+/** Stage a provider-declared generic file for normal outbound delivery. */
+async function deliverProviderFile(providerPath: string, routing: RoutingContext): Promise<void> {
+  const resolved = fs.realpathSync(providerPath);
+  if (!fs.statSync(resolved).isFile()) throw new Error(`Refusing non-file provider output: ${providerPath}`);
+
+  const id = generateId();
+  const filename = path.basename(resolved);
+  const outboxDir = outboxDirFor(id);
+  fs.mkdirSync(outboxDir, { recursive: true });
+  fs.copyFileSync(resolved, path.join(outboxDir, filename));
+  await writeMessageOut({
+    id,
+    in_reply_to: routing.inReplyTo,
+    kind: 'chat',
+    platform_id: routing.platformId,
+    channel_type: routing.channelType,
+    thread_id: routing.threadId,
+    content: JSON.stringify({ text: '', files: [filename] }),
+  });
+  log(`Provider file staged for automatic delivery: ${filename}`);
+}
+
 /**
  * Deliver a turn's text straight to the channel the batch arrived on. Used when
  * a turn ends in a provider error (e.g. a non-retryable 403 billing_error) with
@@ -2249,16 +2318,16 @@ export function deliverGeneratedImage(
  * This is the same user-facing write the outer catch block does, minus the
  * `Error:` prefix — the provider's text is already a user-facing message.
  */
-function deliverErrorResult(text: string, routing: RoutingContext): void {
+async function deliverErrorResult(text: string, routing: RoutingContext): Promise<void> {
   log('Error result with no <message> envelope — delivering to channel');
-  writeMessageOut({
+  await writeMessageOut({
     id: generateId(),
     in_reply_to: routing.inReplyTo,
     kind: 'chat',
     platform_id: routing.platformId,
     channel_type: routing.channelType,
     thread_id: routing.threadId,
-    content: JSON.stringify({ text }),
+    content: JSON.stringify({ text: stripHarnessTagArtifacts(text) }),
   });
 }
 
@@ -2288,315 +2357,404 @@ interface MessageBlock {
   body: string;
 }
 
-/**
- * True when a zero-output addressed turn ended because the agent hit
- * the sensitive-action gate and is correctly WAITING for the user's
- * in-chat Confirm tap — NOT because a tool failed.
- *
- * Why this matters (2026-05-18, the confidence-killer): when the gate
- * fires, the model receives the gate's pending result ("…is awaiting
- * the user's confirmation … End your turn now without commentary") and
- * dutifully ends the turn with only `<internal>Waiting for <X>
- * confirmation.</internal>` — zero `<message>` output. On an addressed
- * turn that fell through to the alarming "[degraded — addressed turn
- * produced no output (likely tool failure)] … This is a bug, try
- * again" safety-net, EVERY gated request, BEFORE the user even taps
- * Confirm. The real answer then arrives ~20s later via the engine
- * replay → appr-note path, but the user has already been told it's
- * broken. This is an expected pause, not a failure: stay silent, the
- * result will follow.
- *
- * Pure + conservative: matches only the gate's own pause signature
- * (an `<internal>`/scratchpad note about waiting for confirmation, or
- * the gate's verbatim pending-result language). A genuine tool failure
- * does NOT produce this coherent "waiting for confirmation" text, so
- * the real degraded-fallback path is preserved.
- */
-// Moved to confirmation-gate-state.ts so the provider's PostToolUse hook
-// can use it without a circular import back into poll-loop. Re-exported
-// here because callers and tests already import it from this module.
-export { isAwaitingSensitiveConfirmation };
+/** Result-door behavior for providers that stream assistant text. */
+export interface ResultDispatchOptions {
+  midTurnSent?: number;
+  suppressDelivery?: boolean;
+  turnDelivered?: boolean;
+  /** A bare error is delivered immediately after dispatch returns. */
+  errorResult?: boolean;
+}
 
-export function dispatchResultText(
+export interface MidTurnScanResult {
+  delivered: number;
+  tail: string;
+  dispatched: DispatchedMessage[];
+}
+
+interface MidTurnDeliveryOptions {
+  turnStartedAt?: string;
+  taskTurn?: boolean;
+  taskTurnDedupSince?: string;
+}
+
+/** Complete internal spans are private scratchpad and never a content door. */
+const INTERNAL_SPAN_RE = /<internal\b[\s\S]*?<\/internal>/gi;
+const OPEN_INTERNAL_RE = /<internal\b/i;
+const OPEN_MESSAGE_RE = /<message\b/;
+
+/**
+ * Remove closed internal spans and conservatively drop an unclosed internal
+ * tail. This is deliberately broader than stripInternalTags: attributes and
+ * case variants must not turn a quoted draft into a real send.
+ */
+function stripInternalSpansForDelivery(input: string): string {
+  const withoutClosed = input.replace(INTERNAL_SPAN_RE, '');
+  const open = OPEN_INTERNAL_RE.exec(withoutClosed);
+  return open ? withoutClosed.slice(0, open.index) : withoutClosed;
+}
+
+/** Index where an unresolved streamed construct begins. */
+export function unresolvedTailStart(input: string): number {
+  const masked = input.replace(INTERNAL_SPAN_RE, (match) => ' '.repeat(match.length));
+  const candidates: number[] = [];
+  const internalOpen = OPEN_INTERNAL_RE.exec(masked);
+  if (internalOpen) candidates.push(internalOpen.index);
+
+  const lastClose = masked.lastIndexOf('</message>');
+  const searchFrom = lastClose === -1 ? 0 : lastClose + '</message>'.length;
+  const messageOpen = OPEN_MESSAGE_RE.exec(masked.slice(searchFrom));
+  if (messageOpen) candidates.push(searchFrom + messageOpen.index);
+  if (candidates.length > 0) return Math.min(...candidates);
+
+  const prefixStart = trailingTagPrefixStart(masked);
+  return prefixStart === -1 ? input.length : prefixStart;
+}
+
+function trailingTagPrefixStart(input: string): number {
+  const maxLength = Math.min('<internal'.length - 1, input.length);
+  for (let length = maxLength; length >= 1; length--) {
+    const tail = input.slice(input.length - length);
+    if (tail === '<message'.slice(0, length)) return input.length - length;
+    if (tail.toLowerCase() === '<internal'.slice(0, length)) return input.length - length;
+  }
+  return -1;
+}
+
+/** Current outbound sequence high-water mark. */
+function maxOutboundSeq(): number {
+  return getUndeliveredMessages().reduce((max, message) => Math.max(max, message.seq ?? 0), 0);
+}
+
+function chatRowWrittenSince(afterSeq: number): boolean {
+  try {
+    return getUndeliveredMessages().some((message) => (message.seq ?? 0) > afterSeq && message.kind === 'chat');
+  } catch (err) {
+    log(`chatRowWrittenSince failed: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+}
+
+function wasTextWrittenToDestinationSince(dest: DestinationEntry, body: string, cursor: string): boolean {
+  const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
+  const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
+  const normalizedBody = body.replace(/\s+/g, ' ').trim();
+  const cursorMatch = /^outbound-seq:(\d+)$/.exec(cursor);
+  const afterSequence = cursorMatch ? Number(cursorMatch[1]) : null;
+  const legacyTimestampCursor = /^\d{4}-\d{2}-\d{2}/.test(cursor);
+
+  try {
+    const found = getUndeliveredMessages().some((message) => {
+      const afterCursor = afterSequence === null ? message.timestamp > cursor : (message.seq ?? 0) > afterSequence;
+      if (
+        !afterCursor ||
+        message.kind !== 'chat' ||
+        message.platform_id !== platformId ||
+        message.channel_type !== channelType
+      ) {
+        return false;
+      }
+      try {
+        const payload = JSON.parse(message.content) as { text?: unknown };
+        return typeof payload.text === 'string' && payload.text.replace(/\s+/g, ' ').trim() === normalizedBody;
+      } catch {
+        return false;
+      }
+    });
+    if (found) return true;
+    // Non-SQLite drivers may use an opaque cursor that cannot be compared to
+    // row timestamps/sequences here. Fall back to their semantic mailbox
+    // operations; SQLite and legacy timestamp cursors took the exact
+    // destination+body path above.
+    if (afterSequence === null && !legacyTimestampCursor) {
+      return (
+        hasChatMessageTextSince(cursor, body) &&
+        hasChatMessageToDestinationSince(cursor, { channel_type: channelType, platform_id: platformId })
+      );
+    }
+    return false;
+  } catch (err) {
+    log(`Destination/text dedupe lookup failed: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+}
+
+function wasWrittenInSeqWindow(dest: DestinationEntry, body: string, afterSeq: number, uptoSeq: number): boolean {
+  if (uptoSeq <= afterSeq) return false;
+  try {
+    const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
+    const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
+    const content = JSON.stringify({ text: body });
+    return getUndeliveredMessages().some(
+      (message) =>
+        (message.seq ?? 0) > afterSeq &&
+        (message.seq ?? 0) <= uptoSeq &&
+        message.kind === 'chat' &&
+        message.platform_id === platformId &&
+        message.channel_type === channelType &&
+        message.content === content,
+    );
+  } catch (err) {
+    log(`Echo-guard lookup failed: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+}
+
+function destinationAlreadyReceivedTaskSend(
+  dest: DestinationEntry,
+  taskTurn: boolean,
+  taskTurnDedupSince: string | undefined,
+): boolean {
+  if (!taskTurn || !taskTurnDedupSince) return false;
+  const channelType = dest.type === 'channel' ? dest.channelType : 'agent';
+  const platformId = dest.type === 'channel' ? dest.platformId : dest.agentGroupId;
+  return !!(
+    channelType &&
+    platformId &&
+    hasChatMessageToDestinationSince(taskTurnDedupSince, {
+      channel_type: channelType,
+      platform_id: platformId,
+    })
+  );
+}
+
+/**
+ * Deliver closed message blocks from the streamed-text door. Unlike upstream's
+ * task one-door contract, Optimus permits a task's wrapped block when it is the
+ * task's only deliberate send; the same destination/tool-send dedupe used by
+ * the final dispatcher is applied here.
+ */
+export async function deliverMidTurnBlocks(
   text: string,
   routing: RoutingContext,
-  // True when a human @mentioned this agent or replied to one of its
-  // messages this turn (computed once per turn via formatter's
-  // isAddressedTurn). An addressed turn that produces zero deliverable
-  // output must NOT end as a bare silent_turn_complete — that reads as
-  // the bot being broken (2026-05-17 AI Friends incident: silent on a
-  // reply-to-bot follow-up after search_conversations failed). Defaults
-  // false so non-chat callers (tasks, tests that don't care) keep the
-  // prior silent-turn behavior unchanged.
+  turnStartSeq?: number,
+  carry = '',
+  options: MidTurnDeliveryOptions = {},
+): Promise<MidTurnScanResult> {
+  const input = carry + text;
+  const tailStart = unresolvedTailStart(input);
+  const settled = input.slice(0, tailStart);
+  const tail = input.slice(tailStart);
+  if (tail && carry !== tail) {
+    log(`Mid-turn scan: carrying ${tail.length}-char unresolved tail to the next segment`);
+  }
+
+  const segmentStartSeq = turnStartSeq === undefined ? 0 : maxOutboundSeq();
+  const visible = stripInternalSpansForDelivery(settled);
+  const messageRe = /<message\s+([^>]*)>([\s\S]*?)<\/message>/g;
+  const seen = new Set<string>();
+  const dispatched: DispatchedMessage[] = [];
+  let delivered = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = messageRe.exec(visible)) !== null) {
+    const block = parseMessageBlock(match[1], match[2]);
+    if (!block) {
+      log('Mid-turn <message> block was malformed — skipped');
+      continue;
+    }
+
+    const rawBody = stripInternalTags(block.body);
+    const swept = sweepLocalFileLinks(stripHarnessTagArtifacts(rawBody));
+    const body = swept.text;
+    if (!body && swept.links.length === 0) {
+      log(`Mid-turn <message to="${block.to}"> empty after sanitization — skipped`);
+      continue;
+    }
+
+    const destination = findByName(block.to);
+    if (!destination) continue;
+
+    const dedupKey = `${block.to} ${body.replace(/\s+/g, ' ')}`;
+    if (seen.has(dedupKey)) {
+      log(`Suppressing duplicate mid-turn <message to="${block.to}"> block`);
+      continue;
+    }
+    seen.add(dedupKey);
+
+    if (options.turnStartedAt && wasTextWrittenToDestinationSince(destination, body, options.turnStartedAt)) {
+      log(`Suppressing duplicate mid-turn <message to="${block.to}"> already delivered via MCP tool`);
+      continue;
+    }
+    if (destinationAlreadyReceivedTaskSend(destination, options.taskTurn === true, options.taskTurnDedupSince)) {
+      log(`Suppressing mid-turn task message to "${block.to}" — destination already received this task's send`);
+      continue;
+    }
+    if (turnStartSeq !== undefined && wasWrittenInSeqWindow(destination, body, turnStartSeq, segmentStartSeq)) {
+      log(`Mid-turn <message to="${block.to}"> repeats an earlier segment in this turn — skipped`);
+      continue;
+    }
+
+    const sent = await sendToDestination(destination, body, routing, block.replyToSeq, swept.links);
+    if (!sent.sent) {
+      log(`Mid-turn <message to="${block.to}"> dropped: ${sent.reason ?? 'not deliverable'}`);
+      continue;
+    }
+    delivered++;
+    dispatched.push({ destination: block.to, body });
+    log(`Mid-turn delivery: <message to="${block.to}"> (${body.length} chars)`);
+  }
+
+  return { delivered, tail, dispatched };
+}
+
+/**
+ * True when a zero-output addressed turn is intentionally paused at the
+ * sensitive-action confirmation gate. Re-exported for existing callers.
+ */
+export { isAwaitingSensitiveConfirmation };
+
+/** Parse and dispatch the result-door representation of one provider turn. */
+export async function dispatchResultText(
+  text: string,
+  routing: RoutingContext,
   addressed = false,
-  // SQLite-UTC timestamp (`outboundDbNow()`) captured at the start of
-  // this turn. When set, the addressed-silent safety net checks whether
-  // a `kind='chat'` outbound row was written since — i.e. the agent
-  // already replied via an MCP tool (`send_file`, `send_message`,
-  // `generate_image` → send_file) rather than a `<message>` block.
-  // Without it, a turn whose only deliverable was a tool-sent file
-  // produces zero parsed `<message>` blocks and mis-fires the scary
-  // degraded fallback (2026-05-21: an image-gen reply in the Discord
-  // Teddy DM landed fine, then got a bogus "produced no output" note).
-  // Undefined for callers that don't track it — they keep prior behavior.
   turnStartedAt?: string,
   compactedDuringTurn = false,
-  // True when this result belongs to a scheduled-task turn (no human in the
-  // loop this turn). Task turns follow a "deliver mid-turn, end silent"
-  // contract: the agent sends its content via `send_message` / `send_file`,
-  // then the final response should be `<internal>` or nothing. Models often
-  // append a final `<message to="X">` summary/ack to a destination they
-  // already delivered to this turn (different text, so the exact-text dedup
-  // misses it) → a second, unwanted channel message (AI Friends daily recap
-  // 2026-06-10). On a task turn we suppress any final block to a destination
-  // that already received a tool-sent chat row SINCE `taskTurnDedupSince`.
-  // Scoped to task turns so legitimate chat-turn follow-ups (file + separate
-  // text) are unaffected.
   taskTurn = false,
-  // Lower bound for the task-turn destination dedup. MUST be the boundary of
-  // THIS result's turn (the outbound-DB stamp just before this result's
-  // provider turn began), not the whole-query `turnStartedAt`. A single
-  // `processQuery` handles multiple result pushes (task turn, then a deferred
-  // chat follow-up) sharing one `turnStartedAt`; scanning from `turnStartedAt`
-  // would let an EARLIER turn's legitimate send to the same channel suppress
-  // a LATER turn's distinct message (integration `mixed task + chat batch`
-  // regression). Defaults to `turnStartedAt` for callers with a single turn.
   taskTurnDedupSince = turnStartedAt,
-): { sent: number; hasUnwrapped: boolean; dispatched: DispatchedMessage[] } {
-  const MESSAGE_RE = /<message\s+([^>]*)>([\s\S]*?)<\/message>/g;
+  options: ResultDispatchOptions = {},
+): Promise<{ sent: number; hasUnwrapped: boolean; dispatched: DispatchedMessage[]; resultBlocks: number }> {
+  const originalText = text;
+  const visibleText = stripInternalSpansForDelivery(text);
+  const messageRe = /<message\s+([^>]*)>([\s\S]*?)<\/message>/g;
 
-  // Tolerate a final unclosed `<message to="...">`: long-bodied replies on
-  // Claude occasionally drop the closing `</message>` (observed 2026-05-28
-  // in degen_server_cook: Epicure pairing reply truncated mid-tag, parser
-  // returned 0 blocks and the full answer was suppressed as scratchpad).
-  // If the last well-formed `<message ...>` opener has no matching
-  // `</message>` after it, synthesize one at end-of-text so the regex
-  // captures the body. The opener match requires whitespace + attrs + `>`
-  // so a bare `<message` substring in scratchpad doesn't trigger recovery.
+  // Recover a final unclosed block for providers without streamed delivery.
+  // With streamed delivery this still makes the missed content visible to the
+  // result-door nudge, but suppressDelivery prevents a second content door.
   const openerRe = /<message\s+[^>]*>/g;
   let lastOpenerEnd = -1;
   let openerMatch: RegExpExecArray | null;
-  while ((openerMatch = openerRe.exec(text)) !== null) {
+  while ((openerMatch = openerRe.exec(visibleText)) !== null) {
     lastOpenerEnd = openerMatch.index + openerMatch[0].length;
   }
   const normalizedText =
-    lastOpenerEnd !== -1 && !text.slice(lastOpenerEnd).includes('</message>') ? `${text}</message>` : text;
+    lastOpenerEnd !== -1 && !visibleText.slice(lastOpenerEnd).includes('</message>')
+      ? `${visibleText}</message>`
+      : visibleText;
 
   let match: RegExpExecArray | null;
-  let sent = 0;
+  let sent = options.midTurnSent ?? 0;
+  let resultBlocks = 0;
   let lastIndex = 0;
   const scratchpadParts: string[] = [];
   const dispatched: DispatchedMessage[] = [];
-  // Per-turn dedup: model occasionally emits two near-identical
-  // <message to="X">…</message> blocks in a single result (observed
-  // 2026-05-12 in the Tico+Janathan WA group — second block differed
-  // only by a single trailing whitespace before \n). Without this guard
-  // both blocks dispatch and the user sees the same reply twice. Key by
-  // destination + whitespace-normalized body so the common LLM
-  // redundant-block pattern is caught while still allowing intentional
-  // repeats that differ in substance.
   const seen = new Set<string>();
 
-  while ((match = MESSAGE_RE.exec(normalizedText)) !== null) {
-    if (match.index > lastIndex) {
-      scratchpadParts.push(normalizedText.slice(lastIndex, match.index));
-    }
+  while ((match = messageRe.exec(normalizedText)) !== null) {
+    if (match.index > lastIndex) scratchpadParts.push(normalizedText.slice(lastIndex, match.index));
+    lastIndex = messageRe.lastIndex;
+    resultBlocks++;
+
     const block = parseMessageBlock(match[1], match[2]);
-    lastIndex = MESSAGE_RE.lastIndex;
     if (!block) {
       scratchpadParts.push(`[dropped: malformed <message> block] ${match[2].trim()}`);
       continue;
     }
-    const toName = block.to;
-    const nestedInternal = block.body.includes('<internal>');
+
     const rawBody = stripInternalTags(block.body);
-    // Sweep unusable local-file links BEFORE the dedup checks below, so the
-    // text compared here is the text that will actually be delivered (an MCP
-    // send_message earlier in the turn stored the swept form too — comparing
-    // raw against swept would leak a duplicate through).
-    const swept = sweepLocalFileLinks(rawBody);
+    const swept = sweepLocalFileLinks(stripHarnessTagArtifacts(rawBody));
     const body = swept.text;
-    if (nestedInternal) {
-      if (body.length === 0) {
-        log(
-          `WARNING: <message to="${toName}"> body contained only <internal> scratchpad — dropping block as silent output`,
-        );
-        continue;
-      }
-      log(`WARNING: stripping nested <internal> scratchpad from <message to="${toName}"> body before delivery`);
+    const destination = findByName(block.to);
+    if (!destination) {
+      log(`Unknown destination in <message to="${block.to}">, dropping block`);
+      scratchpadParts.push(`[dropped: unknown destination "${block.to}"] ${body}`);
+      continue;
+    }
+    if (!body && swept.links.length === 0) {
+      scratchpadParts.push(`[dropped: empty after sanitization for "${block.to}"]`);
+      continue;
     }
 
-    const dest = findByName(toName);
-    if (!dest) {
-      log(`Unknown destination in <message to="${toName}">, dropping block`);
-      scratchpadParts.push(`[dropped: unknown destination "${toName}"] ${body}`);
-      continue;
-    }
-    const dedupKey = `${toName} ${body.replace(/\s+/g, ' ')}`;
-    if (seen.has(dedupKey)) {
-      log(`Suppressing duplicate <message to="${toName}"> block within one turn`);
-      continue;
-    }
-    if (turnStartedAt && hasChatMessageTextSince(turnStartedAt, body)) {
-      log(`Suppressing duplicate final <message to="${toName}"> block already delivered via MCP tool`);
-      continue;
-    }
-    if (taskTurn && taskTurnDedupSince) {
-      const destChannelType = dest.type === 'channel' ? dest.channelType : 'agent';
-      const destPlatformId = dest.type === 'channel' ? dest.platformId : dest.agentGroupId;
-      if (
-        destChannelType &&
-        destPlatformId &&
-        hasChatMessageToDestinationSince(taskTurnDedupSince, {
-          channel_type: destChannelType,
-          platform_id: destPlatformId,
-        })
-      ) {
-        log(
-          `Suppressing final <message to="${toName}"> on task turn — destination already delivered a message this turn (one-message task contract)`,
-        );
-        continue;
+    if (options.suppressDelivery) {
+      if (!options.turnDelivered) {
+        scratchpadParts.push(`[not delivered — result door is disabled; to="${block.to}"] ${body}`);
       }
+      continue;
+    }
+
+    const dedupKey = `${block.to} ${body.replace(/\s+/g, ' ')}`;
+    if (seen.has(dedupKey)) {
+      log(`Suppressing duplicate <message to="${block.to}"> block within one turn`);
+      continue;
     }
     seen.add(dedupKey);
-    const sentOk = sendToDestination(dest, body, routing, block.replyToSeq, swept.links);
-    if (!sentOk.sent) {
-      scratchpadParts.push(`[dropped: ${sentOk.reason} for "${toName}"] ${rawBody}`);
+
+    if (turnStartedAt && wasTextWrittenToDestinationSince(destination, body, turnStartedAt)) {
+      log(`Suppressing duplicate final <message to="${block.to}"> already delivered via MCP tool`);
       continue;
     }
-    dispatched.push({ destination: toName, body });
+    if (destinationAlreadyReceivedTaskSend(destination, taskTurn, taskTurnDedupSince)) {
+      log(`Suppressing final task message to "${block.to}" — destination already received this task's send`);
+      continue;
+    }
+
+    const delivered = await sendToDestination(destination, body, routing, block.replyToSeq, swept.links);
+    if (!delivered.sent) {
+      scratchpadParts.push(`[dropped: ${delivered.reason} for "${block.to}"] ${rawBody}`);
+      continue;
+    }
+    dispatched.push({ destination: block.to, body });
     sent++;
   }
-  if (lastIndex < normalizedText.length) {
-    scratchpadParts.push(normalizedText.slice(lastIndex));
-  }
+  if (lastIndex < normalizedText.length) scratchpadParts.push(normalizedText.slice(lastIndex));
 
   const scratchpad = stripInternalTags(scratchpadParts.join('')).trim();
+  if (scratchpad) log(`[scratchpad] ${scratchpad.slice(0, 500)}${scratchpad.length > 500 ? '…' : ''}`);
 
-  if (scratchpad) {
-    log(`[scratchpad] ${scratchpad.slice(0, 500)}${scratchpad.length > 500 ? '…' : ''}`);
-  }
-
-  // Check this before the unwrapped-text retry. A model can fulfill a turn
-  // through send_message/send_file and still leave stray bare
-  // narration in its final result. Nudging that already-satisfied turn and
-  // then forcing a fallback after the retry produces a false failure message.
-  // processQuery passes the current push boundary here, so a reply from an
-  // earlier turn in the same warm query cannot suppress this turn.
   const deliveredViaTool = !!turnStartedAt && countChatMessagesSince(turnStartedAt) > 0;
+  const anythingDelivered = options.suppressDelivery ? options.turnDelivered === true : sent > 0 || deliveredViaTool;
+  const hasUnwrapped = !anythingDelivered && !!scratchpad;
 
-  // Safety-net only fires when there's user-facing content the runner
-  // would otherwise silently drop. `<internal>...</internal>` is the
-  // agent's private-thoughts tag — content inside it is *meant* to stay
-  // private (e.g. "Nothing new to save" from a maintenance reflection).
-  // Use the post-strip scratchpad as the trigger so internal-only output
-  // doesn't get force-emitted with a degraded label.
-  const hasUnwrapped = sent === 0 && !!scratchpad;
   if (hasUnwrapped) {
-    if (deliveredViaTool) {
-      log(
-        'turn emitted unwrapped final text after delivering a ' +
-          'chat message via a tool — ending cleanly without a wrapping retry',
-      );
-      emitSilentTurnComplete();
-      return { sent, hasUnwrapped: false, dispatched };
-    }
-    log(`WARNING: agent output had no <message to="..."> blocks — suppressing unwrapped text and nudging retry`);
-    emitSilentTurnComplete();
-    // Caller pushes an upstream-style nudge re-prompt via the
-    // hasUnwrapped return value. Do NOT show the unwrapped text to users:
-    // bare text is often scratchpad/meta narration, and the runner cannot
-    // know which destination the model intended. The retry prompt lets the
-    // agent re-send with an explicit <message to="..."> destination.
-    return { sent, hasUnwrapped, dispatched };
+    log('WARNING: agent output had no deliverable <message> block — suppressing unwrapped text and nudging retry');
+    if (!options.errorResult) await emitSilentTurnComplete();
+    return { sent, hasUnwrapped: true, dispatched, resultBlocks };
   }
 
-  // Truly silent turn: no <message> blocks AND no user-facing scratchpad
-  // (e.g. agent emitted only `<internal>...</internal>`, or returned an
-  // empty result).
-  if (sent === 0) {
-    // Tool delivery is conclusive even when the provider compacted later in
-    // the same turn. Compaction commonly happens after a long sequence of
-    // send_file/send_message calls, just before the internal-only result. In
-    // that case the requested output already reached the user, so the
-    // compaction uncertainty notice would be a false failure report.
-    if (deliveredViaTool) {
-      log(
-        'turn emitted no <message> blocks but delivered a ' +
-          'chat message via a tool (send_file/send_message) — ending ' +
-          'cleanly, suppressing zero-output fallback',
-      );
-      emitSilentTurnComplete();
-      return { sent, hasUnwrapped, dispatched };
-    }
+  if (sent === 0 && !anythingDelivered) {
     if (addressed && compactedDuringTurn) {
-      const dest = findByRouting(routing.channelType, routing.platformId);
-      if (dest) {
+      const destination = findByRouting(routing.channelType, routing.platformId);
+      if (destination) {
         const body =
           'My session compacted before I could send a final status update. ' +
           'I may have completed the work; please ask me to confirm the result before relying on it.';
-        if (sendToDestination(dest, body, routing).sent) {
-          dispatched.push({ destination: dest.name, body });
+        const delivered = await sendToDestination(destination, body, routing);
+        if (delivered.sent) {
+          dispatched.push({ destination: destination.name, body });
           sent++;
-          return { sent, hasUnwrapped, dispatched };
+          return { sent, hasUnwrapped, dispatched, resultBlocks };
         }
       }
     }
-    // Authoritative signal first: a PostToolUse hook saw the gate's own
-    // pending-confirmation tool result this turn. The text sniff below is
-    // the fallback for providers whose tool results we can't observe
-    // (codex — notes/2026-05-19.md).
-    if (addressed && (confirmationGatePaused() || isAwaitingSensitiveConfirmation(text))) {
-      // EXPECTED pause, NOT a failure: the agent hit the sensitive-action
-      // gate and is waiting for the user's in-chat Confirm tap. The gate
-      // told it to "end your turn now without commentary", so it
-      // correctly produced zero <message> output. Emitting the scary
-      // "[degraded — likely tool failure] this is a bug" safety-net here
-      // (which is what happened on EVERY gated request before this guard,
-      // 2026-05-18) is wrong and was the single biggest confidence-killer:
-      // the user sees "broken" first, then the real answer arrives ~20s
-      // later via the engine replay → appr-note path. Stay silent; the
-      // result will follow once they confirm. Tell the host the turn is
-      // over so typing stops.
-      log(
-        'addressed turn produced no output but is AWAITING SENSITIVE-GATE ' +
-          'CONFIRMATION — suppressing degraded fallback (result will arrive ' +
-          'via the post-confirm replay)',
-      );
-      emitSilentTurnComplete();
-      return { sent, hasUnwrapped, dispatched };
+
+    if (addressed && (confirmationGatePaused() || isAwaitingSensitiveConfirmation(originalText))) {
+      log('Addressed turn is awaiting sensitive confirmation — suppressing degraded fallback');
+      await emitSilentTurnComplete();
+      return { sent, hasUnwrapped, dispatched, resultBlocks };
     }
+
     if (addressed) {
-      // A human @mentioned this agent or replied to it, and the agent
-      // produced nothing to send back even after the wrapping retry. Silence
-      // is worse than a scoped, honest failure here: the user otherwise sees
-      // the bot as having ignored the request entirely (the-vibes calendar
-      // follow-up, 2026-07-14). Keep the fallback deliberately generic — the
-      // runner cannot infer whether a side effect completed — and route it
-      // only to the triggering destination.
-      const dest = findByRouting(routing.channelType, routing.platformId);
-      if (dest) {
+      const destination = findByRouting(routing.channelType, routing.platformId);
+      if (destination) {
         const body = "I couldn't complete that request or produce a reliable reply. Please try again.";
-        if (sendToDestination(dest, body, routing).sent) {
-          log(`WARNING: addressed turn produced no deliverable output — sent scoped failure fallback`);
-          dispatched.push({ destination: dest.name, body });
+        const delivered = await sendToDestination(destination, body, routing);
+        if (delivered.sent) {
+          log('WARNING: addressed turn produced no deliverable output — sent scoped failure fallback');
+          dispatched.push({ destination: destination.name, body });
           sent++;
-          return { sent, hasUnwrapped, dispatched };
+          return { sent, hasUnwrapped, dispatched, resultBlocks };
         }
       }
-      log(`WARNING: addressed turn produced no deliverable output and had no valid reply destination`);
-      emitSilentTurnComplete();
-      return { sent, hasUnwrapped, dispatched };
+      log('WARNING: addressed turn produced no deliverable output and had no valid reply destination');
     }
-    // Genuinely nothing-to-say (ambient chatter / maintenance task).
-    // Tell the host the turn is over so it can stop the typing
-    // indicator immediately, instead of letting it refresh on heartbeat
-    // freshness for the full HEARTBEAT_FRESH_MS window after the
-    // container goes idle. The host's typing module registers the
-    // matching `silent_turn_complete` delivery-action handler.
-    emitSilentTurnComplete();
+    await emitSilentTurnComplete();
+  } else if (sent === 0 && deliveredViaTool) {
+    // The content was sent via MCP; emit only the local turn-complete control.
+    await emitSilentTurnComplete();
   }
-  return { sent, hasUnwrapped, dispatched };
+
+  return { sent, hasUnwrapped, dispatched, resultBlocks };
 }
 
 /**
@@ -2624,8 +2782,8 @@ export function dispatchResultText(
  * routes it to `handleSystemAction` → registered handler. No channel
  * delivery, no platform_id/channel_type needed.
  */
-function emitSilentTurnComplete(): void {
-  writeMessageOut({
+async function emitSilentTurnComplete(): Promise<void> {
+  await writeMessageOut({
     id: generateId(),
     in_reply_to: null,
     kind: 'system',
@@ -2696,7 +2854,7 @@ function resolveDispatchReplyTarget(
   return destRouting?.inReplyTo ?? null;
 }
 
-function sendToDestination(
+async function sendToDestination(
   dest: DestinationEntry,
   body: string,
   routing: RoutingContext,
@@ -2705,20 +2863,9 @@ function sendToDestination(
   // resolves to a real file is staged into this message's outbox so the user
   // gets the actual attachment instead of an unopenable `sandbox:` link.
   fileLinks: DetectedFileLink[] = [],
-): { sent: boolean; reason?: string } {
+): Promise<{ sent: boolean; reason?: string }> {
   const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
   const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
-  // Task fires: an explicitly-addressed final-text block is either the echo of
-  // an MCP send the agent already made this turn (drop it HERE, where the
-  // duplication originates) or the agent's only deliberate send (write it
-  // in_reply_to-null like the MCP path, or the host's task-fire suppression
-  // would discard it — zero delivery).
-  if (routing.taskFire && hasIdenticalSend(platformId, channelType, body)) {
-    log(`Dropping turn-final echo of an already-sent task message to ${dest.name}`);
-    // The content WAS delivered (by the MCP send this echoes) — report
-    // success so the caller doesn't treat the block as undelivered.
-    return { sent: true };
-  }
   // Resolve thread_id per-destination from the most recent inbound message
   // that came from this same channel+platform. In agent-shared sessions,
   // different destinations have different thread contexts — using a single
@@ -2741,7 +2888,7 @@ function sendToDestination(
     log(`Nothing left to deliver to ${dest.name} after removing unusable local-file link(s), dropping block`);
     return { sent: false, reason: 'no deliverable content after local-file-link sweep' };
   }
-  writeMessageOut({
+  await writeMessageOut({
     id,
     in_reply_to: inReplyTo,
     kind: 'chat',
@@ -2779,15 +2926,6 @@ function resolveExplicitReplyTarget(
   seq: number,
   routing: { channel_type: string; platform_id: string },
 ): string | null | undefined {
-  const inbound = getInboundDb();
-  const inRow = inbound
-    .prepare('SELECT id, trigger, channel_type, platform_id FROM messages_in WHERE seq = ?')
-    .get(seq) as { id: string; trigger: number; channel_type: string | null; platform_id: string | null } | undefined;
-  if (inRow) {
-    if (inRow.channel_type !== routing.channel_type || inRow.platform_id !== routing.platform_id) return null;
-    return inRow.trigger === 1 ? inRow.id : null;
-  }
-
   const targetRouting = getRoutingBySeq(seq);
   if (!targetRouting) return undefined;
   if (targetRouting.channel_type !== routing.channel_type || targetRouting.platform_id !== routing.platform_id) {
@@ -2820,24 +2958,7 @@ function resolveDestinationThread(
   platformId: string,
 ): { threadId: string | null; inReplyTo: string | null } | null {
   try {
-    const db = getInboundDb();
-    const threadRow = db
-      .prepare(
-        `SELECT thread_id FROM messages_in
-         WHERE channel_type = ? AND platform_id = ?
-         ORDER BY COALESCE(seq, rowid) DESC, datetime(timestamp) DESC, rowid DESC LIMIT 1`,
-      )
-      .get(channelType, platformId) as { thread_id: string | null } | undefined;
-    if (!threadRow) return null;
-    const replyRow = db
-      .prepare(
-        `SELECT id FROM messages_in
-         WHERE channel_type = ? AND platform_id = ?
-           AND kind != 'task' AND trigger = 1
-         ORDER BY COALESCE(seq, rowid) DESC, datetime(timestamp) DESC, rowid DESC LIMIT 1`,
-      )
-      .get(channelType, platformId) as { id: string } | undefined;
-    return { threadId: threadRow.thread_id, inReplyTo: replyRow?.id ?? null };
+    return getAgentMailbox().operations.getLatestInboundRoute(channelType, platformId);
   } catch (err) {
     log(`resolveDestinationThread error: ${err instanceof Error ? err.message : String(err)}`);
   }

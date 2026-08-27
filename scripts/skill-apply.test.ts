@@ -95,6 +95,76 @@ describe('apply engine lifecycle', () => {
     expect(second.skipped.length).toBeGreaterThanOrEqual(3);
   });
 
+  it('refresh mode overwrites an installed payload instead of treating presence as current', async () => {
+    await applySkill(skillDir, root, { resolveInput: headless({ token: 'sekret-123' }), exec: () => {} });
+    writeFileSync(join(skillDir, 'resources/sample.ts'), 'export const sample = "refreshed";\n');
+
+    const refreshed = await applySkill(skillDir, root, {
+      mode: 'refresh',
+      resolveInput: headless({ token: 'sekret-123' }),
+      exec: () => {},
+    });
+
+    expect(readFileSync(join(root, 'src/sample.ts'), 'utf8')).toContain('"refreshed"');
+    expect(refreshed.applied.some((step) => step.startsWith('copy:'))).toBe(true);
+  });
+
+  it('refresh mode reruns an exact dependency directive even when the package name exists', async () => {
+    writeFileSync(join(skillDir, 'SKILL.md'), '# dependency refresh\n\n```nc:dep\ndemo-package@2.0.0\n```\n');
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'scratch', dependencies: { 'demo-package': '1.0.0' } }),
+    );
+    const { cmds, exec } = recordingExec();
+
+    await applySkill(skillDir, root, { mode: 'refresh', exec });
+
+    expect(cmds).toEqual(['pnpm add demo-package@2.0.0']);
+  });
+
+  it('refresh mode leaves credentials and normal run effects alone but runs effect:refresh', async () => {
+    writeFileSync(
+      join(skillDir, 'SKILL.md'),
+      [
+        '# safe refresh',
+        '```nc:prompt token secret',
+        'Paste token.',
+        '```',
+        '```nc:env-set',
+        'TOKEN={{token}}',
+        '```',
+        '```nc:run effect:wire',
+        'dangerous-wire',
+        '```',
+        '```nc:run effect:refresh',
+        'refresh-overlays',
+        '```',
+      ].join('\n'),
+    );
+    const { cmds, exec } = recordingExec();
+
+    const res = await applySkill(skillDir, root, { mode: 'refresh', exec });
+
+    expect(cmds).toEqual(['refresh-overlays']);
+    expect(readFileSync(join(root, '.env'), 'utf8')).not.toContain('TOKEN=');
+    expect(res.deferred).toEqual([]);
+    expect(fullyApplied(res)).toBe(true);
+  });
+
+  it('supports dependencies in a nested package tree with its own package manager', async () => {
+    mkdirSync(join(root, 'container/agent-runner'), { recursive: true });
+    writeFileSync(join(root, 'container/agent-runner/package.json'), '{"name":"runner"}');
+    writeFileSync(
+      join(skillDir, 'SKILL.md'),
+      '# nested dependency\n\n```nc:dep manager:bun cwd:container/agent-runner\n@demo/sdk@1.2.3\n```\n',
+    );
+    const { cmds, exec } = recordingExec();
+
+    await applySkill(skillDir, root, { exec });
+
+    expect(cmds).toEqual(['cd container/agent-runner && bun add @demo/sdk@1.2.3']);
+  });
+
   it('removes cleanly from the journal — no hand-written REMOVE.md', async () => {
     const res = await applySkill(skillDir, root, { resolveInput: headless({ token: 'sekret-123' }), exec: () => {} });
     await removeSkill(root, res.journal);
@@ -206,6 +276,23 @@ describe('json-merge directive', () => {
     await removeSkill(jroot, res.journal);
     const arr = JSON.parse(readFileSync(join(jroot, 'container/cli-tools.json'), 'utf8'));
     expect(arr).toEqual([{ name: 'vercel', version: '52.2.1' }]);
+  });
+
+  it('refresh mode updates a matching manifest entry and its journal restores the prior object', async () => {
+    writeFileSync(
+      join(jroot, 'container/cli-tools.json'),
+      JSON.stringify([{ name: '@openai/codex', version: '0.100.0', onlyBuilt: true }], null, 2) + '\n',
+    );
+
+    const res = await applySkill(jskill, jroot, { mode: 'refresh', exec: () => {} });
+    expect(JSON.parse(readFileSync(join(jroot, 'container/cli-tools.json'), 'utf8'))).toEqual([
+      { name: '@openai/codex', version: '0.138.0' },
+    ]);
+
+    await removeSkill(jroot, res.journal);
+    expect(JSON.parse(readFileSync(join(jroot, 'container/cli-tools.json'), 'utf8'))).toEqual([
+      { name: '@openai/codex', version: '0.100.0', onlyBuilt: true },
+    ]);
   });
 
   it('plan marks it →apply when absent, ✓skip when present', () => {

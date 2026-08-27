@@ -27,6 +27,11 @@ vi.mock('../../container-runner.js', () => ({
 vi.mock('../../session-manager.js', () => ({
   writeSessionMessage: (...args: unknown[]) => writeSessionMessage(...args),
 }));
+vi.mock('../typing/index.js', () => ({
+  setTypingAdapter: vi.fn(),
+  startTypingRefresh: vi.fn(),
+  stopTypingRefresh: vi.fn(),
+}));
 
 import { createAgentGroup, closeDb, initTestDb, runMigrations } from '../../db/index.js';
 import {
@@ -62,9 +67,9 @@ const stubAdapter: ChannelDeliveryAdapter = {
   },
 };
 
-function seedGroupAndSession(isGroup: 0 | 1, withChat = true): void {
-  createAgentGroup({ id: AG, name: 'Gate', folder: FOLDER, agent_provider: null, created_at: now() });
-  createMessagingGroup({
+async function seedGroupAndSession(isGroup: 0 | 1, withChat = true): Promise<void> {
+  await createAgentGroup({ id: AG, name: 'Gate', folder: FOLDER, agent_provider: null, created_at: now() });
+  await createMessagingGroup({
     id: MG_PUBLIC,
     channel_type: 'discord',
     platform_id: 'chan-x',
@@ -73,7 +78,7 @@ function seedGroupAndSession(isGroup: 0 | 1, withChat = true): void {
     unknown_sender_policy: 'public',
     created_at: now(),
   });
-  createSession({
+  await createSession({
     id: SESSION,
     agent_group_id: AG,
     messaging_group_id: withChat ? MG_PUBLIC : null,
@@ -86,23 +91,23 @@ function seedGroupAndSession(isGroup: 0 | 1, withChat = true): void {
   });
 }
 
-beforeEach(() => {
-  const db = initTestDb();
-  runMigrations(db);
+beforeEach(async () => {
+  const db = await initTestDb();
+  await runMigrations(db);
   wakeContainer.mockClear();
   writeSessionMessage.mockClear();
   delivered.length = 0;
   setDeliveryAdapter(stubAdapter);
 });
 
-afterEach(() => {
-  closeDb();
+afterEach(async () => {
+  await closeDb();
   // Tests that mutate the registry restore it; belt-and-suspenders.
   for (const k of Object.keys(CLASSIFICATION_REGISTRY)) delete CLASSIFICATION_REGISTRY[k];
 });
 
-describe('namespaceActorId — must match clicker-auth', () => {
-  it('prefixes channel only when the raw id has no colon', () => {
+describe('namespaceActorId — must match clicker-auth', async () => {
+  it('prefixes channel only when the raw id has no colon', async () => {
     expect(namespaceActorId('discord', '1234567890')).toBe('discord:1234567890');
     // Already-namespaced (Teams 29:xxx, channel-prefixed @lid) passes through.
     expect(namespaceActorId('teams', '29:abc')).toBe('29:abc');
@@ -110,13 +115,13 @@ describe('namespaceActorId — must match clicker-auth', () => {
   });
 });
 
-describe('evaluatePolicy — ordered rules + fail-closed', () => {
-  it('unmapped tool → require_confirmation (empty registry)', () => {
+describe('evaluatePolicy — ordered rules + fail-closed', async () => {
+  it('unmapped tool → require_confirmation (empty registry)', async () => {
     expect(evaluatePolicy({ integration: 'google', tool: 'anything', args: {}, isPublicChannel: false })).toBe(
       'require_confirmation',
     );
   });
-  it('write/destructive → require_confirmation in ANY chat; read non-pii → allow; pii read public-only', () => {
+  it('write/destructive → require_confirmation in ANY chat; read non-pii → allow; pii read public-only', async () => {
     CLASSIFICATION_REGISTRY.t = {
       w: { classification: 'write' },
       d: { classification: 'destructive' },
@@ -137,7 +142,7 @@ describe('evaluatePolicy — ordered rules + fail-closed', () => {
   });
 });
 
-describe('decideSensitiveGate — fail-closed resolution', () => {
+describe('decideSensitiveGate — fail-closed resolution', async () => {
   const base = {
     groupFolder: FOLDER,
     integration: 'google',
@@ -153,20 +158,20 @@ describe('decideSensitiveGate — fail-closed resolution', () => {
   });
 
   it('agent group but no active session → fail_closed', async () => {
-    createAgentGroup({ id: AG, name: 'G', folder: FOLDER, agent_provider: null, created_at: now() });
+    await createAgentGroup({ id: AG, name: 'G', folder: FOLDER, agent_provider: null, created_at: now() });
     const r = await decideSensitiveGate(base);
     expect(r.decision).toBe('fail_closed');
   });
 
   it('session with no originating chat → fail_closed (in-channel only)', async () => {
-    seedGroupAndSession(1, /* withChat */ false);
+    await seedGroupAndSession(1, /* withChat */ false);
     const r = await decideSensitiveGate(base);
     expect(r.decision).toBe('fail_closed');
     expect(delivered).toHaveLength(0);
   });
 });
 
-describe('decideSensitiveGate — grant + policy path', () => {
+describe('decideSensitiveGate — grant + policy path', async () => {
   const base = {
     groupFolder: FOLDER,
     integration: 'google',
@@ -177,7 +182,7 @@ describe('decideSensitiveGate — grant + policy path', () => {
   };
 
   it('unmapped tool, no grant → confirm + in-channel card with actor + row payload', async () => {
-    seedGroupAndSession(1);
+    await seedGroupAndSession(1);
     const r = await decideSensitiveGate(base);
     expect(r.decision).toBe('confirm');
     expect(delivered).toHaveLength(1);
@@ -190,30 +195,30 @@ describe('decideSensitiveGate — grant + policy path', () => {
   });
 
   it('live grant → allow (live_grant), no card, last_used_at bumped', async () => {
-    seedGroupAndSession(1);
+    await seedGroupAndSession(1);
     const actorId = namespaceActorId('discord', '777'); // discord:777
     const t0 = new Date(Date.now() - 60_000).toISOString();
-    upsertConfirmationGrant(SESSION, actorId, t0);
+    await upsertConfirmationGrant(SESSION, actorId, t0);
     const r = await decideSensitiveGate(base);
     expect(r).toEqual({ decision: 'allow', reason: 'live_grant' });
     expect(delivered).toHaveLength(0);
-    const g = getConfirmationGrant(SESSION, actorId);
+    const g = await getConfirmationGrant(SESSION, actorId);
     expect(g!.granted_at).toBe(t0); // hard cap unchanged
     expect(Date.parse(g!.last_used_at)).toBeGreaterThan(Date.parse(t0)); // bumped
   });
 
   it('grant past the 30-min hard cap → not live → confirm (re-prompts)', async () => {
-    seedGroupAndSession(1);
+    await seedGroupAndSession(1);
     const actorId = namespaceActorId('discord', '777');
     const stale = new Date(Date.now() - HARD_TTL_MS - 1000).toISOString();
-    upsertConfirmationGrant(SESSION, actorId, stale);
+    await upsertConfirmationGrant(SESSION, actorId, stale);
     const r = await decideSensitiveGate(base);
     expect(r.decision).toBe('confirm');
     expect(delivered).toHaveLength(1);
   });
 
   it('mapped allow tool, no grant → allow (policy_allow), no card', async () => {
-    seedGroupAndSession(0); // private chat
+    await seedGroupAndSession(0); // private chat
     CLASSIFICATION_REGISTRY.google = { google_call: { classification: 'read' } };
     const r = await decideSensitiveGate(base);
     expect(r).toEqual({ decision: 'allow', reason: 'policy_allow' });
@@ -221,7 +226,7 @@ describe('decideSensitiveGate — grant + policy path', () => {
   });
 });
 
-describe('Phase 5 — admin-controlled per-agent gate disable', () => {
+describe('Phase 5 — admin-controlled per-agent gate disable', async () => {
   const base = {
     groupFolder: FOLDER,
     integration: 'google',
@@ -231,40 +236,40 @@ describe('Phase 5 — admin-controlled per-agent gate disable', () => {
     senderDisplayName: 'Actor',
   };
 
-  it('getSensitiveGateMode: no config row ⇒ enforce (fail-safe)', () => {
-    seedGroupAndSession(1);
-    expect(getSensitiveGateMode(AG)).toBe('enforce');
+  it('getSensitiveGateMode: no config row ⇒ enforce (fail-safe)', async () => {
+    await seedGroupAndSession(1);
+    expect(await getSensitiveGateMode(AG)).toBe('enforce');
   });
 
-  it('getSensitiveGateMode: NULL column ⇒ enforce; explicit enforce ⇒ enforce', () => {
-    seedGroupAndSession(1);
-    ensureContainerConfig(AG); // row exists, sensitive_gate_mode NULL
-    expect(getSensitiveGateMode(AG)).toBe('enforce');
-    updateContainerConfigScalars(AG, { sensitive_gate_mode: 'enforce' });
-    expect(getSensitiveGateMode(AG)).toBe('enforce');
+  it('getSensitiveGateMode: NULL column ⇒ enforce; explicit enforce ⇒ enforce', async () => {
+    await seedGroupAndSession(1);
+    await ensureContainerConfig(AG); // row exists, sensitive_gate_mode NULL
+    expect(await getSensitiveGateMode(AG)).toBe('enforce');
+    await updateContainerConfigScalars(AG, { sensitive_gate_mode: 'enforce' });
+    expect(await getSensitiveGateMode(AG)).toBe('enforce');
   });
 
-  it('getSensitiveGateMode: any junk value ⇒ enforce (only literal "off" disables)', () => {
-    seedGroupAndSession(1);
-    ensureContainerConfig(AG);
+  it('getSensitiveGateMode: any junk value ⇒ enforce (only literal "off" disables)', async () => {
+    await seedGroupAndSession(1);
+    await ensureContainerConfig(AG);
     // Simulate a bad/legacy value sneaking in — must still fail safe.
-    updateContainerConfigScalars(AG, {
+    await updateContainerConfigScalars(AG, {
       sensitive_gate_mode: 'disabled' as unknown as 'off',
     });
-    expect(getSensitiveGateMode(AG)).toBe('enforce');
+    expect(await getSensitiveGateMode(AG)).toBe('enforce');
   });
 
   it('mode unset ⇒ gate still runs (unmapped tool ⇒ confirm + card)', async () => {
-    seedGroupAndSession(1);
+    await seedGroupAndSession(1);
     const r = await decideSensitiveGate(base);
     expect(r.decision).toBe('confirm');
     expect(delivered).toHaveLength(1);
   });
 
   it('mode "off" ⇒ allow with reason gate_disabled_by_admin, BEFORE policy, no card', async () => {
-    seedGroupAndSession(1);
-    ensureContainerConfig(AG);
-    updateContainerConfigScalars(AG, { sensitive_gate_mode: 'off' });
+    await seedGroupAndSession(1);
+    await ensureContainerConfig(AG);
+    await updateContainerConfigScalars(AG, { sensitive_gate_mode: 'off' });
     // Tool is unmapped — without the bypass this is a guaranteed confirm.
     const r = await decideSensitiveGate(base);
     expect(r).toEqual({ decision: 'allow', reason: 'gate_disabled_by_admin' });
@@ -272,10 +277,10 @@ describe('Phase 5 — admin-controlled per-agent gate disable', () => {
   });
 
   it('mode "off" short-circuits even a write-classified tool (before policy eval)', async () => {
-    seedGroupAndSession(1); // public channel — a write here would always confirm
+    await seedGroupAndSession(1); // public channel — a write here would always confirm
     CLASSIFICATION_REGISTRY.google = { google_call: { classification: 'write' } };
-    ensureContainerConfig(AG);
-    updateContainerConfigScalars(AG, { sensitive_gate_mode: 'off' });
+    await ensureContainerConfig(AG);
+    await updateContainerConfigScalars(AG, { sensitive_gate_mode: 'off' });
     const r = await decideSensitiveGate(base);
     expect(r).toEqual({ decision: 'allow', reason: 'gate_disabled_by_admin' });
     expect(delivered).toHaveLength(0);
@@ -292,12 +297,12 @@ describe('Phase 5 — admin-controlled per-agent gate disable', () => {
   });
 
   it('flipping "off" → "enforce" re-arms the gate on the next call', async () => {
-    seedGroupAndSession(1);
-    ensureContainerConfig(AG);
-    updateContainerConfigScalars(AG, { sensitive_gate_mode: 'off' });
+    await seedGroupAndSession(1);
+    await ensureContainerConfig(AG);
+    await updateContainerConfigScalars(AG, { sensitive_gate_mode: 'off' });
     const off = await decideSensitiveGate(base);
     expect(off).toEqual({ decision: 'allow', reason: 'gate_disabled_by_admin' });
-    updateContainerConfigScalars(AG, { sensitive_gate_mode: 'enforce' });
+    await updateContainerConfigScalars(AG, { sensitive_gate_mode: 'enforce' });
     delivered.length = 0;
     const reenforced = await decideSensitiveGate(base);
     expect(reenforced.decision).toBe('confirm');
@@ -305,7 +310,7 @@ describe('Phase 5 — admin-controlled per-agent gate disable', () => {
   });
 });
 
-describe('source-chat card routing — merged agent-shared groups (2026-06-15)', () => {
+describe('source-chat card routing — merged agent-shared groups (2026-06-15)', async () => {
   // A second, SIBLING channel in the same agent group — the chat the trigger
   // actually came from. The shared session is pinned to MG_PUBLIC (the
   // canonical channel), so without the source-coords stamp the card would
@@ -313,8 +318,8 @@ describe('source-chat card routing — merged agent-shared groups (2026-06-15)',
   const SOURCE_CHANNEL = 'discord';
   const SOURCE_PLATFORM = 'chan-source';
 
-  function seedSiblingSource(): void {
-    createMessagingGroup({
+  async function seedSiblingSource(): Promise<void> {
+    await createMessagingGroup({
       id: 'mg-source',
       channel_type: SOURCE_CHANNEL,
       platform_id: SOURCE_PLATFORM,
@@ -335,8 +340,8 @@ describe('source-chat card routing — merged agent-shared groups (2026-06-15)',
   };
 
   it('delivers the card to the SOURCE chat, not the session canonical chat', async () => {
-    seedGroupAndSession(1); // session pinned to MG_PUBLIC (platform 'chan-x')
-    seedSiblingSource();
+    await seedGroupAndSession(1); // session pinned to MG_PUBLIC (platform 'chan-x')
+    await seedSiblingSource();
     const r = await decideSensitiveGate({
       ...base,
       sourceChannelType: SOURCE_CHANNEL,
@@ -350,8 +355,8 @@ describe('source-chat card routing — merged agent-shared groups (2026-06-15)',
   });
 
   it('falls back to the session chat when no source coords are supplied', async () => {
-    seedGroupAndSession(1);
-    seedSiblingSource();
+    await seedGroupAndSession(1);
+    await seedSiblingSource();
     const r = await decideSensitiveGate(base); // no source coords
     expect(r.decision).toBe('confirm');
     expect(delivered).toHaveLength(1);
@@ -359,7 +364,7 @@ describe('source-chat card routing — merged agent-shared groups (2026-06-15)',
   });
 
   it('falls back to the session chat when source coords resolve to no group', async () => {
-    seedGroupAndSession(1);
+    await seedGroupAndSession(1);
     // No sibling seeded — the source coords point at an unregistered chat.
     const r = await decideSensitiveGate({
       ...base,
@@ -372,12 +377,12 @@ describe('source-chat card routing — merged agent-shared groups (2026-06-15)',
   });
 
   it('namespaces the actor with the SOURCE channel (grant keyed to source chat)', async () => {
-    seedGroupAndSession(1);
-    seedSiblingSource();
+    await seedGroupAndSession(1);
+    await seedSiblingSource();
     // Pre-seed a live grant keyed by the SOURCE-namespaced actor id; the gate
     // must find it (proving it namespaced via the source channel), short-
     // circuiting to allow with NO card.
-    upsertConfirmationGrant(SESSION, namespaceActorId(SOURCE_CHANNEL, '777'), now());
+    await upsertConfirmationGrant(SESSION, namespaceActorId(SOURCE_CHANNEL, '777'), now());
     const r = await decideSensitiveGate({
       ...base,
       sourceChannelType: SOURCE_CHANNEL,

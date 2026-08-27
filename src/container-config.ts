@@ -281,16 +281,20 @@ export interface ContainerConfig {
    */
   assistantPrefixSeparator?: string;
   timezone?: string;
+  /** Session isolation tier for the group's containers; absent = the composer's default ('container'). */
+  runtimeTier?: 'container' | 'vm';
 }
 
-/** Effective timezone: valid per-group override, otherwise install default. */
-export function resolveGroupTimezone(agentGroupId: string): string {
+/**
+ * Effective timezone for an agent group: per-group override → install global.
+ * Pure/test callers that run before central DB initialization still receive
+ * the documented install default.
+ */
+export async function resolveGroupTimezone(agentGroupId: string): Promise<string> {
   try {
-    const tz = getContainerConfig(agentGroupId)?.timezone;
+    const tz = (await getContainerConfig(agentGroupId))?.timezone;
     return tz && isValidTimezone(tz) ? tz : TIMEZONE;
   } catch {
-    // Pure/unit callers may run before the central DB is initialized. The
-    // install timezone is still the documented fallback in that state.
     return TIMEZONE;
   }
 }
@@ -343,6 +347,45 @@ export function sanitizeStoredMcpServers(raw: unknown, groupName: string): Recor
   return servers;
 }
 
+/**
+ * runtime_tier is an isolation control: dropping an unknown stored value would
+ * silently compose the group at the default tier — a weaker boundary than the
+ * one the value asked for. Fail closed instead: the group refuses to compose
+ * until the stored value is fixed. (A *declared* tier the driver cannot
+ * realize is refused separately by validateSpec, against the driver's
+ * capabilities.)
+ */
+function parseRuntimeTier(raw: string | null | undefined, groupName: string): 'container' | 'vm' | undefined {
+  if (raw == null) return undefined;
+  if (raw === 'container' || raw === 'vm') return raw;
+  throw new Error(`agent group "${groupName}" has invalid runtime_tier "${raw}" — expected "container" or "vm"`);
+}
+
+/**
+ * `'all'`, or the names the group selected. Anything else is treated as `'all'`:
+ * a bare string would otherwise turn an `includes` filter into a substring
+ * match and silently drop skills.
+ *
+ * The single reading of this column. `configFromDb` used to cast it instead,
+ * which threw on a corrupt row before the composer's tolerance could apply:
+ * every spawn failed, and `wakeContainer`'s retry contract darkened the group.
+ * Two readings that must agree is also how the document ends up teaching a
+ * skill the agent was never given.
+ */
+export function parseSkillSelection(raw: string | undefined, groupName: string): string[] | 'all' {
+  if (raw === undefined) return 'all';
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    parsed = undefined;
+  }
+  if (parsed === 'all') return 'all';
+  if (Array.isArray(parsed) && parsed.every((n) => typeof n === 'string')) return parsed;
+  log.warn('Stored skill selection is not "all" or a string list; inlining every skill', { group: groupName });
+  return 'all';
+}
+
 /** Build a `ContainerConfig` from a DB row + agent group identity. */
 export function configFromDb(row: ContainerConfigRow, group: AgentGroup): ContainerConfig {
   return {
@@ -353,7 +396,7 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
     },
     imageTag: row.image_tag ?? undefined,
     additionalMounts: JSON.parse(row.additional_mounts) as AdditionalMountConfig[],
-    skills: JSON.parse(row.skills) as string[] | 'all',
+    skills: parseSkillSelection(row.skills, group.name),
     provider: row.provider ?? undefined,
     groupName: group.name,
     assistantName: row.assistant_name ?? group.name,
@@ -366,23 +409,23 @@ export function configFromDb(row: ContainerConfigRow, group: AgentGroup): Contai
     suppressEmbeds: row.suppress_embeds === 1,
     assistantPrefixSeparator: row.assistant_prefix_separator ?? undefined,
     timezone: row.timezone && isValidTimezone(row.timezone) ? row.timezone : undefined,
+    runtimeTier: parseRuntimeTier(row.runtime_tier, group.name),
   };
 }
 
 /**
  * Materialize `container.json` from the DB. Called at spawn time so the
  * container always sees fresh config. Returns the `ContainerConfig` for
- * use by the caller (buildMounts, buildContainerArgs, etc.).
+ * use by the caller (buildMounts, composeSessionSpec, etc.).
  *
- * Path goes through `resolveGroupDir` so embedded hosts (e.g. Optimus,
- * which nests groups under workspace slugs) write to the correct dir
- * via the registered `groupDirResolver`.
+ * Path goes through `resolveGroupDir` so embedded hosts with nested workspace
+ * layouts materialize beside the group's actual writable state.
  */
-export function materializeContainerJson(agentGroupId: string): ContainerConfig {
-  const group = getAgentGroup(agentGroupId);
+export async function materializeContainerJson(agentGroupId: string): Promise<ContainerConfig> {
+  const group = await getAgentGroup(agentGroupId);
   if (!group) throw new Error(`Agent group not found: ${agentGroupId}`);
 
-  const row = getContainerConfig(agentGroupId);
+  const row = await getContainerConfig(agentGroupId);
   if (!row) throw new Error(`Container config not found for agent group: ${agentGroupId}`);
 
   const config = configFromDb(row, group);

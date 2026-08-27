@@ -25,8 +25,8 @@ import { resolveGroupFolderPath } from '../group-folder.js';
 import { PERSONA_PREPEND_FILE, readGroupPersona } from '../group-persona.js';
 import { log } from '../log.js';
 import { createScheduledTask, taskNameSlug } from '../modules/scheduling/create.js';
-import { parseTaskContent } from '../modules/scheduling/db.js';
 import { openScheduleDb, scheduleDbPath, updateSeries } from '../modules/scheduling/schedule-store.js';
+import { parseTaskContent } from '../modules/scheduling/task-content.js';
 import type { AgentGroup } from '../types.js';
 import { groupSkillsOverlayDir, markPluginServers } from './create-agent.js';
 import { resolveLocalTemplate } from './local-dir.js';
@@ -62,7 +62,7 @@ export interface RestampResult {
  * manifest (the full walk/caps/lint pass runs in the stamp it gates, not in
  * this probe).
  */
-export function groupsCarryingPlugin(ref: string): AgentGroup[] {
+export async function groupsCarryingPlugin(ref: string, groups?: readonly AgentGroup[]): Promise<AgentGroup[]> {
   const dir = resolveLocalTemplate(ref);
   const manifestPath = path.join(dir, PLUGIN_MANIFEST_FILE);
   // The fast path reads ONLY a regular manifest file. Anything else — absent
@@ -73,7 +73,7 @@ export function groupsCarryingPlugin(ref: string): AgentGroup[] {
     parseTemplate(dir);
   }
   const manifest = parsePluginManifest(JSON.parse(fs.readFileSync(manifestPath, 'utf-8')));
-  return getAllAgentGroups().filter((g) =>
+  return (groups ?? (await getAllAgentGroups())).filter((g) =>
     fs.existsSync(path.join(resolveGroupFolderPath(g.folder), 'plugins', manifest.name, PLUGIN_MANIFEST_FILE)),
   );
 }
@@ -83,10 +83,14 @@ export function groupsCarryingPlugin(ref: string): AgentGroup[] {
  * before any mutation when the group is missing, the group doesn't carry this
  * plugin, either plugin copy fails validation, or a template task is invalid.
  */
-export function restampAgentFromTemplate(ref: string, agentGroupId: string, opts: { apply: boolean }): RestampResult {
-  const group = getAgentGroup(agentGroupId);
+export async function restampAgentFromTemplate(
+  ref: string,
+  agentGroupId: string,
+  opts: { apply: boolean },
+): Promise<RestampResult> {
+  const group = await getAgentGroup(agentGroupId);
   if (!group) throw new Error(`Agent group not found: ${agentGroupId}`);
-  const configRow = getContainerConfig(group.id);
+  const configRow = await getContainerConfig(group.id);
   if (!configRow) throw new Error(`No container config for group: ${group.id}`);
 
   const tpl = parseTemplate(resolveLocalTemplate(ref));
@@ -111,11 +115,11 @@ export function restampAgentFromTemplate(ref: string, agentGroupId: string, opts
   // can half-apply over an invalid task file. NEW-side only: the old parsed
   // copy is tolerated as-is, so an already-stamped bad template stays
   // restampable to a fixed version.
-  const preparedTasks = prepareTemplateTasks(tpl.tasks, resolveGroupTimezone(group.id));
+  const preparedTasks = prepareTemplateTasks(tpl.tasks, await resolveGroupTimezone(group.id));
   const newTaskSlugs = new Set(tpl.tasks.map((task) => taskNameSlug(task.name)));
 
   const changes: RestampChange[] = [];
-  const ops: Array<() => void> = [];
+  const ops: Array<() => void | Promise<void>> = [];
 
   // --- plugin files: plugins/<name> replaced wholesale ---------------------
   if (dirsEqual(tpl.dir, oldPluginDir)) {
@@ -315,7 +319,7 @@ export function restampAgentFromTemplate(ref: string, agentGroupId: string, opts
     delete next[name];
     mcpDirty = true;
   }
-  if (mcpDirty) ops.push(() => updateContainerConfigJson(group.id, 'mcp_servers', next));
+  if (mcpDirty) ops.push(async () => await updateContainerConfigJson(group.id, 'mcp_servers', next));
 
   // --- tasks (matched by name slug; pause/resume state is operator-owned) --
   // Old-side tasks are keyed by SLUG — the identity live series carry. A rename
@@ -324,11 +328,12 @@ export function restampAgentFromTemplate(ref: string, agentGroupId: string, opts
   const oldTasks = new Map(old.tasks.map((t) => [taskNameSlug(t.name), t]));
   for (const task of tpl.tasks) {
     const prepared = preparedTasks.get(task.name)!;
-    const match = findTaskSeriesBySlug(group.id, taskNameSlug(task.name));
+    const match = await findTaskSeriesBySlug(group.id, taskNameSlug(task.name));
     const oldTask = oldTasks.get(taskNameSlug(task.name));
-    // A dead series (no live row, nothing armed to re-arm) is history, not a
-    // task — a fresh series is created alongside it.
-    if (match === undefined || (!match.live && match.recurrence === null)) {
+    // A cancelled series is dead history under S405 (recurring series stay
+    // pending while occurrences fire). Recreate a removed template task paused;
+    // there is no session-row "re-arming" window in this architecture.
+    if (match === undefined || !match.live) {
       changes.push({
         surface: 'task',
         name: task.name,
@@ -337,18 +342,8 @@ export function restampAgentFromTemplate(ref: string, agentGroupId: string, opts
           ? { customized: true, note: 'was removed locally; recreated paused' }
           : { note: 'created paused' }),
       });
-      ops.push(() => void createScheduledTask(group.id, prepared, { status: 'paused' }));
-      continue;
-    }
-    if (!match.live) {
-      // Completed row with a recurrence: the sweep re-arms it within a minute.
-      // Updating history rows would falsify what actually ran, so ask for a
-      // retry instead of writing through the window.
-      changes.push({
-        surface: 'task',
-        name: task.name,
-        action: 'skip',
-        note: `series ${match.seriesId} is re-arming between runs; re-run restamp to update it`,
+      ops.push(async () => {
+        await createScheduledTask(group.id, prepared, { status: 'paused' });
       });
       continue;
     }
@@ -387,9 +382,8 @@ export function restampAgentFromTemplate(ref: string, agentGroupId: string, opts
   }
   for (const [slug, oldTask] of oldTasks) {
     if (newTaskSlugs.has(slug)) continue;
-    const match = findTaskSeriesBySlug(group.id, slug);
-    // Nothing to remove when the series is already dead history.
-    if (match === undefined || (!match.live && match.recurrence === null)) continue;
+    const match = await findTaskSeriesBySlug(group.id, slug);
+    if (match === undefined) continue;
     changes.push({
       surface: 'task',
       name: oldTask.name,
@@ -416,7 +410,7 @@ export function restampAgentFromTemplate(ref: string, agentGroupId: string, opts
   if (opts.apply) {
     for (const [index, op] of ops.entries()) {
       try {
-        op();
+        await op();
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         throw new Error(
@@ -522,8 +516,9 @@ interface TaskSeriesMatch {
 /**
  * Find the task series a named task produced. Series rows don't store the name —
  * the id embeds its slug as `<slug>-<4hex>`, so match that shape in the group's
- * host-only `schedule.db`. Rows match in ANY state — a recurring series between
- * a run completing and the sweep re-arming it (≤60s) is still alive.
+ * host-only `schedule.db`. Rows match in any state, but a recurring S405 series
+ * remains pending while its transient occurrence runs; there is no session-row
+ * re-arming window.
  *
  * OPTIMUS FORK DIVERGENCE (S405): upstream scans each task session's
  * `inbound.db` `messages_in` because it stores task rows per session. This fork
@@ -534,7 +529,7 @@ interface TaskSeriesMatch {
  * as `created_at ASC`: the stamped series predates any same-named task the user
  * created later, so a user's own task never shadows the one restamp owns.
  */
-function findTaskSeriesBySlug(agentGroupId: string, slug: string): TaskSeriesMatch | undefined {
+async function findTaskSeriesBySlug(agentGroupId: string, slug: string): Promise<TaskSeriesMatch | undefined> {
   if (!slug) return undefined;
   if (!fs.existsSync(scheduleDbPath(agentGroupId))) return undefined;
   const pattern = `${slug}-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]`;
@@ -544,7 +539,7 @@ function findTaskSeriesBySlug(agentGroupId: string, slug: string): TaskSeriesMat
       .prepare(
         `SELECT series_id, status, recurrence, content FROM task_series
           WHERE kind = 'task' AND series_id GLOB ?
-          ORDER BY CASE WHEN status IN ('pending', 'paused') THEN 0 ELSE 1 END, created_at ASC
+          ORDER BY created_at ASC, rowid ASC
           LIMIT 1`,
       )
       .get(pattern) as { series_id: string; status: string; recurrence: string | null; content: string } | undefined;

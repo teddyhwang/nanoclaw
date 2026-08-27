@@ -48,9 +48,9 @@ let installed = {
 export function addSenderResolver(fn: SenderResolverFn): () => void {
   senderResolvers.push(fn);
   if (!installed.sender) {
-    _setSenderResolver((event) => {
+    _setSenderResolver(async (event) => {
       for (const r of senderResolvers) {
-        const v = r(event);
+        const v = await r(event);
         if (v) return v;
       }
       return null;
@@ -63,9 +63,9 @@ export function addSenderResolver(fn: SenderResolverFn): () => void {
 export function addAccessGate(fn: AccessGateFn): () => void {
   accessGates.push(fn);
   if (!installed.access) {
-    _setAccessGate((event, userId, mg, agentGroupId) => {
+    _setAccessGate(async (event, userId, mg, agentGroupId) => {
       for (const g of accessGates) {
-        const r = g(event, userId, mg, agentGroupId);
+        const r = await g(event, userId, mg, agentGroupId);
         if (!r.allowed) return r;
       }
       return { allowed: true };
@@ -78,9 +78,9 @@ export function addAccessGate(fn: AccessGateFn): () => void {
 export function addSenderScopeGate(fn: SenderScopeGateFn): () => void {
   senderScopeGates.push(fn);
   if (!installed.scope) {
-    _setSenderScopeGate((event, userId, mg, agent) => {
+    _setSenderScopeGate(async (event, userId, mg, agent) => {
       for (const g of senderScopeGates) {
-        const r = g(event, userId, mg, agent);
+        const r = await g(event, userId, mg, agent);
         if (!r.allowed) return r;
       }
       return { allowed: true };

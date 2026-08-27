@@ -33,9 +33,10 @@ CREATE TABLE messaging_groups (
   name                  TEXT,
   is_group              INTEGER DEFAULT 0,
   unknown_sender_policy TEXT NOT NULL DEFAULT 'strict',
-                        -- 'strict' | 'request_approval' | 'public'
+                        -- 'strict' | 'request_approval' | 'decline_notify' | 'public'
   created_at            TEXT NOT NULL,
   denied_at             TEXT,
+  detached_at           TEXT, -- set while our bot is absent from the platform channel
   UNIQUE(channel_type, platform_id, instance)
 );
 
@@ -52,7 +53,7 @@ CREATE TABLE messaging_group_agents (
   engage_pattern         TEXT,   -- regex; required when engage_mode='pattern';
                                  -- '.' means "match every message" (the "always" flavor)
   sender_scope           TEXT NOT NULL DEFAULT 'all',    -- 'all' | 'known'
-  ignored_message_policy TEXT NOT NULL DEFAULT 'accumulate',   -- 'drop' | 'accumulate'
+  ignored_message_policy TEXT NOT NULL DEFAULT 'accumulate', -- 'drop' | 'accumulate'
   session_mode           TEXT DEFAULT 'shared',
   priority               INTEGER DEFAULT 0,
   threads                INTEGER, -- NULL = inherit the channel adapter's declared
@@ -151,152 +152,4 @@ CREATE TABLE pending_sender_approvals (
   created_at         TEXT NOT NULL,
   UNIQUE(messaging_group_id, sender_identity)
 );
-`;
-
-/**
- * Session DB schemas — split into two files so each has exactly one writer.
- * This eliminates SQLite write contention across the host-container mount boundary.
- *
- *   inbound.db  — host writes, container reads (read-only mount or open read-only)
- *   outbound.db — container writes, host reads (read-only open)
- */
-
-/** Host-owned: inbound messages + delivery tracking + destination map. */
-export const INBOUND_SCHEMA = `
-CREATE TABLE IF NOT EXISTS messages_in (
-  id             TEXT PRIMARY KEY,
-  seq            INTEGER UNIQUE,
-  kind           TEXT NOT NULL,
-  timestamp      TEXT NOT NULL,
-  status         TEXT DEFAULT 'pending',
-  process_after  TEXT,
-  recurrence     TEXT,
-  series_id      TEXT,
-  tries          INTEGER DEFAULT 0,
-  trigger        INTEGER NOT NULL DEFAULT 1,
-                 -- 0 = accumulated context (don't wake), 1 = wake agent
-  platform_id    TEXT,
-  channel_type   TEXT,
-  thread_id      TEXT,
-  content        TEXT NOT NULL,
-  -- For agent-to-agent inbound rows: the source session that emitted the
-  -- triggering outbound. Used as a return path when the target replies —
-  -- the reply routes back to this exact session, not to the source agent
-  -- group's "newest" session. NULL on channel-side inbound and on a2a rows
-  -- written before this column existed.
-  source_session_id TEXT,
-  on_wake        INTEGER NOT NULL DEFAULT 0
-               -- 1 = only deliver on the container's first poll (fresh start).
-               -- Dying containers (past first poll) skip these rows.
-);
-CREATE INDEX IF NOT EXISTS idx_messages_in_series ON messages_in(series_id);
-
--- Host tracks delivery outcomes for messages_out IDs.
--- Avoids writing to outbound.db (container-owned).
-CREATE TABLE IF NOT EXISTS delivered (
-  message_out_id      TEXT PRIMARY KEY,
-  platform_message_id TEXT,
-  status              TEXT NOT NULL DEFAULT 'delivered',
-  delivered_at        TEXT NOT NULL
-);
-
--- Destination map for this session's agent.
--- Host overwrites on every container wake AND on demand (rewires, new child
--- agents, etc.). Container queries this live on every lookup, so changes
--- take effect mid-session without requiring a container restart.
-CREATE TABLE IF NOT EXISTS destinations (
-  name            TEXT PRIMARY KEY,
-  display_name    TEXT,
-  type            TEXT NOT NULL,   -- 'channel' | 'agent'
-  channel_type    TEXT,            -- for type='channel'
-  platform_id     TEXT,            -- for type='channel'
-  agent_group_id  TEXT             -- for type='agent'
-);
-
--- Current chat/thread routing for this session. Single-row table (id=1).
--- Host overwrites on every container wake from the session's messaging_group
--- and thread_id. Container reads it in send_message / ask_user_question to
--- preserve the thread when an explicitly named destination is the current
--- conversation, and for interactive-question response matching.
-CREATE TABLE IF NOT EXISTS session_routing (
-  id           INTEGER PRIMARY KEY CHECK (id = 1),
-  channel_type TEXT,
-  platform_id  TEXT,
-  thread_id    TEXT
-);
-`;
-
-/** Container-owned: outbound messages + processing acknowledgments. */
-export const OUTBOUND_SCHEMA = `
-CREATE TABLE IF NOT EXISTS messages_out (
-  id             TEXT PRIMARY KEY,
-  seq            INTEGER UNIQUE,
-  in_reply_to    TEXT,
-  timestamp      TEXT NOT NULL,
-  deliver_after  TEXT,
-  recurrence     TEXT,
-  kind           TEXT NOT NULL,
-  platform_id    TEXT,
-  channel_type   TEXT,
-  thread_id      TEXT,
-  content        TEXT NOT NULL
-);
-
--- Container tracks processing status here instead of updating messages_in.
--- Host reads this to know which messages have been processed.
--- On container startup, stale 'processing' entries are cleared (crash recovery).
-CREATE TABLE IF NOT EXISTS processing_ack (
-  message_id     TEXT PRIMARY KEY,
-  status         TEXT NOT NULL,
-  status_changed TEXT NOT NULL
-);
-
--- Persistent key/value state owned by the container. Used (among other things)
--- to store the SDK session ID so the agent's conversation resumes across
--- container restarts. Cleared by /clear.
-CREATE TABLE IF NOT EXISTS session_state (
-  key        TEXT PRIMARY KEY,
-  value      TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-
--- Current tool-in-flight state. Single-row table (id=1). Container writes on
--- PreToolUse and clears on PostToolUse / PostToolUseFailure. Host reads in the
--- sweep to extend the stuck-tolerance window when Bash is running with a
--- declared timeout > 60s (long-running scripts shouldn't be flagged as stuck).
-CREATE TABLE IF NOT EXISTS container_state (
-  id                       INTEGER PRIMARY KEY CHECK (id = 1),
-  current_tool             TEXT,
-  tool_declared_timeout_ms INTEGER,
-  tool_started_at          TEXT,
-  updated_at               TEXT NOT NULL
-);
-
--- Per-fire history of scheduled-task turns. One row per task-triggered
--- container turn. Persists across recurrence cloning (host-sweep clones
--- the messages_in task row on completion; series_id stays stable), so
--- the dashboard can show "what this recurring task has done over time"
--- by grouping rows by series_id.
---
--- status: 'completed' (agent dispatched >=1 outbound message),
---         'silent'    (turn finished with no user-facing output --
---                      e.g. silent maintenance tasks, internal-only output),
---         'error'     (provider/runtime error during the turn),
---         'gated'     (pre-task script ran and returned wakeAgent=false /
---                      errored -- the task fired but the agent was never
---                      invoked; error_message carries the gate reason).
--- assistant_text: full SDK result text BEFORE <message> parsing, so the
---   dashboard sees the model's whole output (scratchpad + wrapped blocks).
--- dispatched: JSON array of { destination, body } actually sent.
-CREATE TABLE IF NOT EXISTS task_fires (
-  id             TEXT PRIMARY KEY,
-  series_id      TEXT NOT NULL,
-  task_id        TEXT NOT NULL,
-  fired_at       TEXT NOT NULL,
-  status         TEXT NOT NULL,
-  assistant_text TEXT,
-  dispatched     TEXT NOT NULL DEFAULT '[]',
-  error_message  TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_task_fires_series ON task_fires(series_id, fired_at);
 `;

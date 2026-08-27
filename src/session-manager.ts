@@ -1,16 +1,8 @@
 /**
- * Session lifecycle: folders, DBs, messages, container status.
- *
- * Two-DB split — inbound.db (host writes) + outbound.db (container writes).
- * Three cross-mount invariants are load-bearing:
- *   1. journal_mode=DELETE — WAL's mmapped -shm doesn't refresh host→guest;
- *      the container would silently miss every new message.
- *   2. Host opens-writes-CLOSES per op — close invalidates the container's
- *      page cache; a long-lived connection freezes its view at first read.
- *   3. One writer per file — DELETE-mode journal-unlink isn't atomic across
- *      the mount; concurrent writers corrupt the DB.
+ * Session lifecycle: folders, mailboxes, messages, and container status.
+ * Storage layout and consistency belong to the registered mailbox.
  */
-import type Database from 'better-sqlite3';
+import { AsyncLocalStorage } from 'async_hooks';
 import fs from 'fs';
 import path from 'path';
 
@@ -23,6 +15,7 @@ import { transcribeAudio } from './media/transcription.js';
 import { formatVideoMarker, processVideo } from './media/video.js';
 import { ensureContainedInboxDir, isPathInside } from './inbox-safety.js';
 import { getMessagingGroup } from './db/messaging-groups.js';
+import { isUniqueViolation } from './db/errors.js';
 import {
   createSession,
   findSystemSession,
@@ -33,16 +26,8 @@ import {
   taskThreadId,
   updateSession,
 } from './db/sessions.js';
-import {
-  ensureSchema,
-  openInboundDb as openInboundDbRaw,
-  openOutboundDb as openOutboundDbRaw,
-  openOutboundDbRw as openOutboundDbRwRaw,
-  upsertSessionRouting,
-  insertMessage,
-  migrateMessagesInTable,
-} from './db/session-db.js';
 import { log } from './log.js';
+import { getAgentMailbox, type InboundMessage, type MailboxSession } from './mailbox/index.js';
 import type { Session } from './types.js';
 
 /** Root directory for all session data. */
@@ -55,14 +40,17 @@ export function sessionDir(agentGroupId: string, sessionId: string): string {
   return path.join(sessionsBaseDir(), agentGroupId, sessionId);
 }
 
-/** Path to the host-owned inbound DB (messages_in + delivered). */
-export function inboundDbPath(agentGroupId: string, sessionId: string): string {
-  return path.join(sessionDir(agentGroupId, sessionId), 'inbound.db');
+/** Host-owned runner context, kept outside the agent-writable session directory. */
+export function sessionContextPath(agentGroupId: string, sessionId: string): string {
+  return path.join(DATA_DIR, 'v2-sessions', agentGroupId, '.context', `${sessionId}.json`);
 }
 
-/** Path to the container-owned outbound DB (messages_out + processing_ack). */
-export function outboundDbPath(agentGroupId: string, sessionId: string): string {
-  return path.join(sessionDir(agentGroupId, sessionId), 'outbound.db');
+/** Materialize the immutable context the runner receives at startup. */
+export function writeSessionContext(agentGroupId: string, sessionId: string, mailbox: unknown): void {
+  const contextPath = sessionContextPath(agentGroupId, sessionId);
+  fs.mkdirSync(path.dirname(contextPath), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(contextPath, JSON.stringify({ agentGroupId, sessionId, mailbox }), { mode: 0o600 });
+  fs.chmodSync(contextPath, 0o600);
 }
 
 /** Path to the container heartbeat file (touched instead of DB writes). */
@@ -70,96 +58,92 @@ export function heartbeatPath(agentGroupId: string, sessionId: string): string {
   return path.join(sessionDir(agentGroupId, sessionId), '.heartbeat');
 }
 
+function mailboxKey(agentGroupId: string, sessionId: string) {
+  return { agentGroupId, sessionId };
+}
+
 function generateId(): string {
   return `sess-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-interface PendingChatCarryForwardRow {
-  id: string;
-  kind: string;
-  timestamp: string;
-  platform_id: string | null;
-  channel_type: string | null;
-  thread_id: string | null;
-  content: string;
-  process_after: string | null;
-  recurrence: string | null;
-  trigger: 0 | 1;
-  source_session_id: string | null;
-  on_wake: 0 | 1;
+const sessionCreationLocks = new Map<string, Promise<void>>();
+
+async function withSessionCreationLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const previous = sessionCreationLocks.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = previous.then(() => current);
+  sessionCreationLocks.set(key, tail);
+  await previous;
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (sessionCreationLocks.get(key) === tail) sessionCreationLocks.delete(key);
+  }
+}
+
+function sessionCreationKey(
+  agentGroupId: string,
+  messagingGroupId: string | null,
+  threadId: string | null,
+  sessionMode: 'shared' | 'per-thread' | 'agent-shared',
+): string {
+  if (sessionMode === 'agent-shared') return `agent\0${agentGroupId}`;
+  return `route\0${agentGroupId}\0${messagingGroupId ?? ''}\0${sessionMode === 'shared' ? '' : (threadId ?? '')}`;
 }
 
 /**
- * When a chat gets a fresh session after the previous one was closed, recent
- * unanswered human messages in the closed session must ride into the new
- * queue. Otherwise a user can send "read above" and the new container sees
- * only that follow-up, not the actual pending request.
+ * Carry recent due triggering chat rows from the latest closed matching
+ * session into a newly provisioned mailbox. Reads, target inserts, and source
+ * completion run in sequential sessions so no same-key nesting is possible.
  */
-function carryForwardRecentPendingChatRows(
+async function carryForwardRecentPendingChatRows(
   agentGroupId: string,
   messagingGroupId: string | null,
   threadId: string | null,
   targetSessionId: string,
-): void {
+): Promise<void> {
   if (!messagingGroupId) return;
-  const source = findMostRecentClosedSessionForAgent(agentGroupId, messagingGroupId, threadId);
+  const source = await findMostRecentClosedSessionForAgent(agentGroupId, messagingGroupId, threadId);
   if (!source) return;
 
-  const sourceDbPath = inboundDbPath(agentGroupId, source.id);
-  if (!fs.existsSync(sourceDbPath)) return;
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const rows = await withExistingMailboxSession(agentGroupId, source.id, (mailbox) =>
+    mailbox.getRecentPendingTriggeringChats(since),
+  );
+  if (!rows || rows.length === 0) return;
 
-  const sourceDb = openInboundDbRaw(sourceDbPath);
-  const targetDb = openInboundDbRaw(inboundDbPath(agentGroupId, targetSessionId));
-  try {
-    const rows = sourceDb
-      .prepare(
-        `SELECT id, kind, timestamp, platform_id, channel_type, thread_id,
-                content, process_after, recurrence, trigger, source_session_id, on_wake
-           FROM messages_in
-          WHERE status = 'pending'
-            AND kind IN ('chat', 'chat-sdk')
-            AND trigger = 1
-            AND (process_after IS NULL OR datetime(process_after) <= datetime('now'))
-            AND julianday(timestamp) >= julianday('now', '-1 day')
-          ORDER BY seq ASC`,
-      )
-      .all() as PendingChatCarryForwardRow[];
+  await withMailboxSession(agentGroupId, targetSessionId, async (mailbox) => {
+    for (const row of rows) {
+      await mailbox.insertMessage(row);
+    }
+  });
 
-    if (rows.length === 0) return;
-
-    const markCompleted = sourceDb.prepare("UPDATE messages_in SET status = 'completed' WHERE id = ?");
-    const tx = targetDb.transaction((pendingRows: PendingChatCarryForwardRow[]) => {
-      for (const row of pendingRows) {
-        insertMessage(targetDb, {
-          id: row.id,
-          kind: row.kind,
-          timestamp: row.timestamp,
-          platformId: row.platform_id,
-          channelType: row.channel_type,
-          threadId: row.thread_id,
-          content: row.content,
-          processAfter: row.process_after,
-          recurrence: row.recurrence,
-          trigger: row.trigger,
-          sourceSessionId: row.source_session_id,
-          onWake: row.on_wake,
-        });
-        markCompleted.run(row.id);
-      }
-    });
-    tx(rows);
-    log.info('Carried forward pending chat rows from closed session', {
+  const marked = await withExistingMailboxSession(agentGroupId, source.id, (mailbox) => {
+    mailbox.markMessagesCompleted(rows.map((row: InboundMessage) => row.id));
+    return true;
+  });
+  if (!marked) {
+    log.warn('Pending chat rows copied but source mailbox vanished before completion', {
       agentGroupId,
-      messagingGroupId,
-      threadId,
       sourceSessionId: source.id,
       targetSessionId,
       count: rows.length,
     });
-  } finally {
-    sourceDb.close();
-    targetDb.close();
+    return;
   }
+
+  log.info('Carried forward pending chat rows from closed session', {
+    agentGroupId,
+    messagingGroupId,
+    threadId,
+    sourceSessionId: source.id,
+    targetSessionId,
+    count: rows.length,
+  });
 }
 
 /**
@@ -171,205 +155,174 @@ function carryForwardRecentPendingChatRows(
  * - 'agent-shared': one session per agent group — all messaging groups
  *   wired with this mode share a single session (e.g. GitHub + Slack)
  */
-export function resolveSession(
+export async function resolveSession(
   agentGroupId: string,
   messagingGroupId: string | null,
   threadId: string | null,
   sessionMode: 'shared' | 'per-thread' | 'agent-shared',
-): { session: Session; created: boolean } {
-  // agent-shared: single session per agent group, regardless of messaging group
-  if (sessionMode === 'agent-shared') {
-    const existing = findSessionByAgentGroup(agentGroupId);
-    if (existing) {
+): Promise<{ session: Session; created: boolean }> {
+  const key = sessionCreationKey(agentGroupId, messagingGroupId, threadId, sessionMode);
+  return withSessionCreationLock(key, async () => {
+    // agent-shared: single session per agent group, regardless of messaging group
+    if (sessionMode === 'agent-shared') {
+      const existing = await findSessionByAgentGroup(agentGroupId);
+      if (existing) {
+        return { session: existing, created: false };
+      }
+    } else if (messagingGroupId) {
+      const lookupThreadId = sessionMode === 'shared' ? null : threadId;
+      // Scope lookup by agent_group_id so fan-out to multiple agents in the
+      // same chat doesn't accidentally deliver to the wrong agent's session.
+      const existing = await findSessionForAgent(agentGroupId, messagingGroupId, lookupThreadId);
+      if (existing) {
+        return { session: existing, created: false };
+      }
+    }
+
+    const id = generateId();
+    const lookupThreadId = sessionMode === 'per-thread' ? threadId : null;
+    const session: Session = {
+      id,
+      agent_group_id: agentGroupId,
+      messaging_group_id: messagingGroupId,
+      thread_id: lookupThreadId,
+      agent_provider: null,
+      status: 'active',
+      container_status: 'stopped',
+      last_active: null,
+      created_at: new Date().toISOString(),
+    };
+
+    try {
+      await createSession(session);
+    } catch (error) {
+      if (!isUniqueViolation(error)) throw error;
+      const existing =
+        sessionMode === 'agent-shared'
+          ? await findSessionByAgentGroup(agentGroupId)
+          : messagingGroupId
+            ? await findSessionForAgent(agentGroupId, messagingGroupId, lookupThreadId)
+            : undefined;
+      if (!existing) throw error;
       return { session: existing, created: false };
     }
-  } else if (messagingGroupId) {
-    const lookupThreadId = sessionMode === 'shared' ? null : threadId;
-    // Scope lookup by agent_group_id so fan-out to multiple agents in the
-    // same chat doesn't accidentally deliver to the wrong agent's session.
-    const existing = findSessionForAgent(agentGroupId, messagingGroupId, lookupThreadId);
-    if (existing) {
-      return { session: existing, created: false };
-    }
-  }
+    initSessionFolder(agentGroupId, id);
+    await carryForwardRecentPendingChatRows(agentGroupId, messagingGroupId, lookupThreadId, id);
+    log.info('Session created', { id, agentGroupId, messagingGroupId, threadId: lookupThreadId, sessionMode });
 
-  const id = generateId();
-  const lookupThreadId = sessionMode === 'per-thread' ? threadId : null;
-  const session: Session = {
-    id,
-    agent_group_id: agentGroupId,
-    messaging_group_id: messagingGroupId,
-    thread_id: lookupThreadId,
-    agent_provider: null,
-    status: 'active',
-    container_status: 'stopped',
-    last_active: null,
-    created_at: new Date().toISOString(),
-  };
-
-  createSession(session);
-  initSessionFolder(agentGroupId, id);
-  carryForwardRecentPendingChatRows(agentGroupId, messagingGroupId, lookupThreadId, id);
-  log.info('Session created', { id, agentGroupId, messagingGroupId, threadId: lookupThreadId, sessionMode });
-
-  return { session, created: true };
+    return { session, created: true };
+  });
 }
 
 /** Find or create the per-agent-group session used for scheduled tasks. */
 /** Find or create the isolated session for one task series (thread `system:tasks:<seriesId>`). */
-export function resolveTaskSession(agentGroupId: string, seriesId: string): { session: Session; created: boolean } {
+export async function resolveTaskSession(
+  agentGroupId: string,
+  seriesId: string,
+): Promise<{ session: Session; created: boolean }> {
   const threadId = taskThreadId(seriesId);
-  const existing = findSystemSession(agentGroupId, threadId);
-  if (existing) return { session: existing, created: false };
+  return withSessionCreationLock(`system\0${agentGroupId}\0${threadId}`, async () => {
+    const existing = await findSystemSession(agentGroupId, threadId);
+    if (existing) return { session: existing, created: false };
 
-  const id = generateId();
-  const session: Session = {
-    id,
-    agent_group_id: agentGroupId,
-    messaging_group_id: null,
-    thread_id: threadId,
-    agent_provider: null,
-    status: 'active',
-    container_status: 'stopped',
-    last_active: null,
-    created_at: new Date().toISOString(),
-  };
+    const id = generateId();
+    const session: Session = {
+      id,
+      agent_group_id: agentGroupId,
+      messaging_group_id: null,
+      thread_id: threadId,
+      agent_provider: null,
+      status: 'active',
+      container_status: 'stopped',
+      last_active: null,
+      created_at: new Date().toISOString(),
+    };
 
-  createSession(session);
-  initSessionFolder(agentGroupId, id);
-  log.info('Task session created', { id, agentGroupId, seriesId });
+    try {
+      await createSession(session);
+    } catch (error) {
+      if (!isUniqueViolation(error)) throw error;
+      const raced = await findSystemSession(agentGroupId, threadId);
+      if (!raced) throw error;
+      return { session: raced, created: false };
+    }
+    initSessionFolder(agentGroupId, id);
+    log.info('Task session created', { id, agentGroupId, seriesId });
 
-  return { session, created: true };
+    return { session, created: true };
+  });
 }
 
-/** Create the session folder and initialize both DBs. */
+/** Create the workspace folders and synchronously prepare the registered mailbox. */
 export function initSessionFolder(agentGroupId: string, sessionId: string): void {
   const dir = sessionDir(agentGroupId, sessionId);
   fs.mkdirSync(dir, { recursive: true });
   fs.mkdirSync(path.join(dir, 'outbox'), { recursive: true });
+  getAgentMailbox().prepare(mailboxKey(agentGroupId, sessionId));
+}
 
-  ensureSchema(inboundDbPath(agentGroupId, sessionId), 'inbound');
-  ensureSchema(outboundDbPath(agentGroupId, sessionId), 'outbound');
+/** Destroy one session's implementation-owned mailbox after its container stops. */
+export async function destroySessionMailbox(agentGroupId: string, sessionId: string): Promise<void> {
+  await getAgentMailbox().destroy(mailboxKey(agentGroupId, sessionId));
+  fs.rmSync(sessionContextPath(agentGroupId, sessionId), { force: true });
 }
 
 /**
- * Write the current chat/thread routing for a session into its inbound.db.
+ * Write the current chat/thread routing for a session into its inbound mailbox.
  *
- * The container reads this as the default (channel_type, platform_id, thread_id)
- * for outbound messages when the agent doesn't specify an explicit destination,
- * and (via getSessionRouting) as the source-chat coords stamped into
- * search_conversations / escalate_to_dev_agent requests.
- *
- * Coords are derived from session.messaging_group_id → messaging_groups row
- * for a single-chat session. For a **merged / agent-shared session**
- * (session.messaging_group_id is NULL by design — one session serves N
- * chats, e.g. the merged AI Friends / Boys Night / Golf "Degenerates"
- * group) that derivation yields NULL, which used to write empty
- * session_routing. That broke every consumer that needs "which chat is
- * this turn about": search_conversations fell through to its
- * no-chat-scope error (2026-05-17 AI Friends — user got "session has no
- * messaging_group_id and no source-chat coords"), and escalate_to_dev_agent
- * only worked by accident via a different coords path. Fix: when
- * messaging_group_id is NULL, fall back to the most-recent **triggering**
- * chat row in this session's inbound.db — that row's channel_type /
- * platform_id IS the chat the current wake is about (this is the same
- * per-message-coords mechanism the engine's delivery path already uses to
- * route agent-shared replies, not a parallel source of truth). thread_id
- * still comes from the session row.
+ * The container uses this to preserve source-chat routing. Prefer the latest
+ * triggering, user-facing chat row (critical for agent-shared sessions), then
+ * fall back to session.messaging_group_id before setting the route.
  *
  * Called on every container wake alongside the agent-to-agent module's
  * writeDestinations() (when installed) so the latest routing is always in
  * place, including after admin rewiring.
  */
-export function writeSessionRouting(agentGroupId: string, sessionId: string): void {
-  const dbPath = inboundDbPath(agentGroupId, sessionId);
-  if (!fs.existsSync(dbPath)) return;
-
-  const session = getSession(sessionId);
+export async function writeSessionRouting(agentGroupId: string, sessionId: string): Promise<void> {
+  const session = await getSession(sessionId);
   if (!session) return;
 
   let channelType: string | null = null;
   let platformId: string | null = null;
 
-  const db = openInboundDb(agentGroupId, sessionId);
-  try {
-    // PREFER the most-recent triggering chat row's coords — that row IS the
-    // chat the current wake is about. The previous implementation preferred
-    // session.messaging_group_id first and only used the trigger row for
-    // null sessions, which broke wirings like the "Degenerates" merged
-    // agent group: five chats (AI Friends, Boys Night, Golf, Cook,
-    // Hung's Bday) share one agent group; the session created the first
-    // time AI Friends woke the agent has `messaging_group_id =
-    // mg-AI-Friends` and that ID never changes, so every escalation from
-    // any of the other four chats was stamped as "from AI Friends".
-    //
-    // channel_type='agent' is the agent-to-agent pseudo-channel (see
-    // agent-route.ts: it writes a2a inbound as kind='chat',
-    // channel_type='agent'). It is NOT a user-facing chat scope —
-    // getMessagingGroupByPlatform could never resolve it, and an A2A-only
-    // session legitimately has no chat routing (bug #2332's known shape).
-    // Exclude it so an a2a row never gets mistaken for "the chat this
-    // wake is about".
-    try {
-      const row = db
-        .prepare(
-          `SELECT channel_type, platform_id
-             FROM messages_in
-            WHERE trigger = 1
-              AND kind IN ('chat', 'chat-sdk')
-              AND channel_type IS NOT NULL
-              AND channel_type != 'agent'
-              AND platform_id IS NOT NULL
-            ORDER BY seq DESC
-            LIMIT 1`,
-        )
-        .get() as { channel_type: string; platform_id: string } | undefined;
-      if (row) {
-        channelType = row.channel_type;
-        platformId = row.platform_id;
-      }
-    } catch {
-      // messages_in shape older than expected — fall through to the
-      // session.messaging_group_id fallback below.
-    }
-
-    // Fallback to session.messaging_group_id for sessions that have not
-    // yet seen a triggering chat row (a freshly-created single-chat
-    // session that's about to receive its first wake; pre-trigger
-    // bootstrap writes). The session's pinned messaging group is the
-    // best available signal in that case.
-    if ((!channelType || !platformId) && session.messaging_group_id) {
-      const mg = getMessagingGroup(session.messaging_group_id);
-      if (mg) {
-        channelType = mg.channel_type;
-        platformId = mg.platform_id;
-      }
-    }
-
-    upsertSessionRouting(db, {
-      channel_type: channelType,
-      platform_id: platformId,
-      thread_id: session.thread_id,
-    });
-  } finally {
-    db.close();
+  const latest = await withExistingMailboxSession(agentGroupId, sessionId, (mailbox) =>
+    mailbox.getLatestTriggeringChatRouting(),
+  );
+  if (latest) {
+    channelType = latest.channelType;
+    platformId = latest.platformId;
   }
+
+  // A new session may not have a triggering row yet. Its pinned messaging
+  // group is the best available bootstrap route, but never overrides a later
+  // source-chat row in an agent-shared session.
+  if ((!channelType || !platformId) && session.messaging_group_id) {
+    const mg = await getMessagingGroup(session.messaging_group_id);
+    if (mg) {
+      channelType = mg.channel_type;
+      platformId = mg.platform_id;
+    }
+  }
+
+  await withMailboxSession(agentGroupId, sessionId, (mailbox) => {
+    mailbox.setRouting({
+      channelType,
+      platformId,
+      threadId: session.thread_id,
+    });
+  });
   log.debug('Session routing written', { sessionId, channelType, platformId, threadId: session.thread_id });
 }
 
 /**
- * Write a message to a session's inbound DB (messages_in). Host-only.
- *
- * ⚠ Opens and closes the DB on every call. Do not refactor to reuse a
- * long-lived connection — see the "Cross-mount visibility invariants" note
- * at the top of this file.
+ * Write a message to a session's inbound mailbox. Host-only.
  */
 export async function writeSessionMessage(
   agentGroupId: string,
   sessionId: string,
   message: {
     id: string;
-    kind: string;
+    kind: InboundMessage['kind'];
     timestamp: string;
     platformId?: string | null;
     channelType?: string | null;
@@ -378,12 +331,12 @@ export async function writeSessionMessage(
     processAfter?: string | null;
     recurrence?: string | null;
     /**
-     * 1 = this message should wake the agent (the default); 0 = accumulate
+     * true = this message should wake the agent (the default); false = accumulate
      * as context only, don't wake. Host's countDueMessages gates on this
      * column; the container still reads all prior messages as context when
-     * a trigger-1 message does arrive.
+     * a triggering message does arrive.
      */
-    trigger?: 0 | 1;
+    trigger?: boolean;
     /**
      * For agent-to-agent inbound: the source session id that emitted the
      * outbound message which became this inbound row. Used as the return
@@ -391,31 +344,26 @@ export async function writeSessionMessage(
      */
     sourceSessionId?: string | null;
     /**
-     * 1 = only deliver on the container's first poll (fresh start).
+     * true = only deliver on the container's first poll (fresh start).
      * Dying containers (past first poll) skip these rows.
      */
-    onWake?: 0 | 1;
+    onWake?: boolean;
   },
 ): Promise<void> {
   // Documented reset: operators `rm -rf` a session folder to clear a stuck
   // session. The sessions row survives, so the next message takes the
-  // existing-session path and lands here with a missing inbound.db — the open
+  // existing-session path and lands here with a missing mailbox — the open
   // below would throw and the message would be logged-and-dropped forever.
-  // Re-provision the folder + DBs (initSessionFolder is idempotent) so the
+  // Re-provision the folder + mailbox (initSessionFolder is idempotent) so the
   // documented reset actually re-provisions instead of killing the chat.
-  if (!fs.existsSync(inboundDbPath(agentGroupId, sessionId))) {
-    initSessionFolder(agentGroupId, sessionId);
-  }
+  initSessionFolder(agentGroupId, sessionId);
 
-  // Extract base64 attachment data, save to inbox, replace with file paths.
-  // Also runs the per-attachment audio-transcription pass so voice
-  // messages land on disk with `att.transcript` populated for the
-  // container formatter to render.
+  // Process media before opening the mailbox write session: attachment I/O,
+  // transcription, and video analysis may be slow and must not hold the key.
   const content = await extractAttachmentFiles(agentGroupId, sessionId, message.id, message.content);
 
-  const db = openInboundDb(agentGroupId, sessionId);
-  try {
-    insertMessage(db, {
+  await withMailboxSession(agentGroupId, sessionId, async (mailbox) => {
+    await mailbox.insertMessage({
       id: message.id,
       kind: message.kind,
       timestamp: message.timestamp,
@@ -425,15 +373,12 @@ export async function writeSessionMessage(
       content,
       processAfter: message.processAfter ?? null,
       recurrence: message.recurrence ?? null,
-      trigger: message.trigger ?? 1,
+      trigger: message.trigger ?? true,
       sourceSessionId: message.sourceSessionId ?? null,
-      onWake: message.onWake ?? 0,
+      onWake: message.onWake ?? false,
     });
-  } finally {
-    db.close();
-  }
-
-  updateSession(sessionId, { last_active: new Date().toISOString() });
+  });
+  await updateSession(sessionId, { last_active: new Date().toISOString() });
 }
 
 /**
@@ -618,11 +563,7 @@ async function extractAttachmentFiles(
   return changed ? JSON.stringify(parsed) : contentStr;
 }
 
-/**
- * Identify audio/voice attachments. Matches chat-sdk-bridge's audio type
- * tag AND any attachment with an `audio/` mimeType (catches doc-typed
- * voice memos some adapters surface).
- */
+/** Identify audio/voice attachments by semantic type or MIME. */
 function isVoiceAttachment(att: Record<string, unknown>): boolean {
   const type = typeof att.type === 'string' ? att.type : '';
   if (type === 'audio' || type === 'voice') return true;
@@ -642,44 +583,60 @@ function isVideoAttachment(att: Record<string, unknown>): boolean {
   if (type === 'video') return true;
   return mime.startsWith('video/');
 }
+/**
+ * Detects same-key session() nesting, which is forbidden: implementations may
+ * serialize session() per key, so a nested call may deadlock. Tracked per async context so
+ * legitimately concurrent top-level sessions on the same key don't trip it.
+ */
+const activeMailboxKeys = new AsyncLocalStorage<ReadonlySet<string>>();
 
-/** Open the inbound DB for a session (host reads/writes). */
-export function openInboundDb(agentGroupId: string, sessionId: string): Database.Database {
-  const db = openInboundDbRaw(inboundDbPath(agentGroupId, sessionId));
-  migrateMessagesInTable(db);
-  return db;
+/** Run one host operation against a session mailbox. The implementation owns persistence.
+ *
+ * Never call this (directly or via helpers like writeSessionMessage) from
+ * inside another withMailboxSession action on the same session — finish the
+ * open session first. See AgentMailbox.session in src/mailbox/types.ts.
+ */
+export function withMailboxSession<T>(
+  agentGroupId: string,
+  sessionId: string,
+  action: (mailbox: MailboxSession) => T | Promise<T>,
+): Promise<T> {
+  return runMailboxSession(agentGroupId, sessionId, action, true) as Promise<T>;
 }
 
-/** Open a session's inbound DB, run `fn`, and always close it. */
-export function withInboundDb<T>(agentGroupId: string, sessionId: string, fn: (db: Database.Database) => T): T {
-  const db = openInboundDb(agentGroupId, sessionId);
-  try {
-    return fn(db);
-  } finally {
-    db.close();
+/** Run against an already-provisioned mailbox without creating storage. */
+export function withExistingMailboxSession<T>(
+  agentGroupId: string,
+  sessionId: string,
+  action: (mailbox: MailboxSession) => T | Promise<T>,
+): Promise<T | undefined> {
+  return runMailboxSession(agentGroupId, sessionId, action, false);
+}
+
+async function runMailboxSession<T>(
+  agentGroupId: string,
+  sessionId: string,
+  action: (mailbox: MailboxSession) => T | Promise<T>,
+  provision: boolean,
+): Promise<T | undefined> {
+  const store = getAgentMailbox();
+  const key = mailboxKey(agentGroupId, sessionId);
+  const keyId = `${agentGroupId}/${sessionId}`;
+  const held = activeMailboxKeys.getStore();
+  if (held?.has(keyId)) {
+    throw new Error(`Nested mailbox session for ${keyId} — serialized implementations would deadlock here`);
   }
-}
-
-/** Open the outbound DB for a session (host reads only). */
-export function openOutboundDb(agentGroupId: string, sessionId: string): Database.Database {
-  return openOutboundDbRaw(outboundDbPath(agentGroupId, sessionId));
-}
-
-/** Open the outbound DB for a session with write access. Only safe to call when no container is running. */
-export function openOutboundDbRw(agentGroupId: string, sessionId: string): Database.Database {
-  return openOutboundDbRwRaw(outboundDbPath(agentGroupId, sessionId));
+  if (provision) store.prepare(key);
+  else if (!(await store.exists(key))) return undefined;
+  return activeMailboxKeys.run(new Set(held).add(keyId), () => store.session(key, action));
 }
 
 /**
- * Write a message directly to a session's outbound DB so the host delivery
+ * Write a message directly to a session's outbound mailbox so the host delivery
  * loop picks it up. Used by the command gate to send denial responses
  * without waking a container.
  *
- * Needs the read-write open — the readonly handle the delivery poll uses
- * can't INSERT. This is a host-side write to the container-owned outbound.db,
- * but it's safe even with a container running: both sides open with DELETE
- * journal + busy_timeout, and the even host seq stays out of the container's
- * odd-seq space.
+ * The selected mailbox owns persistence and sequencing.
  */
 export function writeOutboundDirect(
   agentGroupId: string,
@@ -692,24 +649,8 @@ export function writeOutboundDirect(
     threadId: string | null;
     content: string;
   },
-): void {
-  const db = openOutboundDbRw(agentGroupId, sessionId);
-  try {
-    db.prepare(
-      `INSERT OR IGNORE INTO messages_out (id, seq, timestamp, kind, platform_id, channel_type, thread_id, content)
-       VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 2 FROM messages_out), ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      message.id,
-      new Date().toISOString(),
-      message.kind,
-      message.platformId,
-      message.channelType,
-      message.threadId,
-      message.content,
-    );
-  } finally {
-    db.close();
-  }
+): Promise<void> {
+  return withMailboxSession(agentGroupId, sessionId, (mailbox) => mailbox.writeDirect(message));
 }
 
 /**
@@ -717,7 +658,7 @@ export function writeOutboundDirect(
  *
  * Symmetric with `extractAttachmentFiles` on the inbound side: the container
  * writes files into the session's `outbox/<messageId>/` directory alongside
- * its `messages_out` row, and the host reads them back at delivery time.
+ * its outbound message, and the host reads them back at delivery time.
  *
  * Returns undefined when the outbox dir is missing or no declared file was
  * actually on disk — delivery continues without attachments rather than
@@ -810,16 +751,16 @@ export function clearOutbox(agentGroupId: string, sessionId: string, messageId: 
 }
 
 /** Mark a container as running for a session. */
-export function markContainerRunning(sessionId: string): void {
-  updateSession(sessionId, { container_status: 'running', last_active: new Date().toISOString() });
+export async function markContainerRunning(sessionId: string): Promise<void> {
+  await updateSession(sessionId, { container_status: 'running', last_active: new Date().toISOString() });
 }
 
 /** Mark a container as idle for a session. */
-export function markContainerIdle(sessionId: string): void {
-  updateSession(sessionId, { container_status: 'idle' });
+export async function markContainerIdle(sessionId: string): Promise<void> {
+  await updateSession(sessionId, { container_status: 'idle' });
 }
 
 /** Mark a container as stopped for a session. */
-export function markContainerStopped(sessionId: string): void {
-  updateSession(sessionId, { container_status: 'stopped' });
+export async function markContainerStopped(sessionId: string): Promise<void> {
+  await updateSession(sessionId, { container_status: 'stopped' });
 }

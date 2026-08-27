@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
 
-import { getOutboundDb, initTestSessionDb } from './connection.js';
+import { getOutboundDb, initTestSessionDb } from '../mailbox/sqlite/connection.js';
 import { writeTaskFire } from './task-fires.js';
 
 interface TaskFireRow {
@@ -44,7 +44,7 @@ describe('task_fires writer', () => {
     expect(rows[0].error_message).toBeNull();
   });
 
-  test("silent fire stores empty dispatched array and null text", () => {
+  test('silent fire stores empty dispatched array and null text', () => {
     writeTaskFire({
       id: 'fire-2',
       seriesId: 'series-quiet',
@@ -192,14 +192,14 @@ describe('task_fires writer', () => {
     });
 
     const slowCount = (
-      getOutboundDb()
-        .prepare('SELECT count(*) AS n FROM task_fires WHERE series_id = ?')
-        .get('series-slow') as { n: number }
+      getOutboundDb().prepare('SELECT count(*) AS n FROM task_fires WHERE series_id = ?').get('series-slow') as {
+        n: number;
+      }
     ).n;
     const chattyCount = (
-      getOutboundDb()
-        .prepare('SELECT count(*) AS n FROM task_fires WHERE series_id = ?')
-        .get('series-chatty') as { n: number }
+      getOutboundDb().prepare('SELECT count(*) AS n FROM task_fires WHERE series_id = ?').get('series-chatty') as {
+        n: number;
+      }
     ).n;
 
     expect(slowCount).toBe(1);

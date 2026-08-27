@@ -23,6 +23,11 @@ vi.mock('../../container-runner.js', () => ({
 vi.mock('../../session-manager.js', () => ({
   writeSessionMessage: (...args: unknown[]) => writeSessionMessage(...args),
 }));
+vi.mock('../typing/index.js', () => ({
+  setTypingAdapter: vi.fn(),
+  startTypingRefresh: vi.fn(),
+  stopTypingRefresh: vi.fn(),
+}));
 
 // Fix B: the confirm handler now calls dashboard-server to replay the
 // held MCP call. Mock the client so the suite is hermetic (no real
@@ -76,17 +81,17 @@ const stubAdapter: ChannelDeliveryAdapter = {
   },
 };
 
-beforeEach(() => {
-  const db = initTestDb();
-  runMigrations(db);
+beforeEach(async () => {
+  const db = await initTestDb();
+  await runMigrations(db);
   wakeContainer.mockClear();
   writeSessionMessage.mockClear();
   _resetReplayResolutionForTesting();
   delivered.length = 0;
   setDeliveryAdapter(stubAdapter);
 
-  createAgentGroup({ id: AG, name: 'Test', folder: 'test', agent_provider: null, created_at: now() });
-  createMessagingGroup({
+  await createAgentGroup({ id: AG, name: 'Test', folder: 'test', agent_provider: null, created_at: now() });
+  await createMessagingGroup({
     id: MG,
     channel_type: 'discord',
     platform_id: 'chan-public',
@@ -95,7 +100,7 @@ beforeEach(() => {
     unknown_sender_policy: 'public',
     created_at: now(),
   });
-  createSession({
+  await createSession({
     id: SESSION,
     agent_group_id: AG,
     messaging_group_id: MG,
@@ -108,41 +113,41 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => {
-  closeDb();
+afterEach(async () => {
+  await closeDb();
 });
 
-describe('confirmation_grants accessors', () => {
-  it('upsert → get → touch lifecycle, per-(session,actor) keyed', () => {
-    expect(getConfirmationGrant(SESSION, ACTOR)).toBeUndefined();
+describe('confirmation_grants accessors', async () => {
+  it('upsert → get → touch lifecycle, per-(session,actor) keyed', async () => {
+    expect(await getConfirmationGrant(SESSION, ACTOR)).toBeUndefined();
 
     const t0 = '2026-05-17T10:00:00.000Z';
-    upsertConfirmationGrant(SESSION, ACTOR, t0);
-    const g = getConfirmationGrant(SESSION, ACTOR);
+    await upsertConfirmationGrant(SESSION, ACTOR, t0);
+    const g = await getConfirmationGrant(SESSION, ACTOR);
     expect(g).toMatchObject({ session_id: SESSION, actor_id: ACTOR, granted_at: t0, last_used_at: t0 });
 
     // A different actor in the SAME session has no grant (no cross-user leak).
-    expect(getConfirmationGrant(SESSION, BYSTANDER)).toBeUndefined();
+    expect(await getConfirmationGrant(SESSION, BYSTANDER)).toBeUndefined();
 
     // touch bumps last_used_at only, NOT granted_at (hard cap unchanged).
     const t1 = '2026-05-17T10:05:00.000Z';
-    touchConfirmationGrant(SESSION, ACTOR, t1);
-    const g2 = getConfirmationGrant(SESSION, ACTOR);
+    await touchConfirmationGrant(SESSION, ACTOR, t1);
+    const g2 = await getConfirmationGrant(SESSION, ACTOR);
     expect(g2?.granted_at).toBe(t0);
     expect(g2?.last_used_at).toBe(t1);
 
     // re-upsert (re-confirm after expiry) refreshes BOTH.
     const t2 = '2026-05-17T11:00:00.000Z';
-    upsertConfirmationGrant(SESSION, ACTOR, t2);
-    const g3 = getConfirmationGrant(SESSION, ACTOR);
+    await upsertConfirmationGrant(SESSION, ACTOR, t2);
+    const g3 = await getConfirmationGrant(SESSION, ACTOR);
     expect(g3?.granted_at).toBe(t2);
     expect(g3?.last_used_at).toBe(t2);
   });
 
-  it('deleteConfirmationGrantsForSession drops only that session', () => {
+  it('deleteConfirmationGrantsForSession drops only that session', async () => {
     // A real second session row — confirmation_grants.session_id has a
     // FOREIGN KEY to sessions(id), which is intentional schema design.
-    createSession({
+    await createSession({
       id: 'sess-other',
       agent_group_id: AG,
       messaging_group_id: MG,
@@ -153,21 +158,21 @@ describe('confirmation_grants accessors', () => {
       last_active: now(),
       created_at: now(),
     });
-    upsertConfirmationGrant(SESSION, ACTOR, now());
-    upsertConfirmationGrant('sess-other', ACTOR, now());
-    deleteConfirmationGrantsForSession(SESSION);
-    expect(getConfirmationGrant(SESSION, ACTOR)).toBeUndefined();
-    expect(getConfirmationGrant('sess-other', ACTOR)).toBeDefined();
+    await upsertConfirmationGrant(SESSION, ACTOR, now());
+    await upsertConfirmationGrant('sess-other', ACTOR, now());
+    await deleteConfirmationGrantsForSession(SESSION);
+    expect(await getConfirmationGrant(SESSION, ACTOR)).toBeUndefined();
+    expect(await getConfirmationGrant('sess-other', ACTOR)).toBeDefined();
   });
 
-  it('deleteSession cascades the grant drop', () => {
-    upsertConfirmationGrant(SESSION, ACTOR, now());
-    deleteSession(SESSION);
-    expect(getConfirmationGrant(SESSION, ACTOR)).toBeUndefined();
+  it('deleteSession cascades the grant drop', async () => {
+    await upsertConfirmationGrant(SESSION, ACTOR, now());
+    await deleteSession(SESSION);
+    expect(await getConfirmationGrant(SESSION, ACTOR)).toBeUndefined();
   });
 });
 
-describe('requestConfirmation', () => {
+describe('requestConfirmation', async () => {
   it('delivers the card in-channel to the originating messaging group and records actorId', async () => {
     await requestConfirmation({
       session: { id: SESSION, agent_group_id: AG, messaging_group_id: MG } as never,
@@ -191,7 +196,7 @@ describe('requestConfirmation', () => {
     expect(card.question).toContain('Actor');
 
     // Row recorded with actorId force-merged onto the payload.
-    const row = getPendingApproval(card.questionId);
+    const row = await getPendingApproval(card.questionId);
     expect(row).toBeDefined();
     expect(JSON.parse(row!.payload)).toMatchObject({ actorId: ACTOR, integration: 'google' });
   });
@@ -211,7 +216,7 @@ describe('requestConfirmation', () => {
   });
 });
 
-describe('handleApprovalsResponse — sensitive_mcp_confirm confirm/cancel/clicker-auth', () => {
+describe('handleApprovalsResponse — sensitive_mcp_confirm confirm/cancel/clicker-auth', async () => {
   async function seedConfirmCard(): Promise<string> {
     await requestConfirmation({
       session: { id: SESSION, agent_group_id: AG, messaging_group_id: MG } as never,
@@ -233,25 +238,25 @@ describe('handleApprovalsResponse — sensitive_mcp_confirm confirm/cancel/click
     const qid = await seedConfirmCard();
     const claimed = await handleApprovalsResponse(click(qid, 'confirm', BYSTANDER));
     expect(claimed).toBe(true);
-    expect(getPendingApproval(qid)).toBeDefined();
-    expect(getConfirmationGrant(SESSION, ACTOR)).toBeUndefined();
-    expect(getConfirmationGrant(SESSION, BYSTANDER)).toBeUndefined();
+    expect(await getPendingApproval(qid)).toBeDefined();
+    expect(await getConfirmationGrant(SESSION, ACTOR)).toBeUndefined();
+    expect(await getConfirmationGrant(SESSION, BYSTANDER)).toBeUndefined();
   });
 
   it('actor Confirm creates the (session,actor) grant and consumes the row', async () => {
     const qid = await seedConfirmCard();
     const claimed = await handleApprovalsResponse(click(qid, 'confirm', ACTOR));
     expect(claimed).toBe(true);
-    expect(getPendingApproval(qid)).toBeUndefined();
-    expect(getConfirmationGrant(SESSION, ACTOR)).toBeDefined();
+    expect(await getPendingApproval(qid)).toBeUndefined();
+    expect(await getConfirmationGrant(SESSION, ACTOR)).toBeDefined();
   });
 
   it('actor Cancel consumes the row but creates NO grant', async () => {
     const qid = await seedConfirmCard();
     const claimed = await handleApprovalsResponse(click(qid, 'cancel', ACTOR));
     expect(claimed).toBe(true);
-    expect(getPendingApproval(qid)).toBeUndefined();
-    expect(getConfirmationGrant(SESSION, ACTOR)).toBeUndefined();
+    expect(await getPendingApproval(qid)).toBeUndefined();
+    expect(await getConfirmationGrant(SESSION, ACTOR)).toBeUndefined();
   });
 
   // ── Fix B (2026-05-18): engine-driven replay on Confirm ───────────
@@ -290,7 +295,7 @@ describe('handleApprovalsResponse — sensitive_mcp_confirm confirm/cancel/click
     await handleApprovalsResponse(click(qid, 'confirm', ACTOR));
 
     // Grant still created (defense-in-depth for OTHER sensitive calls).
-    expect(getConfirmationGrant(SESSION, ACTOR)).toBeDefined();
+    expect(await getConfirmationGrant(SESSION, ACTOR)).toBeDefined();
     // The replay client was called with the exact gate identity.
     expect(replayConfirmedMcpCall).toHaveBeenCalledWith({
       groupFolder: 'fam',
@@ -324,7 +329,7 @@ describe('handleApprovalsResponse — sensitive_mcp_confirm confirm/cancel/click
     });
     const qid = await seedConfirmCardWithGroup();
     await handleApprovalsResponse(click(qid, 'confirm', ACTOR));
-    expect(getConfirmationGrant(SESSION, ACTOR)).toBeDefined();
+    expect(await getConfirmationGrant(SESSION, ACTOR)).toBeDefined();
     const injected = writeSessionMessage.mock.calls
       .map((c) => JSON.parse((c[2] as { content: string }).content).text)
       .join('\n');
@@ -396,8 +401,8 @@ describe('handleApprovalsResponse — sensitive_mcp_confirm confirm/cancel/click
   it('bystander Cancel does NOT consume the row (cannot deny the actor)', async () => {
     const qid = await seedConfirmCard();
     await handleApprovalsResponse(click(qid, 'cancel', BYSTANDER));
-    expect(getPendingApproval(qid)).toBeDefined();
-    expect(getConfirmationGrant(SESSION, ACTOR)).toBeUndefined();
+    expect(await getPendingApproval(qid)).toBeDefined();
+    expect(await getConfirmationGrant(SESSION, ACTOR)).toBeUndefined();
   });
 
   // ── Bug C regression (2026-05-17): WhatsApp /confirm reproduction ──
@@ -435,9 +440,9 @@ describe('handleApprovalsResponse — sensitive_mcp_confirm confirm/cancel/click
     // up. The raw key must NOT be used (would never be found by the gate).
     const qid = await seedWaConfirmCard();
     await handleApprovalsResponse(click(qid, 'confirm', WA_RAW, 'whatsapp'));
-    expect(getConfirmationGrant(SESSION, WA_NAMESPACED)).toBeDefined();
-    expect(getConfirmationGrant(SESSION, WA_RAW)).toBeUndefined();
-    expect(getPendingApproval(qid)).toBeUndefined();
+    expect(await getConfirmationGrant(SESSION, WA_NAMESPACED)).toBeDefined();
+    expect(await getConfirmationGrant(SESSION, WA_RAW)).toBeUndefined();
+    expect(await getPendingApproval(qid)).toBeUndefined();
   });
 
   it('FIX TARGET: clicker-auth must namespace the clicker id before comparing', async () => {
@@ -446,13 +451,13 @@ describe('handleApprovalsResponse — sensitive_mcp_confirm confirm/cancel/click
     // namespaced key (the form decideSensitiveGate later looks up).
     const qid = await seedWaConfirmCard();
     await handleApprovalsResponse(click(qid, 'confirm', WA_RAW, 'whatsapp'));
-    expect(getConfirmationGrant(SESSION, WA_NAMESPACED)).toBeDefined();
-    expect(getPendingApproval(qid)).toBeUndefined();
+    expect(await getConfirmationGrant(SESSION, WA_NAMESPACED)).toBeDefined();
+    expect(await getPendingApproval(qid)).toBeUndefined();
   });
 
   it('already-namespaced clicker (Discord button path) still works', async () => {
     const qid = await seedWaConfirmCard();
     await handleApprovalsResponse(click(qid, 'confirm', WA_NAMESPACED, 'whatsapp'));
-    expect(getConfirmationGrant(SESSION, WA_NAMESPACED)).toBeDefined();
+    expect(await getConfirmationGrant(SESSION, WA_NAMESPACED)).toBeDefined();
   });
 });

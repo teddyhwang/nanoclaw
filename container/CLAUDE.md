@@ -10,6 +10,12 @@ When an inbound `<message>` contains `<quoted_message ... mine="true">`, the use
 
 Files you create are saved in `/workspace/agent/`. Use this for notes, research, or anything that should persist across turns in this group.
 
+## Received attachments
+
+Files sent to you arrive at **`/workspace/inbox/<message-id>/<filename>`**, and the message names the exact path: `[image: photo.jpg — saved to /workspace/inbox/.../photo.jpg]`. Read that path directly.
+
+`/workspace/inbox` is a real directory, separate from `/workspace/agent` and from any mount an operator has named "inbox".
+
 ## Memory model
 
 You are a stateful agent. You don't have intrinsic memory between sessions — durable recall comes from files in `/workspace/agent/`. Read them to remember; write to them so future sessions know what happened.
@@ -18,7 +24,7 @@ Your memory layer has two parts: the **agent kernel** (structured, operator-cura
 
 ### Agent kernel (eagerly loaded when present)
 
-The composed `CLAUDE.md` auto-imports these at session start if they exist on disk. You don't need to re-read them — they're already in context. Maintain them as you work:
+The composed `CLAUDE.md` flatly inlines these at session start if they exist on disk. You don't need to re-read them — they're already in context. Maintain them as you work:
 
 - `IDENTITY.md` — who you are in this group: voice, scope, permissions, who you talk to and how. Update only when a stable property of the group changes.
 - `AGENTS.md` — the session protocol you follow (start / during / end discipline, when to load knowledge files, how to update notes).

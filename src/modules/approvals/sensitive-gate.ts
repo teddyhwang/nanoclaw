@@ -334,7 +334,7 @@ export async function decideSensitiveGate(input: SensitiveGateInput): Promise<Se
   const { groupFolder, integration, tool, args, rawSenderId, senderDisplayName, sourceChannelType, sourcePlatformId } =
     input;
 
-  const agentGroup = getAgentGroupByFolder(groupFolder);
+  const agentGroup = await getAgentGroupByFolder(groupFolder);
   if (!agentGroup) {
     return { decision: 'fail_closed', reason: `no agent group for folder ${groupFolder}` };
   }
@@ -347,7 +347,7 @@ export async function decideSensitiveGate(input: SensitiveGateInput): Promise<Se
   // still fail-closes above — disabling requires a real, admin-configured
   // group, not a forged/missing one. NULL/unset ⇒ 'enforce' (fail-safe).
   // Logged loud on every bypass so a disabled gate is never silent.
-  if (getSensitiveGateMode(agentGroup.id) === 'off') {
+  if ((await getSensitiveGateMode(agentGroup.id)) === 'off') {
     log.warn('sensitive-gate: BYPASSED — admin-disabled for this agent group', {
       agentGroupId: agentGroup.id,
       agentGroupName: agentGroup.name,
@@ -358,7 +358,7 @@ export async function decideSensitiveGate(input: SensitiveGateInput): Promise<Se
     return { decision: 'allow', reason: 'gate_disabled_by_admin' };
   }
 
-  const session: Session | undefined = findSessionByAgentGroup(agentGroup.id);
+  const session: Session | undefined = await findSessionByAgentGroup(agentGroup.id);
   if (!session) {
     return { decision: 'fail_closed', reason: `no active session for agent group ${agentGroup.id}` };
   }
@@ -381,9 +381,9 @@ export async function decideSensitiveGate(input: SensitiveGateInput): Promise<Se
   // key stays stable across the round-trip.
   const sourceMg =
     sourceChannelType && sourcePlatformId
-      ? getMessagingGroupByPlatform(sourceChannelType, sourcePlatformId)
+      ? await getMessagingGroupByPlatform(sourceChannelType, sourcePlatformId)
       : undefined;
-  const mg = sourceMg ?? getMessagingGroup(session.messaging_group_id);
+  const mg = sourceMg ?? (await getMessagingGroup(session.messaging_group_id));
   if (!mg) {
     return {
       decision: 'fail_closed',
@@ -399,11 +399,11 @@ export async function decideSensitiveGate(input: SensitiveGateInput): Promise<Se
   const nowMs = Date.now();
 
   // 1. Live grant short-circuits everything (the re-entry mechanism).
-  const grant = getConfirmationGrant(session.id, actorId);
+  const grant = await getConfirmationGrant(session.id, actorId);
   if (grant && grantIsLive(grant.granted_at, grant.last_used_at, nowMs)) {
     // Bump last_used_at on every silent allow (keeps idle-layer enable-able
     // later without a backfill; does NOT extend the hard cap).
-    touchConfirmationGrant(session.id, actorId, new Date(nowMs).toISOString());
+    await touchConfirmationGrant(session.id, actorId, new Date(nowMs).toISOString());
     return { decision: 'allow', reason: 'live_grant' };
   }
 

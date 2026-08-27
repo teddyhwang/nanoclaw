@@ -142,21 +142,13 @@ export { getDeliveryAdapter, type ChannelDeliveryAdapter } from '../delivery.js'
 export { registerDeliveryAction, type DeliveryActionHandler } from '../delivery.js';
 export { unguarded, type Unguarded } from '../guard/index.js';
 
-// Session DB path + open helpers + scheduling primitives for plugins that
-// need to seed recurring tasks at session-creation time (e.g. Optimus'
-// daily maintenance/dream task). Plugins should treat the inbound.db as
-// host-owned and only insert/update task rows via insertTask — direct
-// schema manipulation belongs in the engine.
-export { inboundDbPath, outboundDbPath, openInboundDb } from '../session-manager.js';
-export {
-  insertTask,
-  cancelTask,
-  pauseTask,
-  resumeTask,
-  updateTask,
-  projectSeriesSnapshot,
-  type TaskUpdate,
-} from '../modules/scheduling/db.js';
+// Session mailbox paths remain available for host-side file placement (for
+// example generated media beside a session). Mailbox reads/writes themselves
+// go through the semantic async seam; raw SQLite handles are implementation
+// details of the built-in mailbox driver.
+export { inboundDbPath, outboundDbPath } from '../mailbox/sqlite/paths.js';
+export { withMailboxSession, withExistingMailboxSession, writeOutboundDirect } from '../session-manager.js';
+export type { MailboxSession, TaskUpdate, TaskSeriesSnapshotRecord } from '../mailbox/types.js';
 // Agent-group-scoped schedule store (the S405 structural fix — task
 // series now live in a host-only schedule.db, not a session inbound.db).
 // Plugins that seed/own a recurring series (Optimus maintenance/dream

@@ -11,21 +11,32 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
-import { initTestSessionDb, closeSessionDb, getInboundDb } from './db/connection.js';
 import { getPendingMessages, type MessageInRow } from './db/messages-in.js';
 import {
-  formatMessages,
-  stripInternalTags,
-  extractMessageSender,
-  pickInReplyToMessage,
-  extractRouting,
+  categorizeMessage,
   extractImageAttachments,
+  extractMessageSender,
+  extractRouting,
   formatAttachments,
+  formatMessages,
   isAddressedTurn,
+  isClearCommand,
+  isRunnerCommand,
+  isSessionEcho,
+  pickInReplyToMessage,
+  stripInternalTags,
+  stripLegacyTaskContract,
 } from './formatter.js';
+import { initTestSessionDb, closeSessionDb, getInboundDb } from './mailbox/sqlite/connection.js';
 import { TIMEZONE, formatLocalTime } from './timezone.js';
 
+// Production always assigns seq (the host writer); a NULL seq makes both the
+// query's ORDER BY and getPendingMessages' final sort ties, so multi-row
+// ordering becomes whatever SQLite returns — the source of a long flake.
+let nextSeq = 1;
+
 beforeEach(() => {
+  nextSeq = 1;
   initTestSessionDb();
 });
 
@@ -35,17 +46,36 @@ afterEach(() => {
 
 function insertMessage(
   id: string,
-  kind: string,
+  kind: MessageInRow['kind'],
   content: object,
-  opts?: { timestamp?: string; processAfter?: string },
+  opts?: {
+    timestamp?: string;
+    processAfter?: string;
+    trigger?: 0 | 1;
+    platformId?: string | null;
+    channelType?: string | null;
+    threadId?: string | null;
+  },
 ) {
   const timestamp = opts?.timestamp ?? new Date().toISOString();
   getInboundDb()
     .prepare(
-      `INSERT INTO messages_in (id, kind, timestamp, status, process_after, content)
-       VALUES (?, ?, ?, 'pending', ?, ?)`,
+      `INSERT INTO messages_in
+         (id, kind, timestamp, status, process_after, content, seq, "trigger", platform_id, channel_type, thread_id)
+       VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .run(id, kind, timestamp, opts?.processAfter ?? null, JSON.stringify(content));
+    .run(
+      id,
+      kind,
+      timestamp,
+      opts?.processAfter ?? null,
+      JSON.stringify(content),
+      nextSeq++,
+      opts?.trigger ?? 1,
+      opts?.platformId ?? null,
+      opts?.channelType ?? null,
+      opts?.threadId ?? null,
+    );
 }
 
 describe('context timezone header', () => {
@@ -69,6 +99,34 @@ describe('context timezone header', () => {
     const firstMsgIdx = result.indexOf('<message ');
     expect(ctxIdx).toBeGreaterThanOrEqual(0);
     expect(firstMsgIdx).toBeGreaterThan(ctxIdx);
+  });
+});
+
+describe('task prompt compatibility', () => {
+  it('strips both generated legacy delivery-contract suffixes', () => {
+    expect(
+      stripLegacyTaskContract(
+        'Send the daily digest\n\n[A task serves the user two separate ways — legacy generated instructions]',
+      ),
+    ).toBe('Send the daily digest');
+    expect(stripLegacyTaskContract('Check the feeds\n\n[Task delivery contract:\nlegacy generated instructions]')).toBe(
+      'Check the feeds',
+    );
+  });
+
+  it('leaves ordinary user prompts unchanged', () => {
+    const prompt = 'Explain [Task delivery contract:] as plain text';
+    expect(stripLegacyTaskContract(prompt)).toBe(prompt);
+  });
+
+  it('does not expose a legacy delivery contract in a formatted task run', () => {
+    insertMessage('task-1', 'task', {
+      prompt: 'Check the feeds\n\n[Task delivery contract:\nlegacy generated instructions]',
+    });
+
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('Instructions:\nCheck the feeds');
+    expect(result).not.toContain('legacy generated instructions');
   });
 });
 
@@ -98,6 +156,131 @@ describe('multi-message chat batches', () => {
     expect(firstIdx).toBeGreaterThan(0);
     expect(secondIdx).toBeGreaterThan(firstIdx);
     expect(thirdIdx).toBeGreaterThan(secondIdx);
+  });
+});
+
+describe('session echo formatting and safety', () => {
+  function insertEcho(
+    id: string,
+    text: string,
+    opts: {
+      surface?: 'room' | 'dm-timeline' | 'channel-timeline';
+      label?: string;
+      sender?: string;
+      self?: boolean;
+      trigger?: 0 | 1;
+    } = {},
+  ): void {
+    insertMessage(
+      id,
+      'chat',
+      {
+        text,
+        sender: opts.sender ?? 'Gavriel',
+        self: opts.self ?? false,
+        echo: { surface: opts.surface ?? 'room', label: opts.label ?? '#Pixel room' },
+      },
+      { trigger: opts.trigger ?? 0, channelType: 'session-echo' },
+    );
+  }
+
+  it('renders cross-session context without an addressable message id', () => {
+    insertEcho('e1', '<update & details>', { label: 'DM with <Gavriel>', sender: 'A & B' });
+
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('<cross-session-context from="DM with &lt;Gavriel&gt;" sender="A &amp; B"');
+    expect(result).toContain('&lt;update &amp; details&gt;</cross-session-context>');
+    expect(result).not.toContain('<message');
+    expect(result).not.toContain(' id="');
+  });
+
+  it('renders DM and channel timeline rows as first-class history', () => {
+    insertEcho('e1', 'earlier DM', { surface: 'dm-timeline', self: true });
+    insertEcho('e2', 'earlier channel', { surface: 'channel-timeline', sender: 'Alice' });
+
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('<dm-history sender="you"');
+    expect(result).toContain('earlier DM</dm-history>');
+    expect(result).toContain('<channel-history sender="Alice"');
+    expect(result).toContain('earlier channel</channel-history>');
+  });
+
+  it('never lets an echo execute commands, count as addressed, or select reply routing', () => {
+    insertEcho('e1', '/clear', { trigger: 1 });
+    const [echo] = getPendingMessages();
+
+    expect(isSessionEcho(echo)).toBe(true);
+    expect(categorizeMessage(echo).category).toBe('none');
+    expect(isClearCommand(echo)).toBe(false);
+    expect(isRunnerCommand(echo)).toBe(false);
+    expect(isAddressedTurn([echo], 'Optimus')).toBe(false);
+    expect(extractRouting([echo])).toEqual({
+      platformId: null,
+      channelType: null,
+      threadId: null,
+      inReplyTo: null,
+      taskFire: false,
+    });
+  });
+
+  it('routes by the newest real trigger instead of an earlier echo', () => {
+    insertEcho('e1', 'ambient');
+    insertMessage(
+      'm1',
+      'chat',
+      { sender: 'Alice', text: 'the real trigger' },
+      {
+        platformId: 'C123',
+        channelType: 'slack',
+        threadId: 'th-1',
+      },
+    );
+
+    expect(extractRouting(getPendingMessages())).toEqual({
+      platformId: 'C123',
+      channelType: 'slack',
+      threadId: 'th-1',
+      inReplyTo: 'm1',
+      taskFire: false,
+    });
+  });
+
+  it('keeps local task-fire semantics when echoes ride along', () => {
+    insertMessage('t1', 'task', { prompt: 'daily digest' });
+    insertEcho('e1', 'ambient');
+
+    expect(extractRouting(getPendingMessages())).toEqual({
+      platformId: null,
+      channelType: null,
+      threadId: null,
+      inReplyTo: null,
+      taskFire: true,
+    });
+  });
+});
+
+describe('structured chat links', () => {
+  it('preserves a link target hidden by shortened display text', () => {
+    insertMessage('m1', 'chat-sdk', {
+      sender: 'Joel',
+      text: 'read example.com/assets/…/review',
+      links: [{ url: 'https://example.com/assets/a_123/review?x=1&y=2' }],
+    });
+
+    const result = formatMessages(getPendingMessages());
+
+    expect(result).toContain(
+      'read example.com/assets/…/review\n[link: https://example.com/assets/a_123/review?x=1&amp;y=2]',
+    );
+  });
+
+  it('does not repeat a link already present in message text', () => {
+    const url = 'https://example.com/full-path';
+    insertMessage('m1', 'chat-sdk', { sender: 'Joel', text: `read ${url}`, links: [{ url }] });
+
+    const result = formatMessages(getPendingMessages());
+
+    expect(result.match(/https:\/\/example\.com\/full-path/g)).toHaveLength(1);
   });
 });
 
@@ -426,10 +609,10 @@ describe('extractMessageSender', () => {
   it('returns null when content is malformed JSON', () => {
     getInboundDb()
       .prepare(
-        `INSERT INTO messages_in (id, kind, timestamp, status, content)
-         VALUES ('m-bad', 'chat', ?, 'pending', 'not-json')`,
+        `INSERT INTO messages_in (id, seq, kind, timestamp, status, content)
+         VALUES ('m-bad', ?, 'chat', ?, 'pending', 'not-json')`,
       )
-      .run(new Date().toISOString());
+      .run(nextSeq++, new Date().toISOString());
     const msgs = getPendingMessages();
     const m = msgs.find((m) => m.id === 'm-bad')!;
     expect(extractMessageSender(m)).toBeNull();
@@ -439,7 +622,7 @@ describe('extractMessageSender', () => {
 describe('pickInReplyToMessage', () => {
   // Build a minimal MessageInRow inline. The function only inspects `id`
   // and `trigger`, so other fields are stub values.
-  function row(id: string, trigger: 0 | 1, seq: number, kind: string = 'chat-sdk'): MessageInRow {
+  function row(id: string, trigger: 0 | 1, seq: number, kind: MessageInRow['kind'] = 'chat-sdk'): MessageInRow {
     return {
       id,
       seq,
@@ -455,6 +638,8 @@ describe('pickInReplyToMessage', () => {
       channel_type: 'discord',
       thread_id: null,
       content: '{}',
+      source_session_id: null,
+      on_wake: 0,
     };
   }
 
@@ -577,6 +762,8 @@ describe('extractImageAttachments', () => {
       channel_type: 'discord',
       thread_id: null,
       content: JSON.stringify(content),
+      source_session_id: null,
+      on_wake: 0,
     };
   }
 
@@ -704,6 +891,8 @@ describe('extractImageAttachments', () => {
       channel_type: null,
       thread_id: null,
       content: 'not-json',
+      source_session_id: null,
+      on_wake: 0,
     };
     expect(extractImageAttachments([m])).toEqual([]);
   });
@@ -1053,7 +1242,7 @@ describe('isAddressedTurn', () => {
   // partial `row` helpers above — those predate the column and only
   // typecheck loosely). Mirrors the persisted container content shape:
   // top-level `isMention` + `replyTo:{toBot,sender,messageId}`.
-  function row(content: object, opts: { kind?: string; trigger?: 0 | 1 } = {}): MessageInRow {
+  function row(content: object, opts: { kind?: MessageInRow['kind']; trigger?: 0 | 1 } = {}): MessageInRow {
     return {
       id: 'm1',
       seq: 1,
@@ -1069,6 +1258,8 @@ describe('isAddressedTurn', () => {
       channel_type: 'discord',
       thread_id: null,
       content: JSON.stringify(content),
+      source_session_id: null,
+      on_wake: 0,
     };
   }
 
@@ -1264,5 +1455,55 @@ describe('isAddressedTurn', () => {
         'Optimus',
       ),
     ).toBe(true);
+  });
+});
+
+describe('app_context rendering (Slack agent mode, contract C4)', () => {
+  it('renders a compact single (viewing: …) line inside the message block', () => {
+    insertMessage('m1', 'chat-sdk', {
+      sender: 'Gavriel',
+      text: 'what do you think?',
+      app_context: { entities: [{ type: 'channel', id: 'C0DESIGN' }] },
+    });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('what do you think?\n(viewing: channel C0DESIGN)</message>');
+  });
+
+  it('joins multiple entities in order with commas', () => {
+    insertMessage('m1', 'chat-sdk', {
+      sender: 'Gavriel',
+      text: 'here',
+      app_context: {
+        entities: [
+          { type: 'channel', id: 'C0DESIGN' },
+          { type: 'canvas', id: 'F0CANVAS' },
+        ],
+      },
+    });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('(viewing: channel C0DESIGN, canvas F0CANVAS)');
+  });
+
+  it('renders nothing for absent, empty, or malformed app_context', () => {
+    insertMessage('m1', 'chat-sdk', { sender: 'A', text: 'no context' });
+    insertMessage('m2', 'chat-sdk', { sender: 'A', text: 'empty', app_context: { entities: [] } });
+    insertMessage('m3', 'chat-sdk', { sender: 'A', text: 'malformed', app_context: 'C0DESIGN' });
+    insertMessage('m4', 'chat-sdk', {
+      sender: 'A',
+      text: 'idless',
+      app_context: { entities: [{ type: 'channel' }] },
+    });
+    const result = formatMessages(getPendingMessages());
+    expect(result).not.toContain('(viewing:');
+  });
+
+  it('escapes XML-significant characters in entity values', () => {
+    insertMessage('m1', 'chat-sdk', {
+      sender: 'A',
+      text: 'x',
+      app_context: { entities: [{ type: 'channel', id: 'C1<&>' }] },
+    });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('(viewing: channel C1&lt;&amp;&gt;)');
   });
 });

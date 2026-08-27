@@ -19,12 +19,9 @@
  */
 import fs from 'fs';
 
-import type Database from 'better-sqlite3';
-
 import { registerDeliveryAction } from '../../delivery.js';
 import { unguarded } from '../../guard/index.js';
-import { getDeliveredIds, getDueOutboundMessages, getProcessingClaims } from '../../db/session-db.js';
-import { heartbeatPath, openInboundDb, openOutboundDb } from '../../session-manager.js';
+import { heartbeatPath, withExistingMailboxSession } from '../../session-manager.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
 import { log } from '../../log.js';
 
@@ -65,6 +62,7 @@ interface TypingTarget {
   interval: NodeJS.Timeout;
   startedAt: number;
   pausedUntil: number; // epoch ms; 0 = not paused
+  checking: boolean;
 }
 
 let adapter: TypingAdapter | null = null;
@@ -116,35 +114,18 @@ function isHeartbeatFresh(agentGroupId: string, sessionId: string): boolean {
  * Local fork patch (Optimus): upstream NanoClaw doesn't see the lingering
  * indicator often enough to file it. Kept narrow on purpose.
  */
-function hasPendingUserFacingOutbound(agentGroupId: string, sessionId: string): boolean {
-  let outDb: ReturnType<typeof openOutboundDb> | null = null;
-  let inDb: ReturnType<typeof openInboundDb> | null = null;
+async function hasPendingUserFacingOutbound(agentGroupId: string, sessionId: string): Promise<boolean> {
   try {
-    outDb = openOutboundDb(agentGroupId, sessionId);
-    const due = getDueOutboundMessages(outDb);
-    if (due.length === 0) return false;
-    inDb = openInboundDb(agentGroupId, sessionId);
-    const delivered = getDeliveredIds(inDb);
-    for (const msg of due) {
-      if (delivered.has(msg.id)) continue;
-      if (msg.kind === 'system') continue;
-      if (msg.channel_type === 'agent') continue;
-      return true;
-    }
-    return false;
+    return (
+      (await withExistingMailboxSession(agentGroupId, sessionId, (mailbox) => {
+        const delivered = mailbox.getDeliveredIds();
+        return mailbox
+          .getDueMessages(delivered)
+          .some((message) => message.kind !== 'system' && message.channelType !== 'agent');
+      })) ?? false
+    );
   } catch {
     return false;
-  } finally {
-    try {
-      outDb?.close();
-    } catch {
-      /* best-effort */
-    }
-    try {
-      inDb?.close();
-    } catch {
-      /* best-effort */
-    }
   }
 }
 
@@ -193,39 +174,17 @@ export function decideSuppressTypingForNonUserTurn(processingCount: number, hasU
   return !hasUserKindProcessing;
 }
 
-function isNonUserProcessingTurn(agentGroupId: string, sessionId: string): boolean {
-  let outDb: ReturnType<typeof openOutboundDb> | null = null;
-  let inDb: ReturnType<typeof openInboundDb> | null = null;
+async function isNonUserProcessingTurn(agentGroupId: string, sessionId: string): Promise<boolean> {
   try {
-    outDb = openOutboundDb(agentGroupId, sessionId);
-    const claims = getProcessingClaims(outDb);
-    if (claims.length === 0) {
-      return decideSuppressTypingForNonUserTurn(0, false);
-    }
-    const ids = claims.map((c) => c.message_id);
-    const placeholders = ids.map(() => '?').join(',');
-    inDb = openInboundDb(agentGroupId, sessionId);
-    const userRow = inDb
-      .prepare(
-        `SELECT 1 AS hit FROM messages_in
-         WHERE id IN (${placeholders})
-           AND kind IN ('chat', 'chat-sdk') LIMIT 1`,
-      )
-      .get(...ids) as { hit: number } | null | undefined;
-    return decideSuppressTypingForNonUserTurn(ids.length, userRow != null);
+    return (
+      (await withExistingMailboxSession(agentGroupId, sessionId, (mailbox) => {
+        const claims = mailbox.getProcessingClaims();
+        const ids = claims.map((claim) => claim.messageId);
+        return decideSuppressTypingForNonUserTurn(ids.length, mailbox.hasUserConversationMessages(ids));
+      })) ?? false
+    );
   } catch {
     return false;
-  } finally {
-    try {
-      outDb?.close();
-    } catch {
-      /* best-effort */
-    }
-    try {
-      inDb?.close();
-    } catch {
-      /* best-effort */
-    }
   }
 }
 
@@ -265,42 +224,31 @@ export function startTypingRefresh(
   const startedAt = Date.now();
   const interval = setInterval(() => {
     const entry = typingRefreshers.get(sessionId);
-    if (!entry) return; // stopped externally since this tick was scheduled
+    if (!entry || entry.checking) return;
+    entry.checking = true;
+    void (async () => {
+      // Inside a post-delivery pause: skip setTyping but keep the interval
+      // running so it resumes automatically once the pause expires.
+      if (entry.pausedUntil > Date.now()) return;
 
-    // Inside a post-delivery pause: skip setTyping but keep the
-    // interval running so we resume automatically once the pause
-    // expires.
-    if (entry.pausedUntil > Date.now()) return;
+      // Avoid racing a typing request behind an imminent outbound delivery.
+      if (await hasPendingUserFacingOutbound(entry.agentGroupId, sessionId)) return;
 
-    // A user-facing outbound row is queued and the delivery loop will
-    // post it within ~1s. Skip the tick — firing setTyping now risks
-    // the HTTP call landing AFTER the message, leaving the indicator
-    // visible for several seconds post-delivery (Discord caches the
-    // typing event for ~10s). Keep the refresher running; if delivery
-    // happens, `pauseTypingRefreshAfterDelivery` extends the skip
-    // window. If it doesn't (e.g. delivery fails), the next tick
-    // resumes typing normally.
-    if (hasPendingUserFacingOutbound(entry.agentGroupId, sessionId)) return;
+      // Silent maintenance/task work must not advertise a user-facing reply.
+      if (await isNonUserProcessingTurn(entry.agentGroupId, sessionId)) return;
 
-    // The container is mid-turn but the in-flight work is a
-    // maintenance/recurring-task/reflection turn (task/system rows
-    // only), not a reply to the user. Suppress typing — otherwise the
-    // user sees "is typing…" through a silent turn that will never
-    // produce a message (screenshot 2026-05-15, ai-friends deferred
-    // task after a real reply). Keep the refresher alive: a genuine
-    // follow-up user message restarts a user turn and the next tick
-    // resumes typing normally.
-    if (isNonUserProcessingTurn(entry.agentGroupId, sessionId)) return;
+      const withinGrace = Date.now() - entry.startedAt < TYPING_GRACE_MS;
+      if (withinGrace || isHeartbeatFresh(entry.agentGroupId, sessionId)) {
+        await triggerTyping(entry.channelType, entry.platformId, entry.threadId, entry.instance);
+        return;
+      }
 
-    const withinGrace = Date.now() - entry.startedAt < TYPING_GRACE_MS;
-    if (withinGrace || isHeartbeatFresh(entry.agentGroupId, sessionId)) {
-      triggerTyping(entry.channelType, entry.platformId, entry.threadId, entry.instance).catch(() => {});
-      return;
-    }
-
-    // Out of grace AND heartbeat stale — agent is idle, stop refreshing.
-    clearInterval(entry.interval);
-    typingRefreshers.delete(sessionId);
+      // Out of grace AND heartbeat stale — agent is idle, stop refreshing.
+      clearInterval(entry.interval);
+      typingRefreshers.delete(sessionId);
+    })().finally(() => {
+      entry.checking = false;
+    });
   }, TYPING_REFRESH_MS);
   // unref so a stale refresher can't hold the event loop alive.
   interval.unref();
@@ -313,6 +261,7 @@ export function startTypingRefresh(
     interval,
     startedAt,
     pausedUntil: 0,
+    checking: false,
   });
 }
 
@@ -441,21 +390,18 @@ export function classifyWakeCause(
   return { wakeCause, addressed };
 }
 
-function classifySilentTurn(session: { id: string; messaging_group_id: string | null }, inDb: Database.Database): void {
+async function classifySilentTurn(session: {
+  id: string;
+  agent_group_id: string;
+  messaging_group_id: string | null;
+}): Promise<void> {
   try {
     const row =
-      (inDb
-        .prepare(
-          `SELECT kind, content FROM messages_in
-           WHERE trigger = 1 AND kind != 'system'
-           ORDER BY seq DESC LIMIT 1`,
-        )
-        .get() as { kind: string; content: string } | undefined) ?? null;
-
-    const mg = session.messaging_group_id ? getMessagingGroup(session.messaging_group_id) : undefined;
-    const isDm = mg ? mg.is_group === 0 : false;
-
-    const { wakeCause, addressed } = classifyWakeCause(row, isDm);
+      (await withExistingMailboxSession(session.agent_group_id, session.id, (mailbox) =>
+        mailbox.getLatestTriggeringInbound(),
+      )) ?? null;
+    const mg = session.messaging_group_id ? await getMessagingGroup(session.messaging_group_id) : undefined;
+    const { wakeCause, addressed } = classifyWakeCause(row, mg?.is_group === 0);
     log.info('Silent turn classified', {
       sessionId: session.id,
       wakeCause,
@@ -470,9 +416,9 @@ function classifySilentTurn(session: { id: string; messaging_group_id: string | 
 
 registerDeliveryAction(
   'silent_turn_complete',
-  async (_content, session, inDb) => {
+  async (_content, session) => {
     stopTypingRefresh(session.id);
-    classifySilentTurn(session, inDb);
+    await classifySilentTurn(session);
   },
   unguarded('Telemetry-only action that stops typing and classifies an already-completed turn.'),
 );

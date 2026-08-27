@@ -1,12 +1,10 @@
 /**
  * External skill roots and context-fragment providers.
  *
- * NanoClaw's CLAUDE.md composer (claude-md-compose.ts) walks built-in skill
- * paths and a per-group `container.json`. Hosts that ship their own skill
- * trees (Optimus's `.agents/skills`, workspace-specific knowledge) need to
- * extend that without modifying the composer. This registry collects
- * additional skill source roots and async fragment providers; the composer
- * picks them up by calling `getExtraSkillRoots()` / `getContextFragments()`.
+ * Hosts that ship skill trees outside NanoClaw's built-in container payload
+ * register them here. Container setup mounts/discovers those skills, while the
+ * flat project-document composer inlines each selected `instructions.md` plus
+ * async context fragments through the same registry.
  */
 import type { AgentGroup } from '../types.js';
 

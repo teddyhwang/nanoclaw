@@ -24,18 +24,23 @@ import { gateCommand } from './command-gate.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { recordDroppedMessage } from './db/dropped-messages.js';
 import {
-  createMessagingGroup,
+  createMessagingGroupIfAbsent,
   getMessagingGroupAgents,
   getMessagingGroupWithAgentCount,
 } from './db/messaging-groups.js';
 import { findMostRecentClosedSessionForAgent, findSessionByAgentGroup, findSessionForAgent } from './db/sessions.js';
-import { wasDeliveredByBot } from './db/session-db.js';
+import { backfillNewSession, fanInboundMessage } from './modules/cross-session-context/index.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
-import { resolveSession, writeSessionMessage, writeOutboundDirect, openInboundDb } from './session-manager.js';
+import {
+  resolveSession,
+  writeSessionMessage,
+  writeOutboundDirect,
+  withExistingMailboxSession,
+} from './session-manager.js';
 import { wakeContainer } from './container-runner.js';
 import { getSession } from './db/sessions.js';
-import type { AgentGroup, MessagingGroup, MessagingGroupAgent } from './types.js';
+import type { AgentGroup, MessagingGroup, MessagingGroupAgent, Session } from './types.js';
 import type { InboundEvent } from './channels/adapter.js';
 
 function generateId(): string {
@@ -50,7 +55,7 @@ function generateId(): string {
  * carry enough info to identify a sender. Without the hook, every message
  * arrives at the gate with userId=null.
  */
-export type SenderResolverFn = (event: InboundEvent) => string | null;
+export type SenderResolverFn = (event: InboundEvent) => string | null | Promise<string | null>;
 
 let senderResolver: SenderResolverFn | null = null;
 
@@ -77,7 +82,7 @@ export type AccessGateFn = (
   userId: string | null,
   mg: MessagingGroup,
   agentGroupId: string,
-) => AccessGateResult;
+) => AccessGateResult | Promise<AccessGateResult>;
 
 let accessGate: AccessGateFn | null = null;
 
@@ -100,7 +105,7 @@ export type SenderScopeGateFn = (
   userId: string | null,
   mg: MessagingGroup,
   agent: MessagingGroupAgent,
-) => AccessGateResult;
+) => AccessGateResult | Promise<AccessGateResult>;
 
 let senderScopeGate: SenderScopeGateFn | null = null;
 
@@ -150,6 +155,57 @@ export function setChannelRequestGate(fn: ChannelRequestGateFn): void {
   channelRequestGate = fn;
 }
 
+/**
+ * Session-created hook. When an engaged (waking) message creates a
+ * brand-new session, registered hooks are notified after the triggering
+ * message is written to the session's inbound DB, with the resolved
+ * messaging group, thread id, session mode, and triggering message.
+ *
+ * Channel modules can use it for platform-specific conversation bootstrap
+ * (thread naming, retiring onboarding affordances) without the router
+ * carrying platform timing knowledge. The hook fires for every
+ * created+engaged session — is_group / session-mode filtering is the
+ * consumer's business.
+ *
+ * Fire-and-forget: hooks are try/caught (and async rejections logged), so
+ * a failing hook can never affect routing or the container wake. No-op
+ * when nothing is registered.
+ */
+export interface SessionCreatedEvent {
+  /** The just-created session. */
+  session: Session;
+  /** The messaging group the triggering message arrived on. */
+  mg: MessagingGroup;
+  /** Platform address of the triggering inbound event. */
+  platformId: string;
+  /** Resolved thread id after the wiring's thread policy (null = no thread). */
+  threadId: string | null;
+  /** Resolved session mode after the wiring's thread policy. */
+  sessionMode: MessagingGroupAgent['session_mode'];
+  /** The triggering inbound message as received from the adapter. */
+  message: { id: string; kind: string; content: string; timestamp: string };
+}
+
+export type SessionCreatedHook = (event: SessionCreatedEvent) => void | Promise<void>;
+
+const sessionCreatedHooks: SessionCreatedHook[] = [];
+
+export function registerSessionCreatedHook(hook: SessionCreatedHook): void {
+  sessionCreatedHooks.push(hook);
+}
+
+function dispatchSessionCreated(event: SessionCreatedEvent): void {
+  for (const hook of sessionCreatedHooks) {
+    try {
+      Promise.resolve(hook(event)).catch((err) =>
+        log.error('Session-created hook failed', { sessionId: event.session.id, err }),
+      );
+    } catch (err) {
+      log.error('Session-created hook threw', { sessionId: event.session.id, err });
+    }
+  }
+}
+
 function safeParseContent(raw: string): { text?: string; sender?: string; senderId?: string } {
   try {
     return JSON.parse(raw);
@@ -172,56 +228,20 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   }
 
   // 0. Apply the adapter's thread policy. Non-threaded adapters (Telegram,
-  //    WhatsApp, iMessage, email) collapse threads to the channel. For
-  //    threaded adapters (Discord), chat-sdk emits `thread.id = channel_id`
-  //    when the message arrives on the channel itself (not inside a real
-  //    Discord thread). Treat those as not-a-thread so the per-thread
-  //    session-mode forcing in deliverToAgent doesn't shard a single channel
-  //    into two parallel sessions — the v1→v2 cutover seed creates sessions
-  //    with `thread_id=NULL`, but a live inbound carrying `threadId =
-  //    platformId` would otherwise miss that lookup and create a duplicate.
-  //    See investigation 2026-05-09: AI Friends, Boys Night, two DMs all had
-  //    duplicate sessions until this collapse landed. Resolved by the
-  //    RECEIVING instance — sibling instances of one platform can differ in
-  //    thread support.
+  //    WhatsApp, iMessage, email) collapse threads to the channel. Resolved
+  //    by the RECEIVING instance — sibling instances of one platform can
+  //    differ in thread support.
   const adapter = getChannelAdapter(event.instance ?? event.channelType);
   if (adapter && !adapter.supportsThreads) {
     event = { ...event, threadId: null };
   } else if (event.threadId !== null && event.threadId === event.platformId) {
+    // Chat SDK uses channel id as a top-level pseudo-thread on flat surfaces.
     event = { ...event, threadId: null };
   }
 
   const isMention = event.message.isMention === true;
-  // Loopback gate. Shared-number platforms (and any adapter that can't
-  // distinguish "bot's own message bouncing back" at the wire level) flag
-  // self-replies via `isBotMessage`. The router stores the message so the
-  // agent has self-context, but skips engagement so the bot does not reply
-  // to itself in a tight loop — see bug investigated 2026-05-08 where
-  // shared-number WhatsApp DMs spammed the user when the agent's own
-  // outbound came back as inbound.
   const isBotLoopback = event.message.isBotMessage === true;
-
-  // Self-echo gate. `isSelfMessage` is the narrower signal: THIS bot's own
-  // outbound bouncing back (chat-sdk author.isMe), as opposed to any-bot
-  // (`isBotMessage`, which also covers a *different* bot in the channel).
-  // The bot's own status/escalation spam carries zero useful self-context,
-  // so unlike a normal loopback (which we store as accumulate context) we
-  // drop it from the store entirely. Without this, a high-traffic channel
-  // — the dev-DM especially, which the dev-bridge floods with 🛎️/🤖/⚙️
-  // status lines — piles up unbounded trigger=0 self-echo rows that sit
-  // `pending` forever (Teddy DM 2026-06-03: 98 of 100 pending inbound were
-  // the bot's own messages, dating back two weeks). Engagement is already
-  // skipped via isBotLoopback below; this only suppresses the accumulate
-  // store. Other-bot context (isBotMessage && !isSelfMessage) is untouched.
   const isSelfEcho = event.message.isSelfMessage === true;
-
-  // Backfill short-circuit: deep-history replay (on-registration channel
-  // sync, agent-requested gap heal) writes messages as accumulated context
-  // only. Without this gate a year-old @-mention in the replay stream would
-  // fire `evaluateEngage` and wake the agent for a stale conversation.
-  // The store-with-trigger=0 path below is the same as the
-  // `ignored_message_policy='accumulate'` branch, so the agent still sees
-  // backfilled rows when it engages on a real future trigger.
   const isBackfill = event.message.isBackfill === true;
 
   // 1. Combined lookup: messaging_group row + count of wired agents in a
@@ -230,7 +250,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   //    resolution, no log spam. Exact-on-instance: an unknown named
   //    instance falls through to auto-create rather than hijacking a
   //    sibling instance's row.
-  const found = getMessagingGroupWithAgentCount(
+  const found = await getMessagingGroupWithAgentCount(
     event.channelType,
     event.platformId,
     event.instance ?? event.channelType,
@@ -242,10 +262,6 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     // No messaging_groups row. Auto-create only when the message warrants
     // attention (the bot was addressed — @mention or DM). Plain chatter in
     // channels we merely sit in stays silent — no row, no DB writes.
-    // Loopback also stays silent: a bot self-reply on an unwired channel
-    // shouldn't spawn a row. Backfill stays silent too: replaying a
-    // historical mention through here would spawn a row for an unwired
-    // chat we never had a relationship with.
     if (!isMention || isBotLoopback || isBackfill) return;
     const mgId = `mg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     mg = {
@@ -269,23 +285,29 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       denied_at: null,
       created_at: new Date().toISOString(),
     };
-    createMessagingGroup(mg);
-    log.info('Auto-created messaging group', {
-      id: mgId,
-      channelType: event.channelType,
-      platformId: event.platformId,
-    });
-    agentCount = 0;
+    const created = await createMessagingGroupIfAbsent(mg);
+    const resolved = await getMessagingGroupWithAgentCount(
+      event.channelType,
+      event.platformId,
+      event.instance ?? event.channelType,
+    );
+    if (!resolved) throw new Error('Messaging group disappeared after first-message insert');
+    mg = resolved.mg;
+    agentCount = resolved.agentCount;
+    if (created) {
+      log.info('Auto-created messaging group', {
+        id: mgId,
+        channelType: event.channelType,
+        platformId: event.platformId,
+      });
+    }
   } else {
     mg = found.mg;
     agentCount = found.agentCount;
   }
 
   // 1b. No wirings — either silent drop (plain chatter / denied channel) or
-  //     escalate to owner for channel-registration approval. Loopback never
-  //     escalates — the bot's own reply isn't a registration request.
-  //     Backfill never escalates — historical mentions in a now-unwired
-  //     channel aren't a request to register.
+  //     escalate to owner for channel-registration approval.
   if (agentCount === 0) {
     if (!isMention || isBotLoopback || isBackfill) return;
     if (mg.denied_at) {
@@ -297,7 +319,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     }
 
     const parsed = safeParseContent(event.message.content);
-    recordDroppedMessage({
+    await recordDroppedMessage({
       channel_type: event.channelType,
       platform_id: event.platformId,
       user_id: null,
@@ -328,18 +350,18 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   // 2. Sender resolution (permissions module upserts the users row as a
   //    side effect so later role/access lookups find a real record).
   //    Without the module, userId is null — downstream tolerates it.
-  const userId: string | null = senderResolver ? senderResolver(event) : null;
+  const userId: string | null = senderResolver ? await senderResolver(event) : null;
   emitEngineEvent('inbound.routed', { event, userId });
 
   // 3. Fetch wired agents in full (we already know the count is > 0; now
   //    we need their actual rows for fan-out).
-  const agents = getMessagingGroupAgents(mg.id);
+  const agents = await getMessagingGroupAgents(mg.id);
 
   // 4. Fan-out: evaluate each wired agent independently against engage_mode,
   //    sender_scope, and access gate. An agent that engages gets its own
   //    session and container wake. An agent that declines but has
   //    ignored_message_policy='accumulate' still gets the message stored in
-  //    its session (trigger=0) so the context is available when it does
+  //    its session without triggering a wake so the context is available when it does
   //    engage later. Drop policy = skip silently.
   //
   //    Subscribe (for mention-sticky wirings on threaded platforms) fires
@@ -349,23 +371,10 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   //    avoids the extra await).
   const parsed = safeParseContent(event.message.content);
   const messageText = parsed.text ?? '';
-  // Reply-to-bot detection: if the inbound carries a parent platform_message_id
-  // (extracted by the channel adapter's extractReplyContext hook), check
-  // whether that message was a prior bot outbound for this agent group.
-  // Drives v1's `requires_trigger` parity in evaluateEngage — replying to a
-  // bot message counts as a trigger in mention / mention-sticky modes even
-  // without an @mention.
   const replyToMessageId =
     typeof (parsed as { replyTo?: { messageId?: string } }).replyTo?.messageId === 'string'
-      ? ((parsed as { replyTo: { messageId: string } }).replyTo.messageId as string)
+      ? (parsed as { replyTo: { messageId: string } }).replyTo.messageId
       : null;
-  // A reply-chain-walking extractor sets `botInChain` when an ancestor
-  // @-mentions the bot but was human-authored, so there is no bot-outbound
-  // id for `isReplyToOurBot`'s wasDeliveredByBot lookup to resolve. It is
-  // still a reply continuing a bot-addressed thread, so it counts as a
-  // reply-to-bot trigger directly. (#ai-friends 2026-05-16: Mack replied
-  // to Barret's "<@Optimus> do X" — the author-only chain walk never woke
-  // Optimus even though the sub-thread was addressed to it.)
   const replyBotInChain = (parsed as { replyTo?: { botInChain?: boolean } }).replyTo?.botInChain === true;
 
   // Per-wiring thread policy inputs, resolved once per event. Each wiring's
@@ -381,7 +390,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   let subscribed = false;
 
   for (const agent of agents) {
-    const agentGroup = getAgentGroup(agent.agent_group_id);
+    const agentGroup = await getAgentGroup(agent.agent_group_id);
     if (!agentGroup) continue;
 
     // Effective thread id for THIS wiring: the event-derived address is
@@ -399,31 +408,11 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
     );
     const effectiveThreadId = threadsEnabled ? event.threadId : null;
 
-    // Loopback short-circuit: bot's own message bouncing back never engages,
-    // regardless of the wiring's engage_mode. The accumulate branch below
-    // still stores the message so the agent retains self-context.
-    // wasDeliveredByBot-backed signal: replied-to (or reacted-to) message
-    // id is a known bot outbound. Used directly by the reaction rule —
-    // a reaction is only a soft trigger on one of OUR messages, never on
-    // a human ancestor that merely mentions us.
     const isReplyToBotOutbound =
       !isBotLoopback && replyToMessageId
-        ? isReplyToOurBot(agent.agent_group_id, mg.id, effectiveThreadId, replyToMessageId)
+        ? await isReplyToOurBot(agent.agent_group_id, mg.id, effectiveThreadId, replyToMessageId)
         : false;
-    // Reply-to-bot trigger for engage_mode: the bot-outbound reply OR a
-    // human ancestor that @-mentions the bot (botInChain). The latter is
-    // a *reply*-thread signal only, deliberately NOT fed to the reaction
-    // rule below.
     const isReplyToBot = !isBotLoopback && (isReplyToBotOutbound || replyBotInChain);
-    // Emoji reactions get a dedicated, deliberately quiet engagement rule
-    // that bypasses the wiring's engage_mode entirely. A reaction on one
-    // of THIS agent's own messages is a soft trigger (reuses the same
-    // `wasDeliveredByBot` check as reply-to-bot, via `replyToMessageId`
-    // carrying the reacted-to message id). A reaction between other users
-    // never wakes the agent regardless of engage_mode — without this, a
-    // `pattern: .` (always-on) wiring would fire the agent on every 👍 in
-    // a busy channel. It still falls through to the accumulate branch so
-    // the agent sees the reaction as silent context next time it engages.
     const isReaction = event.message.kind === 'reaction';
     const engages =
       isBotLoopback || isBackfill
@@ -432,8 +421,8 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
           ? evaluateReactionEngage(isReplyToBotOutbound)
           : evaluateEngage(agent, messageText, isMention, isReplyToBot);
 
-    const accessOk = engages && (!accessGate || accessGate(event, userId, mg, agent.agent_group_id).allowed);
-    const scopeOk = engages && (!senderScopeGate || senderScopeGate(event, userId, mg, agent).allowed);
+    const accessOk = engages && (!accessGate || (await accessGate(event, userId, mg, agent.agent_group_id)).allowed);
+    const scopeOk = engages && (!senderScopeGate || (await senderScopeGate(event, userId, mg, agent)).allowed);
 
     if (engages && accessOk && scopeOk) {
       await deliverToAgent(
@@ -471,11 +460,6 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
         });
       }
     } else if (isSelfEcho) {
-      // The bot's own outbound bounced back. Engagement was already skipped
-      // (isBotLoopback), and unlike other accumulate context this carries no
-      // value worth storing — it's the bot's own status/escalation spam. Drop
-      // it so it never accrues as a trigger=0 `pending` zombie in the inbound
-      // queue. See `isSelfEcho` above for the incident.
       log.debug('Self-echo dropped (not stored as accumulate context)', {
         agentGroupId: agent.agent_group_id,
         messageId: event.message.id,
@@ -512,11 +496,8 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   }
 
   if (engagedCount + accumulatedCount === 0) {
-    // Self-echo is dropped deliberately above (the bot's own outbound), not
-    // a "no agent engaged" miss — label it accurately so the drop telemetry
-    // doesn't read as lost human messages.
     const dropReason = isSelfEcho ? 'self_echo' : 'no_agent_engaged';
-    recordDroppedMessage({
+    await recordDroppedMessage({
       channel_type: event.channelType,
       platform_id: event.platformId,
       user_id: userId,
@@ -548,58 +529,37 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
  *                      user wants to disambiguate between multiple agents
  *                      wired to one chat, use engage_mode='pattern' with
  *                      the disambiguator as the regex.
- *   'mention-sticky' — platform mention OR reply-to-bot, same trigger set
- *                      as 'mention'. Stickiness is delegated to the SDK
- *                      subscription path (onSubscribedMessage), which on
- *                      threaded platforms keeps follow-ups flowing through
- *                      isMention=true. We deliberately do NOT fall back to
- *                      session-existence: on flat-reply platforms (e.g.
- *                      Discord, where we use native reply pills instead of
- *                      Discord threads) there is no SDK subscription to
- *                      gate against, and "session exists ⇒ engage" causes
- *                      every message in the channel to wake the agent.
- *                      Reply-to-bot (a408237) is the v1-parity trigger
- *                      that lets a thread stay sticky without a re-mention.
+ *   'mention-sticky' — same host trigger set as mention: platform mention,
+ *                      this-agent outbound reply, or bot participation in the
+ *                      reply chain. SDK subscription carries real thread
+ *                      stickiness; session existence never does.
  */
-/**
- * Check whether `platformMessageId` was a prior bot outbound for the active
- * session of (agent_group, messaging_group, thread). Returns false if no
- * active session, the session DB doesn't exist, or the message id wasn't
- * one of ours. Used by evaluateEngage to support v1's `requires_trigger`
- * reply-to-bot trigger semantics.
- */
-function isReplyToOurBot(
+async function isReplyToOurBot(
   agentGroupId: string,
   messagingGroupId: string,
   threadId: string | null,
   platformMessageId: string,
-): boolean {
-  // Try the active session first — common path during a live conversation.
-  // If no active session exists (operator clear-session, or container idle-
-  // teardown that closed the row), fall back to the most-recent closed
-  // session. The user can quote-reply to a bot message that was delivered
-  // in that closed session, and the `inbound.db` is audit-preserved on
-  // disk (S330), so `wasDeliveredByBot` can still answer. Without this
-  // fallback, `mention`/`mention-sticky` wirings silently drop replies to
-  // archived bot messages (wake=false) even though the operator intent is
-  // obviously to continue the thread.
+): Promise<boolean> {
   const sessions: Array<{ id: string }> = [];
-  const active = findSessionForAgent(agentGroupId, messagingGroupId, threadId);
+  const active = await findSessionForAgent(agentGroupId, messagingGroupId, threadId);
   if (active) sessions.push(active);
-  const activeAgentShared = findSessionByAgentGroup(agentGroupId);
+
+  const activeAgentShared = await findSessionByAgentGroup(agentGroupId);
   if (activeAgentShared && !sessions.some((session) => session.id === activeAgentShared.id)) {
     sessions.push(activeAgentShared);
   }
-  const closed = findMostRecentClosedSessionForAgent(agentGroupId, messagingGroupId, threadId);
-  if (closed) sessions.push(closed);
+
+  const closed = await findMostRecentClosedSessionForAgent(agentGroupId, messagingGroupId, threadId);
+  if (closed && !sessions.some((session) => session.id === closed.id)) sessions.push(closed);
+
   for (const session of sessions) {
     try {
-      const db = openInboundDb(agentGroupId, session.id);
-      if (wasDeliveredByBot(db, platformMessageId)) return true;
+      const delivered = await withExistingMailboxSession(agentGroupId, session.id, (mailbox) =>
+        mailbox.wasDeliveredByBot(platformMessageId),
+      );
+      if (delivered) return true;
     } catch {
-      // Closed session dir may have been GC'd by a future cleanup pass.
-      // Treat as a miss and keep looking; the active session lookup is
-      // already covered above.
+      // Audit-preserved closed storage may later be GC'd; treat that as a miss.
     }
   }
   return false;
@@ -611,48 +571,26 @@ function evaluateEngage(agent: MessagingGroupAgent, text: string, isMention: boo
       const pat = agent.engage_pattern ?? '.';
       if (pat === '.') return true;
       try {
-        // Case-insensitive by default. @-mention patterns are the common
-        // case ('@optimus'), and platform mentions are case-insensitive
-        // everywhere (Discord/Slack/Telegram all match case-insensitively).
-        // A case-sensitive regex on a typed `@Optimus` would miss it,
-        // which is the kind of footgun that strands operator messages
-        // until the container idles out.
         return new RegExp(pat, 'i').test(text);
       } catch {
-        // Bad regex: fail open so admin sees the agent responding + can fix.
+        // Bad regex: fail open so an admin sees the response and can repair it.
         return true;
       }
     }
     case 'mention':
-      // v1 `requires_trigger` parity: @mention OR reply to a prior bot
-      // message both count as triggers. extractReplyContext on the channel
-      // adapter populates the parent message id; isReplyToOurBot confirms
-      // the parent was one of our deliveries before letting it engage.
-      return isMention || isReplyToBot;
     case 'mention-sticky':
-      // v1 `requires_trigger` parity. Same set as 'mention' — the
-      // host-side session-existence fallback was removed because on
-      // platforms without real SDK threads (Discord with native reply
-      // pills) it engaged on every message in the channel.
+      // SDK subscription supplies real stickiness on threaded platforms.
+      // Never use session existence: flat reply surfaces would wake forever.
       return isMention || isReplyToBot;
     default:
+      log.warn('Unknown engage_mode — treating as no-engage. Check wiring configuration.', {
+        engage_mode: agent.engage_mode,
+        wiring_id: agent.id,
+      });
       return false;
   }
 }
 
-/**
- * Engagement rule for `kind: 'reaction'` inbounds, deliberately quieter
- * than `evaluateEngage` and independent of the wiring's `engage_mode`.
- *
- * A reaction on one of THIS agent's own messages (`isReplyToBot`, resolved
- * by the same `wasDeliveredByBot` check reply-to-bot uses) is a soft
- * trigger — the user is responding to something the agent said. A reaction
- * between other users never wakes the agent, regardless of engage_mode:
- * without this a `pattern: .` always-on wiring would fire on every 👍 in a
- * busy channel. Non-engaging reactions still fall through to the
- * accumulate branch so the agent sees them as silent context next time it
- * engages for another reason.
- */
 function evaluateReactionEngage(isReplyToBot: boolean): boolean {
   return isReplyToBot;
 }
@@ -666,47 +604,34 @@ async function deliverToAgent(
   threadsEnabled: boolean,
   effectiveThreadId: string | null,
   wake: boolean,
-  // AUTHORSHIP, not engagement: true only when the replied-to message was
-  // delivered by THIS agent (`isReplyToOurBot`/`wasDeliveredByBot`). Do NOT
-  // pass the broader `isReplyToBot` engage signal here — see stampReplyToBot.
   isReplyToOwnOutbound: boolean,
 ): Promise<void> {
-  // Apply the resolved thread policy (wiring override AND channel declaration
-  // AND adapter capability — resolveThreadPolicy at fanout): thread-enabled
-  // wiring in a group chat → per-thread session regardless of wiring
-  // session_mode. agent-shared preserved (it's a cross-channel directive the
-  // adapter doesn't know about). DMs collapse sub-threads to one session
-  // (is_group=0 short-circuit).
   let effectiveSessionMode = agent.session_mode;
   if (threadsEnabled && effectiveSessionMode !== 'agent-shared' && mg.is_group !== 0) {
     effectiveSessionMode = 'per-thread';
   }
 
-  const { session, created } = resolveSession(agent.agent_group_id, mg.id, effectiveThreadId, effectiveSessionMode);
+  const { session, created } = await resolveSession(
+    agent.agent_group_id,
+    mg.id,
+    effectiveThreadId,
+    effectiveSessionMode,
+  );
 
-  // The inbound row's (channel_type, platform_id, thread_id) is the address
-  // the agent's reply will be delivered to. Normally it mirrors the source
-  // (stamped from the event, with the wiring's thread policy applied). When
-  // the caller supplied `replyTo` (CLI admin transport acting on operator
-  // intent), the reply is redirected there — replyTo is exempt from
-  // thread-policy stripping.
   const deliveryAddr = event.replyTo ?? {
     channelType: event.channelType,
     platformId: event.platformId,
     threadId: effectiveThreadId,
   };
 
-  // Command gate: classify slash commands before they reach the container.
-  // Filtered commands are dropped silently. Denied admin commands get a
-  // permission-denied response written directly to messages_out.
   if (event.message.kind === 'chat' || event.message.kind === 'chat-sdk') {
-    const gate = gateCommand(event.message.content, userId, agent.agent_group_id);
+    const gate = await gateCommand(event.message.content, userId, agent.agent_group_id);
     if (gate.action === 'filter') {
       log.debug('Filtered command dropped by gate', { agentGroupId: agent.agent_group_id });
       return;
     }
     if (gate.action === 'deny') {
-      writeOutboundDirect(session.agent_group_id, session.id, {
+      await writeOutboundDirect(session.agent_group_id, session.id, {
         id: `deny-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         kind: 'chat',
         platformId: deliveryAddr.platformId,
@@ -719,24 +644,12 @@ async function deliverToAgent(
     }
   }
 
-  // When this inbound is a pill-reply to a prior bot message of THIS agent,
-  // stamp `replyTo.toBot=true` on the per-agent content so the formatter can
-  // render `<quoted_message mine="true">` and the agent recognizes the message
-  // as a continuation of its own prior turn. Shallow-cloned because the same
-  // event.message.content is shared across the fan-out — mutating in place
-  // would cross-contaminate sibling agents whose isReplyToBot is false.
-  //
-  // When the host woke this agent for this row (wake=true), also stamp the
-  // wiring's engage_mode so the container's `isAddressedTurn` knows the host
-  // engagement gate fired with a this-bot-specific signal. Without this, a
-  // `engage_mode='pattern'` wiring (every DM and every dedicated-bot group
-  // chat — Nook, Tico, all DMs) looks ambient inside the container because
-  // the message has no @mention/replyTo, the agent goes silent, and the user
-  // sees the bot as broken (2026-05-27 Nook incident).
-  let content = stampReplyToBot(event.message.content as string, isReplyToOwnOutbound);
-  if (wake) {
-    content = stampEngagement(content, agent.engage_mode);
+  if (wake && created) {
+    await backfillNewSession(agentGroup, session, mg);
   }
+
+  let content = stampReplyToBot(event.message.content, isReplyToOwnOutbound);
+  if (wake) content = stampEngagement(content, agent.engage_mode);
 
   const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);
   await writeSessionMessage(session.agent_group_id, session.id, {
@@ -747,7 +660,7 @@ async function deliverToAgent(
     channelType: deliveryAddr.channelType,
     threadId: deliveryAddr.threadId,
     content,
-    trigger: wake ? 1 : 0,
+    trigger: wake,
   });
   emitEngineEvent('inbound.written', {
     sessionId: session.id,
@@ -756,6 +669,34 @@ async function deliverToAgent(
     trigger: wake,
   });
   if (created) emitEngineEvent('session.created', { session, created });
+
+  if (wake) {
+    await fanInboundMessage({
+      session,
+      mg,
+      messageId,
+      kind: event.message.kind,
+      channelType: deliveryAddr.channelType,
+      content: event.message.content,
+      timestamp: event.message.timestamp,
+    });
+  }
+
+  if (wake && created) {
+    dispatchSessionCreated({
+      session,
+      mg,
+      platformId: event.platformId,
+      threadId: effectiveThreadId,
+      sessionMode: effectiveSessionMode,
+      message: {
+        id: event.message.id,
+        kind: event.message.kind,
+        content: event.message.content,
+        timestamp: event.message.timestamp,
+      },
+    });
+  }
 
   log.info('Message routed', {
     sessionId: session.id,
@@ -769,9 +710,6 @@ async function deliverToAgent(
   });
 
   if (wake) {
-    // Typing indicator + wake are only for the engaged branch; accumulated
-    // messages sit silently until a real trigger fires.
-    // Typing fires via the adapter instance that owns this chat's row.
     startTypingRefresh(
       session.id,
       session.agent_group_id,
@@ -780,50 +718,14 @@ async function deliverToAgent(
       effectiveThreadId,
       mg.instance,
     );
-    const freshSession = getSession(session.id);
+    const freshSession = await getSession(session.id);
     if (freshSession) {
       const woke = await wakeContainer(freshSession);
-      // wakeContainer never throws — it returns false on transient spawn
-      // failure (host-sweep retries). Stop the typing indicator we just
-      // started so it doesn't leak; the inbound row stays pending.
       if (!woke) stopTypingRefresh(freshSession.id);
     }
   }
 }
 
-/**
- * If this inbound is a pill-reply to a prior bot message of THIS agent,
- * stamp `replyTo.toBot=true` on a parsed-and-reserialized copy of the
- * content string. The container formatter renders that as
- * `<quoted_message mine="true">`, telling the agent the user is continuing
- * its own prior turn — same signal across Discord / Telegram / WhatsApp
- * regardless of how each platform expresses a pill-reply at the wire level.
- *
- * `toBot` is an AUTHORSHIP claim ("I wrote the message being replied to"),
- * so it must be fed ONLY by `isReplyToBotOutbound` (the this-agent-scoped
- * `wasDeliveredByBot` lookup) — never by the broader `isReplyToBot` engage
- * signal, which also includes `replyTo.botInChain` ("some ancestor in this
- * reply chain @-mentioned me"). Those are different facts, and conflating
- * them mis-attributes ANOTHER participant's message to this agent. In a
- * multi-bot channel that is routine: on 2026-07-29 in AI Friends, Teddy
- * pill-replied to a *different* bot's message that happened to @-mention
- * Optimus. Optimus was handed `mine="true"` on a message it never wrote —
- * and container/CLAUDE.md instructs agents to treat `mine="true"` as a
- * continuation of their own prior turn. It also made the container's
- * `isAddressedTurn` return true, so when the agent correctly judged the
- * exchange wasn't for it and stayed silent, the addressed-silent safety net
- * posted "I couldn't complete that request" into the thread.
- *
- * Waking is unaffected: `isReplyToBot` (outbound OR botInChain) still drives
- * `evaluateEngage`, so the 2026-05-16 botInChain case still wakes the agent.
- * This only stops the chain signal from claiming authorship.
- *
- * Reserializing matters because event.message.content is shared across the
- * fan-out loop; mutating in place would cross-contaminate sibling agents
- * for whom isReplyToBot is false. Returns the input untouched when the
- * payload isn't a JSON object, doesn't carry a replyTo, or already lacks
- * a sender/text the formatter would render.
- */
 function stampReplyToBot(content: string, isReplyToBot: boolean): string {
   if (!isReplyToBot) return content;
   let parsed: Record<string, unknown>;
@@ -835,23 +737,9 @@ function stampReplyToBot(content: string, isReplyToBot: boolean): string {
   if (!parsed || typeof parsed !== 'object') return content;
   const replyTo = parsed.replyTo;
   if (!replyTo || typeof replyTo !== 'object') return content;
-  const stamped = { ...parsed, replyTo: { ...(replyTo as Record<string, unknown>), toBot: true } };
-  return JSON.stringify(stamped);
+  return JSON.stringify({ ...parsed, replyTo: { ...(replyTo as Record<string, unknown>), toBot: true } });
 }
 
-/**
- * Stamp the wiring's `engage_mode` onto the per-agent content JSON so the
- * container can see *why* the host woke this turn. Only called when wake=true
- * (the host's engagement gate fired for THIS row). Pure: returns input
- * untouched if the payload isn't a JSON object.
- *
- * The container's `isAddressedTurn` consumes `engageMode='pattern'` as a
- * sufficient address signal because `evaluateEngage` for `pattern` only
- * returns true when the per-wiring regex matched this bot's text — i.e. the
- * operator's configured signal that "this message is for this agent" already
- * fired. Without this, the in-container safety net only sees @mention /
- * replyTo, missing the entire "dedicated-bot via `pattern='.'`" case.
- */
 function stampEngagement(content: string, engageMode: string | null | undefined): string {
   if (!engageMode) return content;
   let parsed: Record<string, unknown>;
@@ -861,8 +749,7 @@ function stampEngagement(content: string, engageMode: string | null | undefined)
     return content;
   }
   if (!parsed || typeof parsed !== 'object') return content;
-  const stamped = { ...parsed, engageMode };
-  return JSON.stringify(stamped);
+  return JSON.stringify({ ...parsed, engageMode });
 }
 
 /**
@@ -876,7 +763,6 @@ function messageIdForAgent(baseId: string | undefined, agentGroupId: string): st
   return `${id}:${agentGroupId}`;
 }
 
-// Test-only exports.
 export const _internals = {
   evaluateEngage,
   evaluateReactionEngage,

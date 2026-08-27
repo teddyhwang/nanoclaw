@@ -12,7 +12,7 @@ import fs from 'fs';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { ensureSchema, openInboundDb } from '../../db/session-db.js';
+import { ensureSchema, openInboundDb } from '../../mailbox/sqlite/session-db.js';
 import { migrateAgentGroup } from './migrate-legacy-series.js';
 import { openScheduleDbAt } from './schedule-store.js';
 

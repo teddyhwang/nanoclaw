@@ -23,13 +23,12 @@
  * agent disabling its own gate is exactly the threat the gate exists to
  * stop.
  */
-import type Database from 'better-sqlite3';
 import type { Migration } from './index.js';
 
 export const migration017: Migration = {
   version: 17,
   name: 'optimus-sensitive-gate-mode',
-  up(db: Database.Database) {
-    db.prepare('ALTER TABLE container_configs ADD COLUMN sensitive_gate_mode TEXT').run();
+  async up(db) {
+    await db.run('ALTER TABLE container_configs ADD COLUMN sensitive_gate_mode TEXT');
   },
 };

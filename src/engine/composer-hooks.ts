@@ -1,29 +1,18 @@
 /**
- * Composer hooks — host overrides for the CLAUDE.md composer.
+ * Host overrides for flat project-document composition.
  *
- * The default composer (claude-md-compose.ts + container-runner.ts) imports
- * the bundled `container/CLAUDE.md` as the shared base and walks the
- * built-in `container/skills/` and `container/agent-runner/src/mcp-tools/`
- * trees for instruction fragments. Hosts that want to override either —
- * Optimus ships its own kernel under `groups/_kernel/container/` and wants
- * the agent to load that instead of the upstream-aligned generic kernel —
- * register here, and the default behavior degrades gracefully when no host
- * has registered.
+ * The default composer inlines the bundled `container/CLAUDE.md`, built-in
+ * module prose, and selected skill instructions. Optimus supplies its own
+ * kernel base here so the flat document contains that contract instead of the
+ * upstream-aligned generic one.
  *
- * Two override surfaces today:
- *
- *   - sharedBaseProvider: returns the host path to mount at
- *     `/app/CLAUDE.md`. When null, the composer falls back to
- *     `<container source>/CLAUDE.md`.
- *
- *   - docsRootProvider: returns the host path to mount RO at `/app/docs/`.
- *     Lets the host ship a lazy-load reference-doc tree so the eager
- *     CLAUDE.md can stay short and link out (`@/app/docs/<topic>.md`).
- *     When null, no `/app/docs/` mount is added.
+ * The docs-root hook remains separate: container-runner mounts it read-only at
+ * `/app/docs/` for lazy reference loading. Flat composition removes project-doc
+ * import mounts, not this intentional reference tree.
  */
 
 export interface SharedBaseSource {
-  /** Absolute host path to a CLAUDE.md file. Mounted RO at /app/CLAUDE.md. */
+  /** Absolute host path to a trusted base document, inlined at compose time. */
   hostPath: string;
 }
 
@@ -53,7 +42,6 @@ export function setSharedBaseProvider(fn: SharedBaseProvider): () => void {
     // pattern for late-registered hooks. Returning the un-set unbinds the
     // current provider rather than the original — by design, so test
     // resets work cleanly.
-    // eslint-disable-next-line no-console
     console.warn('[composer-hooks] sharedBaseProvider already set; overwriting (last-write-wins)');
   }
   sharedBaseProvider = fn;
@@ -68,7 +56,6 @@ export function getSharedBaseSource(): SharedBaseSource | null {
 
 export function setDocsRootProvider(fn: DocsRootProvider): () => void {
   if (docsRootProvider) {
-    // eslint-disable-next-line no-console
     console.warn('[composer-hooks] docsRootProvider already set; overwriting (last-write-wins)');
   }
   docsRootProvider = fn;
@@ -83,7 +70,6 @@ export function getDocsRoot(): DocsRoot | null {
 
 export function setSharedDreamProvider(fn: SharedDreamProvider): () => void {
   if (sharedDreamProvider) {
-    // eslint-disable-next-line no-console
     console.warn('[composer-hooks] sharedDreamProvider already set; overwriting (last-write-wins)');
   }
   sharedDreamProvider = fn;

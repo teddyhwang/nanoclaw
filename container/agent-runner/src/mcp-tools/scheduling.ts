@@ -7,8 +7,8 @@
  */
 import fs from 'fs';
 
-import { getInboundDb } from '../db/connection.js';
 import { writeMessageOut } from '../db/messages-out.js';
+import { getAgentMailbox } from '../mailbox/index.js';
 import { getSessionRouting } from '../db/session-routing.js';
 import { TIMEZONE, parseZonedToUtc } from '../timezone.js';
 import { registerTools } from './server.js';
@@ -145,7 +145,7 @@ export const scheduleTask: McpToolDefinition = {
     const script = (args.script as string) || null;
 
     // Write as a system action — host will insert into inbound.db
-    writeMessageOut({
+    await writeMessageOut({
       id,
       kind: 'system',
       platform_id: r.platform_id,
@@ -188,57 +188,16 @@ export const listTasks: McpToolDefinition = {
   },
   async handler(args) {
     const status = args.status as string | undefined;
-    const db = getInboundDb();
-    // Task series now live in the host-only agent-group schedule.db (the
-    // S405 structural fix — the container can't open it). The host
-    // projects a read-only `task_series` snapshot of the agent group's
-    // live series into this session's inbound.db every sweep tick
-    // (src/modules/scheduling/db.ts:projectSeriesSnapshot), so we read
-    // that local snapshot instead of scanning messages_in (which now
-    // only holds transient fired occurrences, not the series).
-    const hasSnapshot =
-      db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_series' LIMIT 1`).get() !== undefined;
-    if (!hasSnapshot) {
-      // No sweep has projected yet (brand-new session, or pre-cutover
-      // inbound.db). Not an error — there are simply no visible series.
-      return ok('No tasks found.');
-    }
+    // Task series live in host-only schedule.db. The host projects a read-only
+    // `task_series` snapshot into this session mailbox; the driver owns how
+    // that projection is queried.
+    const rows = getAgentMailbox().operations.listTaskSeries(status);
+    if (rows.length === 0) return ok('No tasks found.');
 
-    let rows;
-    if (status) {
-      rows = db
-        .prepare(
-          `SELECT series_id AS id, status, process_after, recurrence, content
-             FROM task_series
-            WHERE status = ?
-            ORDER BY process_after ASC`,
-        )
-        .all(status);
-    } else {
-      rows = db
-        .prepare(
-          `SELECT series_id AS id, status, process_after, recurrence, content
-             FROM task_series
-            WHERE status IN ('pending', 'paused')
-            ORDER BY process_after ASC`,
-        )
-        .all();
-    }
-
-    if ((rows as unknown[]).length === 0) return ok('No tasks found.');
-
-    const lines = (
-      rows as Array<{
-        id: string;
-        status: string;
-        process_after: string | null;
-        recurrence: string | null;
-        content: string;
-      }>
-    ).map((r) => {
-      const content = JSON.parse(r.content);
-      const prompt = ((content.prompt as string) || '').slice(0, 80);
-      return `- ${r.id} [${r.status}] at=${r.process_after || 'now'} ${r.recurrence ? `recur=${r.recurrence} ` : ''}→ ${prompt}`;
+    const lines = rows.map((row) => {
+      const content = JSON.parse(row.content) as { prompt?: unknown };
+      const prompt = (typeof content.prompt === 'string' ? content.prompt : '').slice(0, 80);
+      return `- ${row.id} [${row.status}] at=${row.processAfter || 'now'} ${row.recurrence ? `recur=${row.recurrence} ` : ''}→ ${prompt}`;
     });
 
     return ok(lines.join('\n'));
@@ -279,7 +238,7 @@ export const cancelTask: McpToolDefinition = {
     if (!taskId) return err('taskId is required');
 
     // Write as a system action — host will update inbound.db
-    writeMessageOut({
+    await writeMessageOut({
       id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       kind: 'system',
       content: JSON.stringify({ action: 'cancel_task', taskId }),
@@ -306,7 +265,7 @@ export const pauseTask: McpToolDefinition = {
     const taskId = args.taskId as string;
     if (!taskId) return err('taskId is required');
 
-    writeMessageOut({
+    await writeMessageOut({
       id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       kind: 'system',
       content: JSON.stringify({ action: 'pause_task', taskId }),
@@ -333,7 +292,7 @@ export const resumeTask: McpToolDefinition = {
     const taskId = args.taskId as string;
     if (!taskId) return err('taskId is required');
 
-    writeMessageOut({
+    await writeMessageOut({
       id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       kind: 'system',
       content: JSON.stringify({ action: 'resume_task', taskId }),
@@ -396,7 +355,7 @@ export const updateTask: McpToolDefinition = {
 
     if (Object.keys(update).length === 1) return err('at least one field to update is required');
 
-    writeMessageOut({
+    await writeMessageOut({
       id: `sys-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       kind: 'system',
       content: JSON.stringify({ action: 'update_task', ...update }),

@@ -53,11 +53,14 @@ export const ASSISTANT_HAS_OWN_NUMBER =
 const _paths = getEnginePaths();
 const PROJECT_ROOT = _paths.projectRoot;
 
+// Mount security: allowlists live outside container-visible roots. Embedded
+// hosts supply the exact locations before this module loads.
 export const MOUNT_ALLOWLIST_PATH = _paths.mountAllowlistPath;
 export const SENDER_ALLOWLIST_PATH = _paths.senderAllowlistPath;
 export const STORE_DIR = _paths.storeDir;
 export const GROUPS_DIR = _paths.groupsDir;
 export const DATA_DIR = _paths.dataDir;
+export const CENTRAL_DB_PATH = path.join(DATA_DIR, 'v2.db');
 // Local agent-template library. Committed but ships empty (+ README). Resolved
 // once at load. Override to another LOCAL path via NANOCLAW_TEMPLATES_DIR; never
 // a remote URL, never an ncl flag, never runtime-mutable.
@@ -69,8 +72,9 @@ export const TEMPLATES_DIR = process.env.NANOCLAW_TEMPLATES_DIR
 // `nanoclaw-agent:latest` and clobber each other on rebuild.
 export const CONTAINER_IMAGE_BASE = process.env.CONTAINER_IMAGE_BASE || getContainerImageBase(PROJECT_ROOT);
 export const CONTAINER_IMAGE = process.env.CONTAINER_IMAGE || getDefaultContainerImage(PROJECT_ROOT);
-// Install slug — stamped onto every spawned container via --label so
-// cleanupOrphans only reaps containers from this install, not peers.
+// Install slug — the session key's install component, stamped onto every
+// runtime object via the canonical `nanoclaw-install` label so adoption and
+// reaping only ever see this install's sessions, not a peer's.
 export const INSTALL_SLUG = getInstallSlug(PROJECT_ROOT);
 export const CONTAINER_INSTALL_LABEL = `nanoclaw-install=${INSTALL_SLUG}`;
 export const ONECLI_URL = process.env.ONECLI_URL || envConfig.ONECLI_URL;

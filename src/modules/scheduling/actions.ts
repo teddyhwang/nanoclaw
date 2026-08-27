@@ -9,14 +9,11 @@
  *
  * Source of truth: the agent-group-scoped, host-only `schedule.db`
  * (schedule-store.ts), NOT the session's inbound.db. This is the S405
- * structural fix — see schedule-store.ts header. The host sweep materializes
- * a due series into inbound.db only at fire time. `inDb` (the session
- * inbound.db) is still passed by the delivery registry but the scheduling
- * source of truth no longer lives there; we only touch the agent-group
- * schedule.db here.
+ * structural fix — see schedule-store.ts header. The v2.3 delivery registry
+ * invokes handlers without holding a mailbox session; these actions only touch
+ * the agent-group schedule. Host sweep materializes a due occurrence into a
+ * mailbox separately at fire time.
  */
-import type Database from 'better-sqlite3';
-
 import { wakeContainer } from '../../container-runner.js';
 import { getSession } from '../../db/sessions.js';
 import { emitEngineEvent } from '../../engine/events.js';
@@ -33,11 +30,7 @@ import {
   type SeriesUpdate,
 } from './schedule-store.js';
 
-export async function handleScheduleTask(
-  content: Record<string, unknown>,
-  session: Session,
-  _inDb: Database.Database,
-): Promise<void> {
+export async function handleScheduleTask(content: Record<string, unknown>, session: Session): Promise<void> {
   const taskId = content.taskId as string;
   const prompt = content.prompt as string;
   const script = content.script as string | null;
@@ -80,11 +73,7 @@ export async function handleScheduleTask(
   });
 }
 
-export async function handleCancelTask(
-  content: Record<string, unknown>,
-  session: Session,
-  _inDb: Database.Database,
-): Promise<void> {
+export async function handleCancelTask(content: Record<string, unknown>, session: Session): Promise<void> {
   const taskId = content.taskId as string;
   const db = openScheduleDb(session.agent_group_id);
   try {
@@ -95,11 +84,7 @@ export async function handleCancelTask(
   log.info('Task cancelled', { taskId });
 }
 
-export async function handlePauseTask(
-  content: Record<string, unknown>,
-  session: Session,
-  _inDb: Database.Database,
-): Promise<void> {
+export async function handlePauseTask(content: Record<string, unknown>, session: Session): Promise<void> {
   const taskId = content.taskId as string;
   const db = openScheduleDb(session.agent_group_id);
   try {
@@ -110,11 +95,7 @@ export async function handlePauseTask(
   log.info('Task paused', { taskId });
 }
 
-export async function handleResumeTask(
-  content: Record<string, unknown>,
-  session: Session,
-  _inDb: Database.Database,
-): Promise<void> {
+export async function handleResumeTask(content: Record<string, unknown>, session: Session): Promise<void> {
   const taskId = content.taskId as string;
   const db = openScheduleDb(session.agent_group_id);
   try {
@@ -125,11 +106,7 @@ export async function handleResumeTask(
   log.info('Task resumed', { taskId });
 }
 
-export async function handleUpdateTask(
-  content: Record<string, unknown>,
-  session: Session,
-  _inDb: Database.Database,
-): Promise<void> {
+export async function handleUpdateTask(content: Record<string, unknown>, session: Session): Promise<void> {
   const taskId = content.taskId as string;
   const update: SeriesUpdate = {};
   if (typeof content.prompt === 'string') update.prompt = content.prompt;
@@ -165,7 +142,7 @@ export async function handleUpdateTask(
         senderId: 'system',
       }),
     });
-    const fresh = getSession(session.id);
+    const fresh = await getSession(session.id);
     if (fresh) {
       wakeContainer(fresh).catch((err) =>
         log.error('Failed to wake container after update_task notification', { err }),

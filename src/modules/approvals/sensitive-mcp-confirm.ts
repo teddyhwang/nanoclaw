@@ -66,7 +66,7 @@ registerApprovalHandler('sensitive_mcp_confirm', async ({ session, payload, user
   if (!actorId) {
     // Should be unreachable (requestConfirmation always records actorId),
     // but never create an unkeyed grant — fail closed, agent re-prompts.
-    notify(
+    await notify(
       'Your action was confirmed, but it could not be remembered for this session (no actor id); you may be asked again.',
     );
     log.warn('sensitive_mcp_confirm: missing actorId, grant skipped', {
@@ -77,7 +77,7 @@ registerApprovalHandler('sensitive_mcp_confirm', async ({ session, payload, user
     return;
   }
 
-  upsertConfirmationGrant(session.id, actorId, new Date().toISOString());
+  await upsertConfirmationGrant(session.id, actorId, new Date().toISOString());
   log.info('sensitive_mcp_confirm: grant created/refreshed', {
     sessionId: session.id,
     actorId,
@@ -99,7 +99,7 @@ registerApprovalHandler('sensitive_mcp_confirm', async ({ session, payload, user
   if (!p.groupFolder || !p.integration || !p.tool) {
     // No replay identity (older/edge payload) — fall back to the legacy
     // model-reissue nudge rather than silently dropping the action.
-    notify(
+    await notify(
       `Confirmed. ${what} is approved for this session — re-issue the call and it will go through (no further confirmation needed for the rest of this session).`,
     );
     return;
@@ -121,7 +121,7 @@ registerApprovalHandler('sensitive_mcp_confirm', async ({ session, payload, user
     const rendered = renderReplayContent(outcome.content) || '(the action returned no output)';
     // Deliver the actual tool result as a system message the agent reads
     // and continues from — exactly as if the tool had returned inline.
-    notify(
+    await notify(
       `Confirmed — ${what} ran. Result:\n${rendered}\n\n` + `Continue from this result. Do not re-issue the call.`,
     );
     log.info('sensitive_mcp_confirm: engine-driven replay delivered', {
@@ -152,7 +152,7 @@ registerApprovalHandler('sensitive_mcp_confirm', async ({ session, payload, user
     // Bounded loop-exit (task #25): the stash GC'd (TTL) and no success
     // recorded. Never silent, never a retry-loop — tell the agent
     // definitively so it can inform the user / move on.
-    notify(
+    await notify(
       `Confirmed, but ${what} could not be auto-completed ` +
         `(the confirmation window elapsed). ` +
         `If you still need it, ask the user to trigger the action again.`,
@@ -177,7 +177,7 @@ registerApprovalHandler('sensitive_mcp_confirm', async ({ session, payload, user
     });
     return;
   }
-  notify(
+  await notify(
     `Confirmed and approved for this session, but auto-running ${what} ` +
       `failed (${outcome.message}). You may re-issue the call once — the ` +
       `confirmation is now on record so it will go straight through.`,

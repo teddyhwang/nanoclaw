@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
 
-import { initTestSessionDb, withInboundDb } from './connection.js';
+import { initTestSessionDb, withInboundDb } from '../mailbox/sqlite/connection.js';
 
 // withInboundDb is the S405 fix: a transient SQLITE_CORRUPT on the
 // inbound.db read (host writer + VirtioFS non-atomic page propagation

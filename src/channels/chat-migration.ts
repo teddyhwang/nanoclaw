@@ -23,9 +23,13 @@ import {
 import { getSessionsByAgentGroup } from '../db/sessions.js';
 import { writeSessionRouting } from '../session-manager.js';
 
-export function handleChatMigrated(channelType: string, oldPlatformId: string, newPlatformId: string): void {
+export async function handleChatMigrated(
+  channelType: string,
+  oldPlatformId: string,
+  newPlatformId: string,
+): Promise<void> {
   try {
-    const mg = getMessagingGroupByPlatform(channelType, oldPlatformId);
+    const mg = await getMessagingGroupByPlatform(channelType, oldPlatformId);
     if (!mg) {
       log.warn('onChatMigrated: no messaging group for old platform id (already rewritten or never wired)', {
         channelType,
@@ -34,7 +38,7 @@ export function handleChatMigrated(channelType: string, oldPlatformId: string, n
       });
       return;
     }
-    const changed = setMessagingGroupPlatformId(mg.id, newPlatformId);
+    const changed = await setMessagingGroupPlatformId(mg.id, newPlatformId);
     if (!changed) return; // already at newPlatformId
     log.info('Rewrote messaging_groups.platform_id', {
       messagingGroupId: mg.id,
@@ -44,13 +48,13 @@ export function handleChatMigrated(channelType: string, oldPlatformId: string, n
     });
     // writeSessionRouting reads from the now-updated messaging_groups row,
     // so it picks up the new platform_id automatically.
-    const mgas = getMessagingGroupAgents(mg.id);
+    const mgas = await getMessagingGroupAgents(mg.id);
     let sessionsRefreshed = 0;
     for (const mga of mgas) {
-      const sessions = getSessionsByAgentGroup(mga.agent_group_id);
+      const sessions = await getSessionsByAgentGroup(mga.agent_group_id);
       for (const session of sessions) {
         try {
-          writeSessionRouting(mga.agent_group_id, session.id);
+          await writeSessionRouting(mga.agent_group_id, session.id);
           sessionsRefreshed += 1;
         } catch (err) {
           log.warn('writeSessionRouting failed after migrate', {

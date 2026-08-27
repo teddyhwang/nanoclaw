@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
-import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './db/connection.js';
+import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './mailbox/sqlite/connection.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { getPendingMessages } from './db/messages-in.js';
 import {
@@ -9,6 +9,7 @@ import {
   setContinuation,
   setContinuationStartedAt,
 } from './db/session-state.js';
+import { getSessionRouting } from './db/session-routing.js';
 import { computeRotationDate, evaluateRotation } from './session-rotation.js';
 import { TIMEZONE } from './timezone.js';
 import { MockProvider } from './providers/mock.js';
@@ -50,6 +51,13 @@ function insertMessage(
 }
 
 describe('poll loop integration', () => {
+  it('defaults only when the legacy session routing table is absent', () => {
+    expect(getSessionRouting()).toEqual({ channel_type: null, platform_id: null, thread_id: null });
+
+    getInboundDb().exec('CREATE VIEW session_routing AS SELECT * FROM missing_routing');
+    expect(() => getSessionRouting()).toThrow(/missing_routing/);
+  });
+
   it('should pick up a message, process it, and write a response', async () => {
     insertMessage(
       'm1',
@@ -745,8 +753,7 @@ describe('poll loop integration', () => {
     // runner must also exit so host-sweep can observe a stopped container,
     // clear the processing claim with backoff, and re-fire the row.
     const ack = getOutboundDb().prepare("SELECT status FROM processing_ack WHERE message_id = 't-dream'").get() as
-      | { status: string }
-      | undefined;
+      { status: string } | undefined;
     expect(ack?.status).not.toBe('completed');
     // And it produced no outbound (it genuinely did nothing).
     expect(getUndeliveredMessages()).toHaveLength(0);
@@ -767,8 +774,7 @@ describe('poll loop integration', () => {
     await expect(runPollLoopWithTimeout(provider, controller.signal, 2000)).resolves.toBeUndefined();
 
     const ack = getOutboundDb().prepare("SELECT status FROM processing_ack WHERE message_id = 'm-retry-chat'").get() as
-      | { status: string }
-      | undefined;
+      { status: string } | undefined;
     expect(ack?.status).not.toBe('completed');
     expect(getUndeliveredMessages()).toHaveLength(0);
   });
@@ -796,8 +802,7 @@ describe('poll loop integration', () => {
     // Wait until the turn is in flight (row claimed 'processing'), then reap.
     await waitFor(() => {
       const ack = getOutboundDb().prepare("SELECT status FROM processing_ack WHERE message_id = 'm-cut'").get() as
-        | { status: string }
-        | undefined;
+        { status: string } | undefined;
       return ack?.status === 'processing';
     }, 2000);
 
@@ -812,8 +817,7 @@ describe('poll loop integration', () => {
     // The cut-short turn produced nothing and must NOT be marked completed —
     // the next container re-processes it.
     const ack = getOutboundDb().prepare("SELECT status FROM processing_ack WHERE message_id = 'm-cut'").get() as
-      | { status: string }
-      | undefined;
+      { status: string } | undefined;
     expect(ack?.status).not.toBe('completed');
     expect(getUndeliveredMessages()).toHaveLength(0);
   });

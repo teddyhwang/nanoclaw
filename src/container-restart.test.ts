@@ -26,13 +26,14 @@ vi.mock('./db/sessions.js', () => ({
 const mockWriteSessionMessage = vi.fn();
 vi.mock('./session-manager.js', () => ({
   writeSessionMessage: (...args: unknown[]) => mockWriteSessionMessage(...args),
-  openInboundDb: () => ({}),
+  withExistingMailboxSession: (
+    _agentGroupId: string,
+    _sessionId: string,
+    action: (mailbox: { countDueMessages(): number }) => unknown,
+  ) => action({ countDueMessages: () => mockCountDueMessages() }),
 }));
 
 const mockCountDueMessages = vi.fn((..._args: unknown[]) => 0);
-vi.mock('./db/session-db.js', () => ({
-  countDueMessages: (...args: unknown[]) => mockCountDueMessages(...args),
-}));
 
 import { restartAgentGroupContainers } from './container-restart.js';
 
@@ -102,7 +103,7 @@ describe('restartAgentGroupContainers', () => {
     const [agentGroupId, sessionId, msg] = mockWriteSessionMessage.mock.calls[0];
     expect(agentGroupId).toBe('g1');
     expect(sessionId).toBe('s1');
-    expect(msg.onWake).toBe(1);
+    expect(msg.onWake).toBe(true);
     expect(JSON.parse(msg.content).text).toBe('Resuming.');
 
     // Should pass an onExit callback to killContainer
@@ -124,7 +125,7 @@ describe('restartAgentGroupContainers', () => {
     onExit();
 
     expect(mockGetSession).toHaveBeenCalledWith('s1');
-    expect(mockWakeContainer).toHaveBeenCalledWith(freshSession);
+    await vi.waitFor(() => expect(mockWakeContainer).toHaveBeenCalledWith(freshSession));
   });
 
   it('onExit callback does not wake if session no longer exists', async () => {
@@ -155,7 +156,7 @@ describe('restartAgentGroupContainers', () => {
     expect(mockWriteSessionMessage.mock.calls[1][1]).toBe('s2');
   });
 
-  it('wakes even without a wake message when in-flight messages are pending', () => {
+  it('wakes even without a wake message when in-flight messages are pending', async () => {
     // A provider switch mid-conversation kills a container holding claimed
     // messages — without an immediate respawn those messages stay dark until
     // the next inbound or a slow sweep backoff.
@@ -163,12 +164,12 @@ describe('restartAgentGroupContainers', () => {
     mockIsContainerRunning.mockReturnValue(true);
     mockCountDueMessages.mockReturnValue(2);
 
-    restartAgentGroupContainers('ag1', 'provider switch');
+    await restartAgentGroupContainers('ag1', 'provider switch');
 
     const onExit = mockKillContainer.mock.calls[0][2] as () => void;
     expect(typeof onExit).toBe('function');
     mockGetSession.mockReturnValue(makeSession('s1', 'ag1'));
     onExit();
-    expect(mockWakeContainer).toHaveBeenCalled();
+    await vi.waitFor(() => expect(mockWakeContainer).toHaveBeenCalled());
   });
 });

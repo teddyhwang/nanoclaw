@@ -14,14 +14,13 @@
  * means use the legacy default `": "`. Set to `" "` for emoji-only marks
  * (`🤖 text`) or `""` to drop entirely.
  */
-import type Database from 'better-sqlite3';
 import type { Migration } from './index.js';
 
 export const migration016: Migration = {
   version: 16,
   name: 'optimus-container-config-fields',
-  up(db: Database.Database) {
-    db.prepare('ALTER TABLE container_configs ADD COLUMN suppress_embeds INTEGER NOT NULL DEFAULT 1').run();
-    db.prepare('ALTER TABLE container_configs ADD COLUMN assistant_prefix_separator TEXT').run();
+  async up(db) {
+    await db.run('ALTER TABLE container_configs ADD COLUMN suppress_embeds INTEGER NOT NULL DEFAULT 1');
+    await db.run('ALTER TABLE container_configs ADD COLUMN assistant_prefix_separator TEXT');
   },
 };

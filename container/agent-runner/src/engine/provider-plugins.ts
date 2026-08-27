@@ -42,15 +42,12 @@ function log(msg: string): void {
 }
 
 export async function loadProviderPlugins(): Promise<void> {
-  const manifestPath =
-    process.env.NANOCLAW_PROVIDER_PLUGINS_MANIFEST || DEFAULT_MANIFEST_PATH;
+  const manifestPath = process.env.NANOCLAW_PROVIDER_PLUGINS_MANIFEST || DEFAULT_MANIFEST_PATH;
   if (!fs.existsSync(manifestPath)) return;
 
   let manifest: ProviderPluginManifest;
   try {
-    manifest = JSON.parse(
-      fs.readFileSync(manifestPath, 'utf8'),
-    ) as ProviderPluginManifest;
+    manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as ProviderPluginManifest;
   } catch (err) {
     log(`failed to parse manifest ${manifestPath}: ${String(err)}`);
     return;

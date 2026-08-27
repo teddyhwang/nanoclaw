@@ -32,8 +32,8 @@ import type { Migration } from './index.js';
 export const moduleApprovalsConfirmationGrants: Migration = {
   version: 8,
   name: 'confirmation-grants',
-  up(db) {
-    db.exec(`
+  async up(db) {
+    await db.exec(`
       CREATE TABLE confirmation_grants (
         session_id   TEXT NOT NULL REFERENCES sessions(id),
         actor_id     TEXT NOT NULL,

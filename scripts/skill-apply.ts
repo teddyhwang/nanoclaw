@@ -37,6 +37,11 @@ export interface InputMeta {
   validate?: string; // regex source (nc:prompt validate:<re>)
   flags?: string; // regex flags   (nc:prompt flags:<f>)
   normalize?: 'trim' | 'rstrip-slash' | 'lower'; // applied by the ENGINE at bind
+  // Interactive select options, `|`-separated (nc:prompt choices:a|b). When a
+  // value is legal only via pre-bound inputs (e.g. slack's `provisioned`
+  // connection), validate stays wider than the offered set — so a consumer
+  // must prefer this over options derived from the validate alternation.
+  choices?: string;
 }
 
 // Everything the engine EMITS — the core seam's output contract. Every
@@ -90,9 +95,9 @@ function fileHasLine(root: string, rel: string, line: string): boolean {
     .split('\n')
     .some((l) => l.trim() === line.trim());
 }
-function pkgHasDep(root: string, name: string): boolean {
+function pkgHasDep(root: string, name: string, cwd = ''): boolean {
   try {
-    const pkg = JSON.parse(read(join(root, 'package.json')) || '{}');
+    const pkg = JSON.parse(read(join(root, cwd, 'package.json')) || '{}');
     return Boolean(pkg.dependencies?.[name] || pkg.devDependencies?.[name]);
   } catch {
     return false;
@@ -121,12 +126,19 @@ function jsonArrayHasKey(root: string, rel: string, key: string, value: unknown)
 }
 
 // Per-directive idempotency check + "what it would do". Read-only.
-function selfStatus(d: Directive, root: string): { status: StepStatus; detail: string } {
+function selfStatus(
+  d: Directive,
+  root: string,
+  mode: 'install' | 'refresh' = 'install',
+): { status: StepStatus; detail: string } {
   switch (d.kind) {
     case 'copy': {
       const dests = d.body.map(destOf);
       const missing = dests.filter((p) => !has(root, p));
       const from = d.attrs['from-branch'] ? `fetch ${String(d.attrs['from-branch'])} → ` : '';
+      if (mode === 'refresh') {
+        return { status: 'apply', detail: `${from}refresh ${dests.join(', ')}` };
+      }
       return missing.length
         ? { status: 'apply', detail: `${from}copy ${missing.join(', ')} (absent)` }
         : { status: 'skip', detail: `${dests.join(', ')} present` };
@@ -139,7 +151,11 @@ function selfStatus(d: Directive, root: string): { status: StepStatus; detail: s
         : { status: 'apply', detail: `add to ${to}: ${line}` };
     }
     case 'dep': {
-      const missing = d.body.filter((s) => !pkgHasDep(root, s.slice(0, s.lastIndexOf('@'))));
+      if (mode === 'refresh') {
+        return { status: 'apply', detail: `refresh ${d.body.join(', ')}` };
+      }
+      const cwd = typeof d.attrs.cwd === 'string' ? d.attrs.cwd : '';
+      const missing = d.body.filter((s) => !pkgHasDep(root, s.slice(0, s.lastIndexOf('@')), cwd));
       return missing.length
         ? { status: 'apply', detail: `install ${missing.join(', ')}` }
         : { status: 'skip', detail: `${d.body.join(', ')} present` };
@@ -164,6 +180,9 @@ function selfStatus(d: Directive, root: string): { status: StepStatus; detail: s
           status: 'agent',
           detail: `nc:json-merge body is not parseable JSON — an agent applies it from the prose`,
         };
+      }
+      if (mode === 'refresh') {
+        return { status: 'apply', detail: `refresh ${key}=${JSON.stringify(value)} in ${into}` };
       }
       return jsonArrayHasKey(root, into, key, value)
         ? { status: 'skip', detail: `${into} already has ${key}=${JSON.stringify(value)}` }
@@ -220,7 +239,7 @@ export type JournalEntry =
   | { op: 'wrote'; path: string }
   | { op: 'appended'; path: string; line: string }
   | { op: 'set-env'; key: string }
-  | { op: 'json-merge'; path: string; key: string; value: unknown }
+  | { op: 'json-merge'; path: string; key: string; value: unknown; previous?: unknown }
   | { op: 'ran'; cmd: string; undo?: string };
 
 export interface AgentTask {
@@ -251,6 +270,9 @@ export interface ApplyResult {
 }
 
 export interface ApplyOptions {
+  // Install skips already-present payloads. Refresh deliberately reapplies
+  // copy and dependency directives so registry bytes and exact pins advance.
+  mode?: 'install' | 'refresh';
   // Pre-supplied answers for `prompt` vars (var name → value). Checked FIRST, so
   // a caller that has every answer needs no resolver at all and the whole skill
   // runs through with no human interaction (fully programmatic apply).
@@ -273,6 +295,10 @@ export interface ApplyOptions {
   // dep/run/branch-fetch; injectable for tests. Returns the command's stdout so
   // a `run capture:<var>` can bind it into a {{var}} (the twin of `prompt`).
   exec?: (cmd: string) => string | void | Promise<string | void>;
+  // Override dependency commands when the declared package manager is not
+  // directly available on the host (for example, run the container's pinned
+  // Bun through pnpm dlx during a refresh).
+  resolveDependencyCommand?: (request: DependencyCommandRequest) => string;
   // Streaming exec for `nc:run effect:step`: spawns a long-running, operator-
   // interactive step (a pairing code, a QR device-link) that emits
   // `=== NANOCLAW SETUP: … ===` status blocks, renders them to the operator live,
@@ -287,6 +313,13 @@ export interface ApplyOptions {
   // generic resolver (env override → first remote that has the branch → origin);
   // setup injects one that reuses setup/lib/channels-remote.sh for exact parity.
   resolveRemote?: (branch: string) => string;
+}
+
+export interface DependencyCommandRequest {
+  manager: string;
+  cwd: string;
+  action: 'add' | 'remove';
+  packages: string[];
 }
 
 /**
@@ -431,7 +464,20 @@ function proseFor(md: string, fenceLine1: number): string {
 function headingAbove(md: string, fenceLine1: number): string {
   const lines = md.split('\n');
   for (let h = fenceLine1 - 2; h >= 0; h--) {
-    if (lines[h].startsWith('#')) return lines[h].replace(/^#+\s*/, '').trim();
+    if (lines[h].startsWith('#')) {
+      // Drop a leading authoring ordinal ("### 2. Copy the adapter" → "Copy the
+      // adapter"). Those numbers index the SKILL.md for a READER; as step
+      // captions they are actively wrong. A skipped step leaves a hole (1, 3,
+      // 4…), a heading with several directives repeats its number, headings
+      // without one render bare, and a flow that applies several skills in
+      // sequence restarts the count mid-run — so the operator sees
+      // "1, 3, 4, 4, Restart, 2, 4". The engine's own (i/n) suffix
+      // (labelOrdinals) already disambiguates repeats, and it stays correct.
+      return lines[h]
+        .replace(/^#+\s*/, '')
+        .replace(/^\d+[.)]\s+/, '')
+        .trim();
+    }
   }
   return '';
 }
@@ -512,6 +558,7 @@ function inputMetaOf(d: Directive, secret: boolean, validate: string | undefined
   if (typeof d.attrs.normalize === 'string' && NORMALIZE_KINDS.has(d.attrs.normalize)) {
     meta.normalize = d.attrs.normalize as InputMeta['normalize'];
   }
+  if (typeof d.attrs.choices === 'string') meta.choices = d.attrs.choices;
   return meta;
 }
 
@@ -591,8 +638,10 @@ async function applyOne(
     exec: (c: string) => string | void | Promise<string | void>;
     execStream?: (c: string) => Promise<StepOutcome>;
     resolveRemote: (b: string) => string;
+    resolveDependencyCommand?: (request: DependencyCommandRequest) => string;
     vars: Map<string, { value: string; secret: boolean }>;
     journal: JournalEntry[];
+    mode: 'install' | 'refresh';
   },
 ): Promise<void> {
   const { root, skillDir, exec, vars, journal } = ctx;
@@ -645,9 +694,22 @@ async function applyOne(
       break;
     }
     case 'dep': {
-      await exec(`pnpm add ${d.body.join(' ')}`);
+      const manager = typeof d.attrs.manager === 'string' ? d.attrs.manager : 'pnpm';
+      const cwd = typeof d.attrs.cwd === 'string' ? d.attrs.cwd : '';
+      const prefix = cwd ? `cd ${cwd} && ` : '';
       const names = d.body.map((s) => s.slice(0, s.lastIndexOf('@'))).join(' ');
-      journal.push({ op: 'ran', cmd: `pnpm add ${d.body.join(' ')}`, undo: `pnpm remove ${names}` });
+      const add =
+        ctx.resolveDependencyCommand?.({ manager, cwd, action: 'add', packages: d.body }) ??
+        `${prefix}${manager} add ${d.body.join(' ')}`;
+      const remove =
+        ctx.resolveDependencyCommand?.({ manager, cwd, action: 'remove', packages: names.split(' ') }) ??
+        `${prefix}${manager} remove ${names}`;
+      await exec(add);
+      journal.push({
+        op: 'ran',
+        cmd: add,
+        undo: remove,
+      });
       break;
     }
     case 'run': {
@@ -736,11 +798,18 @@ async function applyOne(
       const arr = JSON.parse(read(target) || '[]') as unknown[];
       if (!Array.isArray(arr)) throw new Error(`${into} is not a JSON array`);
       const value = obj[key];
-      // Idempotent: only push when no element already matches on the key.
-      if (!arr.some((el) => el !== null && typeof el === 'object' && (el as Record<string, unknown>)[key] === value)) {
+      const existingIndex = arr.findIndex(
+        (el) => el !== null && typeof el === 'object' && (el as Record<string, unknown>)[key] === value,
+      );
+      if (existingIndex === -1) {
         arr.push(obj);
         writeFileSync(target, JSON.stringify(arr, null, 2) + '\n');
         journal.push({ op: 'json-merge', path: into, key, value });
+      } else if (ctx.mode === 'refresh' && JSON.stringify(arr[existingIndex]) !== JSON.stringify(obj)) {
+        const previous = arr[existingIndex];
+        arr[existingIndex] = obj;
+        writeFileSync(target, JSON.stringify(arr, null, 2) + '\n');
+        journal.push({ op: 'json-merge', path: into, key, value, previous });
       }
       break;
     }
@@ -794,6 +863,19 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
     // spinner is never orphaned). Set only after step-start fires.
     let inFlight: { label: string | null; at: number } | null = null;
     try {
+      // Refresh is deliberately non-interactive. Reapply code-carrying
+      // mutations and explicitly refresh-safe runs only; leave credentials,
+      // operator walkthroughs, wiring, and restarts untouched.
+      if (
+        opts.mode === 'refresh' &&
+        (d.kind === 'prompt' ||
+          d.kind === 'operator' ||
+          d.kind === 'env-set' ||
+          (d.kind === 'run' && d.attrs.effect !== 'refresh'))
+      ) {
+        res.skipped.push(`${d.kind}: not part of code refresh`);
+        continue;
+      }
       // A `when:<var>=<value>` guard that isn't met skips the directive entirely —
       // before prompt (so a guarded prompt is skipped, never deferred), operator,
       // and run handling. This is how mutually-exclusive branches coexist in one
@@ -880,7 +962,7 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
         bounce(d, 'skipped: an earlier step did not complete — run this from the prose after fixing it');
         continue;
       }
-      const st = selfStatus(d, root);
+      const st = selfStatus(d, root, opts.mode);
       if (st.status === 'agent') {
         bounce(d, 'no deterministic handler');
         continue;
@@ -903,8 +985,10 @@ export async function applySkill(skillDir: string, root: string, opts: ApplyOpti
         exec,
         execStream: opts.execStream,
         resolveRemote,
+        resolveDependencyCommand: opts.resolveDependencyCommand,
         vars,
         journal: res.journal,
+        mode: opts.mode ?? 'install',
       });
       const durationMs = Date.now() - inFlight.at;
       inFlight = null;
@@ -973,16 +1057,12 @@ export async function removeSkill(
       const p = join(root, e.path);
       const arr = JSON.parse(read(p) || '[]') as unknown[];
       if (Array.isArray(arr)) {
-        writeFileSync(
-          p,
-          JSON.stringify(
-            arr.filter(
-              (el) => !(el !== null && typeof el === 'object' && (el as Record<string, unknown>)[e.key] === e.value),
-            ),
-            null,
-            2,
-          ) + '\n',
+        const index = arr.findIndex(
+          (el) => el !== null && typeof el === 'object' && (el as Record<string, unknown>)[e.key] === e.value,
         );
+        if (e.previous !== undefined && index >= 0) arr[index] = e.previous;
+        else if (index >= 0) arr.splice(index, 1);
+        writeFileSync(p, JSON.stringify(arr, null, 2) + '\n');
       }
     } else if (e.op === 'ran' && e.undo && exec) {
       await exec(e.undo);

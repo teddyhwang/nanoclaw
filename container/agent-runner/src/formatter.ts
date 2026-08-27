@@ -3,7 +3,19 @@ import path from 'path';
 
 import { findByRouting } from './destinations.js';
 import type { MessageInRow } from './db/messages-in.js';
-import { TIMEZONE, formatLocalTime } from './timezone.js';
+import { TIMEZONE, formatLocalTime, formatLocalStamp } from './timezone.js';
+
+/**
+ * channel_type marking cross-session context copies (accumulate fan-out from
+ * the agent group's other sessions). Echo rows are ambient context only: they
+ * never provide reply routing, never count as commands, and render as
+ * <cross-session-context> blocks.
+ */
+export const SESSION_ECHO_CHANNEL = 'session-echo';
+
+export function isSessionEcho(msg: MessageInRow): boolean {
+  return msg.channel_type === SESSION_ECHO_CHANNEL;
+}
 
 /**
  * Command categories for messages starting with '/'.
@@ -48,7 +60,9 @@ export function categorizeMessage(msg: MessageInRow): CommandInfo {
   const text = (content.text || '').trim();
   const senderId = extractSenderId(msg, content);
 
-  if (!text.startsWith('/')) {
+  // Cross-session echo rows are ambient copies of another conversation —
+  // a copied "/clear" etc. must never execute here.
+  if (isSessionEcho(msg) || !text.startsWith('/')) {
     return { category: 'none', command: '', text, senderId };
   }
 
@@ -72,6 +86,7 @@ export function categorizeMessage(msg: MessageInRow): CommandInfo {
  * before messages reach the container.
  */
 export function isClearCommand(msg: MessageInRow): boolean {
+  if (isSessionEcho(msg)) return false;
   const content = parseContent(msg.content);
   const text = (content.text || '').trim();
   return text.toLowerCase().startsWith('/clear');
@@ -175,7 +190,7 @@ export function pickInReplyToMessage(messages: MessageInRow[]): MessageInRow | n
   // for chat adapters and harmful for Discord, which falls back to replying
   // to the channel's most-recent real message (observed on recurring RSS
   // posts in ai-friends, 2026-05-11). Exclude them at the picker level.
-  const chatLike = messages.filter((m) => m.kind !== 'task');
+  const chatLike = messages.filter((m) => m.kind !== 'task' && !isSessionEcho(m));
   if (chatLike.length === 0) return null;
   // Walk newest-first independent of caller input order. Order keys,
   // most-specific first:
@@ -207,23 +222,24 @@ export function pickInReplyToMessage(messages: MessageInRow[]): MessageInRow | n
  *
  * `platformId`, `channelType`, and `threadId` come from the newest
  * triggering row when there is one. Mixed agent-shared batches can carry
- * accumulated context from other wired channels before the actual
- * trigger row; using the first row would route degraded fallbacks and
- * implicit replies to the wrong channel. `inReplyTo` uses the same
- * triggering row so the reply pill points at the message the agent is
- * actually answering, not at non-trigger context that happened to ride
- * along in the batch.
+ * accumulated context from other wired channels before the actual trigger
+ * row; using the first row would route degraded fallbacks and implicit
+ * replies to the wrong channel. Cross-session echoes are ambient context:
+ * they never select a route or reply target, even if a malformed echo row
+ * carries routing fields or `trigger=1`.
  */
 export function extractRouting(messages: MessageInRow[]): RoutingContext {
-  const first = messages[0];
+  const firstNonEcho = messages.find((m) => !isSessionEcho(m));
   const replyTarget = pickInReplyToMessage(messages);
-  const routeSource = replyTarget ?? first;
+  const routeSource = replyTarget ?? firstNonEcho;
   return {
     platformId: routeSource?.platform_id ?? null,
     channelType: routeSource?.channel_type ?? null,
     threadId: routeSource?.thread_id ?? null,
     inReplyTo: replyTarget?.id ?? null,
-    taskFire: messages.length > 0 && messages.every((m) => m.kind === 'task'),
+    // Echo rows riding along with a task remain ambient context and do not
+    // change the local task-fire semantics. Echo-only batches are not tasks.
+    taskFire: messages.some((m) => m.kind === 'task') && messages.every((m) => m.kind === 'task' || isSessionEcho(m)),
   };
 }
 
@@ -278,6 +294,7 @@ export function extractRouting(messages: MessageInRow[]): RoutingContext {
 export function isAddressedTurn(messages: MessageInRow[], assistantName: string): boolean {
   const self = assistantName.trim().toLowerCase();
   for (const m of messages) {
+    if (isSessionEcho(m)) continue;
     if (m.kind !== 'chat' && m.kind !== 'chat-sdk') continue;
     if (m.trigger !== 1) continue;
     let parsed: {
@@ -388,6 +405,7 @@ function formatChatMessages(messages: MessageInRow[]): string {
 }
 
 function formatSingleChat(msg: MessageInRow): string {
+  if (isSessionEcho(msg)) return formatEchoMessage(msg);
   const content = parseContent(msg.content);
   const sender =
     content.senderName || content.author?.fullName || content.author?.userName || content.sender || 'Unknown';
@@ -397,11 +415,37 @@ function formatSingleChat(msg: MessageInRow): string {
   const replyId = replyMessageId(content.replyTo);
   const replyAttr = replyId ? ` reply_to="${escapeXml(replyId)}"` : '';
   const replyPrefix = formatReplyContext(content.replyTo);
+  const linksSuffix = formatLinks(content.links, text);
   const attachmentsSuffix = formatAttachments(content.attachments);
+  const appContextSuffix = formatAppContext(content.app_context);
 
   const fromAttr = originAttr(msg);
 
-  return `<message${idAttr}${fromAttr} sender="${escapeXml(sender)}" time="${escapeXml(time)}"${replyAttr}>${replyPrefix}${escapeXml(text)}${attachmentsSuffix}</message>`;
+  return `<message${idAttr}${fromAttr} sender="${escapeXml(sender)}" time="${escapeXml(time)}"${replyAttr}>${replyPrefix}${escapeXml(text)}${linksSuffix}${attachmentsSuffix}${appContextSuffix}</message>`;
+}
+
+/**
+ * Render a cross-session context copy. No id/reply_to attributes — echo rows
+ * are ambient context, not addressable messages. `from` is the human label of
+ * the source conversation (e.g. "#Pixel room", "DM with Gavriel") written by
+ * the host at fan-out time; content.text is already truncated host-side.
+ */
+function formatEchoMessage(msg: MessageInRow): string {
+  const content = parseContent(msg.content);
+  const label = content.echo?.label || 'another conversation';
+  const sender = content.sender || 'Unknown';
+  const time = formatLocalStamp(new Date(msg.timestamp), TIMEZONE);
+  // Timeline rows are the conversation's own preceding history — FIRST-CLASS
+  // context this thread continues from (the agent's own posts render as
+  // sender="you"), unlike cross-session-context ambient echoes from other
+  // live surfaces which must never be acted on in-place. dm-timeline = a DM's
+  // timeline; channel-timeline = a group conversation's (per-thread groups).
+  if (content.echo?.surface === 'dm-timeline' || content.echo?.surface === 'channel-timeline') {
+    const who = (content as { self?: boolean }).self ? 'you' : sender;
+    const tag = content.echo.surface === 'channel-timeline' ? 'channel-history' : 'dm-history';
+    return `<${tag} sender="${escapeXml(who)}" time="${escapeXml(time)}">${escapeXml(content.text || '')}</${tag}>`;
+  }
+  return `<cross-session-context from="${escapeXml(label)}" sender="${escapeXml(sender)}" time="${escapeXml(time)}">${escapeXml(content.text || '')}</cross-session-context>`;
 }
 
 /**
@@ -557,6 +601,37 @@ function formatReplyContext(replyTo: any): string {
   const parentBlock = `  <quoted_message from="${escapeXml(sender)}"${parentMessageIdAttr}${mineAttr}${ancestorBlocks.length > 0 ? ' depth="1"' : ''}>${escapeXml(text)}</quoted_message>`;
 
   return `\n${[...ancestorBlocks, parentBlock].join('\n')}\n`;
+}
+
+/**
+ * Render agent-mode app context — the entities the user was viewing when
+ * they sent this message (content.app_context = { entities: [{ type, id },
+ * …] }, attached by the chat-sdk bridge). One compact line inside the
+ * message block; malformed/empty context renders nothing.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function formatAppContext(appContext: any): string {
+  if (!appContext || !Array.isArray(appContext.entities)) return '';
+  const items = appContext.entities
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    .filter((e: any) => typeof e?.type === 'string' && e.type && typeof e?.id === 'string' && e.id)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    .map((e: any) => `${e.type} ${e.id}`);
+  if (items.length === 0) return '';
+  return `\n(viewing: ${escapeXml(items.join(', '))})`;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function formatLinks(links: any[] | undefined, text: string): string {
+  if (!Array.isArray(links) || links.length === 0) return '';
+  const urls = [
+    ...new Set(
+      links.flatMap((link) =>
+        typeof link?.url === 'string' && link.url && !text.includes(link.url) ? [link.url] : [],
+      ),
+    ),
+  ];
+  return urls.length === 0 ? '' : `\n${urls.map((url) => `[link: ${escapeXml(url)}]`).join('\n')}`;
 }
 
 /**

@@ -1,10 +1,10 @@
 /**
- * Outbound message operations (container side).
- *
- * Writes to outbound.db (container-owned).
- * The host polls this DB (read-only) for undelivered messages.
+ * Legacy runner-facing outbound API, backed by the registered mailbox.
  */
-import { getInboundDb, getOutboundDb } from './connection.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
+
+import { getAgentMailbox } from '../mailbox/index.js';
+import type { OutboundMessage } from '../mailbox/types.js';
 
 export interface MessageOutRow {
   id: string;
@@ -33,264 +33,138 @@ export interface WriteMessageOut {
 }
 
 /**
- * Write a new outbound message, auto-assigning an odd seq number.
- * Container uses odd seq (1, 3, 5...), host uses even (2, 4, 6...).
+ * Extra entries merged into system-action payloads for the duration of a
+ * call, without the writing handler knowing about them. This is the seam
+ * `extendTool` (../mcp-tools/server.ts) uses so an installed module can
+ * add params to a base tool and have them land in the tool's outbound
+ * payload while the base tool's source stays untouched.
  *
- * The disjoint namespace is load-bearing, not just collision avoidance:
- * seq is the agent-facing message ID returned by send_message and accepted
- * by edit_message / add_reaction, and getMessageIdBySeq() below looks up
- * by seq across BOTH tables. If inbound and outbound could share a seq,
- * the agent's "edit message #5" could resolve to the wrong row.
+ * Scope is deliberately narrow: only `kind: 'system'` messages whose
+ * content parses to a JSON object are decorated, and entries never
+ * overwrite keys the handler wrote itself. Everything else passes through
+ * byte-identical. With no active context (the default), this is a no-op.
  */
-export function writeMessageOut(msg: WriteMessageOut): number {
-  const outbound = getOutboundDb();
-  const inbound = getInboundDb();
+const outboundPassthrough = new AsyncLocalStorage<Record<string, unknown>>();
 
-  // Read max seq from both DBs to maintain global ordering.
-  // Safe: each side only reads the other DB, never writes to it.
-  const maxOut = (outbound.prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM messages_out').get() as { m: number }).m;
-  const maxIn = (inbound.prepare('SELECT COALESCE(MAX(seq), 0) AS m FROM messages_in').get() as { m: number }).m;
-  const max = Math.max(maxOut, maxIn);
-  const nextSeq = max % 2 === 0 ? max + 1 : max + 2; // next odd
-
-  // bun:sqlite requires named parameters to be passed with the prefix character
-  // in the JS object keys (better-sqlite3 auto-stripped it, bun:sqlite does not).
-  outbound
-    .prepare(
-      `INSERT INTO messages_out (id, seq, in_reply_to, timestamp, deliver_after, recurrence, kind, platform_id, channel_type, thread_id, content)
-     VALUES ($id, $seq, $in_reply_to, $timestamp, $deliver_after, $recurrence, $kind, $platform_id, $channel_type, $thread_id, $content)`,
-    )
-    .run({
-      $id: msg.id,
-      $seq: nextSeq,
-      $timestamp: new Date().toISOString(),
-      $in_reply_to: msg.in_reply_to ?? null,
-      $deliver_after: msg.deliver_after ?? null,
-      $recurrence: msg.recurrence ?? null,
-      $kind: msg.kind,
-      $platform_id: msg.platform_id ?? null,
-      $channel_type: msg.channel_type ?? null,
-      $thread_id: msg.thread_id ?? null,
-      $content: msg.content,
-    });
-
-  return nextSeq;
+/** Run `fn` with `entries` merged into system-action payloads it writes. */
+export function withOutboundPassthrough<T>(entries: Record<string, unknown>, fn: () => T): T {
+  return outboundPassthrough.run(entries, fn);
 }
 
-/**
- * Look up a message's platform ID by seq number.
- * Searches both inbound and outbound DBs since seq spans both.
- *
- * For inbound messages, the Chat SDK message ID is already the platform message ID
- * (e.g., "6037840640:42" for Telegram).
- *
- * For outbound messages, the internal ID (msg-xxx) won't work for edits/reactions.
- * Instead, look up the platform_message_id from the delivered table (host writes this
- * after successful delivery).
- */
+/** Apply any active passthrough entries to a system-action JSON payload. */
+function decorateContent(msg: WriteMessageOut): string {
+  const entries = outboundPassthrough.getStore();
+  if (!entries || msg.kind !== 'system') return msg.content;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(msg.content);
+  } catch {
+    return msg.content;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return msg.content;
+
+  const payload = parsed as Record<string, unknown>;
+  let changed = false;
+  for (const [key, value] of Object.entries(entries)) {
+    if (!Object.prototype.hasOwnProperty.call(payload, key)) {
+      payload[key] = value;
+      changed = true;
+    }
+  }
+  return changed ? JSON.stringify(payload) : msg.content;
+}
+
+function messageRow(message: OutboundMessage): MessageOutRow {
+  return {
+    id: message.id,
+    seq: message.sequence,
+    in_reply_to: message.inReplyTo,
+    timestamp: message.timestamp,
+    deliver_after: message.deliverAfter,
+    recurrence: message.recurrence,
+    kind: message.kind,
+    platform_id: message.platformId,
+    channel_type: message.channelType,
+    thread_id: message.threadId,
+    content: message.content,
+  };
+}
+
+export function writeMessageOut(msg: WriteMessageOut): Promise<number> {
+  return getAgentMailbox().operations.writeMessageOut({
+    id: msg.id,
+    inReplyTo: msg.in_reply_to,
+    deliverAfter: msg.deliver_after,
+    recurrence: msg.recurrence,
+    kind: msg.kind,
+    platformId: msg.platform_id,
+    channelType: msg.channel_type,
+    threadId: msg.thread_id,
+    content: decorateContent(msg),
+  });
+}
+
 export function getMessageIdBySeq(seq: number): string | null {
-  const inbound = getInboundDb();
-
-  // Inbound messages: ID is already the platform message ID
-  const inRow = inbound.prepare('SELECT id FROM messages_in WHERE seq = ?').get(seq) as { id: string } | undefined;
-  if (inRow) return inRow.id;
-
-  // Outbound messages: look up platform message ID from delivered table
-  const outRow = getOutboundDb().prepare('SELECT id FROM messages_out WHERE seq = ?').get(seq) as
-    | { id: string }
-    | undefined;
-  if (!outRow) return null;
-
-  // Check if host has stored the platform message ID after delivery
-  const deliveredRow = inbound
-    .prepare('SELECT platform_message_id FROM delivered WHERE message_out_id = ?')
-    .get(outRow.id) as { platform_message_id: string | null } | undefined;
-  if (deliveredRow?.platform_message_id) return deliveredRow.platform_message_id;
-
-  // Fallback to internal ID (edits/reactions on undelivered messages won't work)
-  return outRow.id;
+  return getAgentMailbox().operations.getMessageIdBySeq(seq);
 }
 
 /**
- * Resolve a seq to a platform message id suitable for `in_reply_to`.
- *
- * Unlike getMessageIdBySeq(), this never falls back to the container's
- * internal outbound id. A reply pill must target a real platform message;
- * using an internal `msg-*` id makes adapters post a broken/no-op reply.
+ * Resolve a sequence to a real platform message id suitable for a reply pill.
+ * Accumulated inbound rows and undelivered/failed outbound rows are rejected.
  */
 export function getReplyTargetMessageIdBySeq(seq: number): string | null {
-  const inbound = getInboundDb();
-
-  const inRow = inbound.prepare('SELECT id, trigger FROM messages_in WHERE seq = ?').get(seq) as
-    | { id: string; trigger: number }
-    | undefined;
-  if (inRow && inRow.trigger !== 1) return null;
-  if (inRow) return inRow.id;
-
-  const outRow = getOutboundDb().prepare('SELECT id FROM messages_out WHERE seq = ?').get(seq) as
-    | { id: string }
-    | undefined;
-  if (!outRow) return null;
-
-  const deliveredRow = inbound
-    .prepare("SELECT platform_message_id FROM delivered WHERE message_out_id = ? AND status = 'delivered'")
-    .get(outRow.id) as { platform_message_id: string | null } | undefined;
-  return deliveredRow?.platform_message_id ?? null;
+  return getAgentMailbox().operations.getReplyTargetMessageIdBySeq(seq);
 }
 
-/**
- * Look up the routing fields for a message by seq (for edit/reaction targeting).
- * Returns the channel_type, platform_id, thread_id of the referenced message.
- */
 export function getRoutingBySeq(
   seq: number,
 ): { channel_type: string | null; platform_id: string | null; thread_id: string | null } | null {
-  const inbound = getInboundDb();
-  const inRow = inbound
-    .prepare('SELECT channel_type, platform_id, thread_id FROM messages_in WHERE seq = ?')
-    .get(seq) as { channel_type: string | null; platform_id: string | null; thread_id: string | null } | undefined;
-  if (inRow) return inRow;
-
-  const outRow = getOutboundDb()
-    .prepare('SELECT channel_type, platform_id, thread_id FROM messages_out WHERE seq = ?')
-    .get(seq) as { channel_type: string | null; platform_id: string | null; thread_id: string | null } | undefined;
-  return outRow ?? null;
-}
-
-/** Get undelivered messages (for host polling — reads from outbound.db). */
-export function getUndeliveredMessages(): MessageOutRow[] {
-  return getOutboundDb()
-    .prepare(
-      `SELECT * FROM messages_out
-       WHERE (deliver_after IS NULL OR datetime(deliver_after) <= datetime('now'))
-       ORDER BY timestamp ASC`,
-    )
-    .all() as MessageOutRow[];
-}
-
-/**
- * Count `kind='chat'` outbound rows written at or after `sinceIso`.
- *
- * Used by the poll-loop's addressed-turn safety net: a turn whose only
- * deliverable was sent via an MCP tool (`send_file`, `send_message`) —
- * not a `<message>` block in the result text — produces zero parsed
- * `<message>` blocks, so the safety net would otherwise mis-fire the
- * scary "addressed turn produced no output" degraded fallback even
- * though the agent DID reply. A non-zero count here means the turn
- * already delivered something; suppress the fallback.
- *
- * `sinceIso` must be SQLite-comparable against `timestamp`, which is
- * written as an ISO-8601 UTC instant. Callers pass a turn-start stamp from
- * `outboundDbNow()` so the formats match.
- */
-export function countChatMessagesSince(sinceIso: string): number {
-  const row = getOutboundDb()
-    .prepare(
-      `SELECT COUNT(*) AS n FROM messages_out
-       WHERE kind = 'chat' AND timestamp >= ?`,
-    )
-    .get(sinceIso) as { n: number };
-  return row.n;
-}
-
-function normalizeMessageText(text: string): string {
-  return text.replace(/\s+/g, ' ').trim();
-}
-
-/**
- * True when this turn already wrote the same chat text through an MCP tool.
- *
- * Some models call `send_message` and then return the same answer as final
- * output. The tool row is already in outbound.db before the runner parses the
- * final text; without this guard the same message is delivered twice.
- *
- * This intentionally uses `timestamp > sinceIso` rather than `>=`: SQLite
- * timestamps are second-granularity, and a fast follow-up turn can start in the
- * same second as the previous turn's final outbound row. Treating equality as
- * in-scope would suppress a legitimate repeated answer in the next turn.
- */
-export function hasChatMessageTextSince(sinceIso: string, text: string): boolean {
-  const normalized = normalizeMessageText(text);
-  if (!normalized) return false;
-
-  const rows = getOutboundDb()
-    .prepare(
-      `SELECT content FROM messages_out
-       WHERE kind = 'chat' AND timestamp > ?`,
-    )
-    .all(sinceIso) as Array<{ content: string }>;
-
-  for (const row of rows) {
-    try {
-      const content = JSON.parse(row.content) as { text?: unknown };
-      if (typeof content.text === 'string' && normalizeMessageText(content.text) === normalized) {
-        return true;
-      }
-    } catch {
-      continue;
+  const routing = getAgentMailbox().operations.getRoutingBySeq(seq);
+  return (
+    routing && {
+      channel_type: routing.channelType,
+      platform_id: routing.platformId,
+      thread_id: routing.threadId,
     }
-  }
-  return false;
+  );
 }
 
-/**
- * True when this turn already delivered a chat message to the given
- * destination (channel_type + platform_id + thread_id), regardless of text.
- *
- * Unlike `hasChatMessageTextSince`, this matches on destination alone. It
- * exists for task turns, where the contract is "exactly one message": the
- * agent is expected to deliver its content mid-turn via `send_message` /
- * `send_file`, then end silently. Models nonetheless often append a final
- * `<message to="X">…</message>` summary/ack ("Recap sent (#29021).") to the
- * SAME destination — different text, so the exact-text dedup misses it, and
- * the channel gets a second, unwanted message (AI Friends daily recap,
- * 2026-06-10). On a task turn we suppress any final block to a destination
- * that already received a tool-sent chat row this turn.
- *
- * Uses `timestamp > sinceIso` (not `>=`) for the same second-granularity
- * reason as `hasChatMessageTextSince`.
- */
+export function getUndeliveredMessages(): MessageOutRow[] {
+  return getAgentMailbox().operations.getUndeliveredMessages().map(messageRow);
+}
+
+/** Count chat rows written after the mailbox-consistent turn cursor. */
+export function countChatMessagesSince(cursor: string): number {
+  return getAgentMailbox().operations.countChatMessagesSince(cursor);
+}
+
+/** True when this turn already wrote the same normalized chat text. */
+export function hasChatMessageTextSince(cursor: string, text: string): boolean {
+  return getAgentMailbox().operations.hasChatMessageTextSince(cursor, text);
+}
+
+/** True when this task turn already sent chat to the destination. */
 export function hasChatMessageToDestinationSince(
-  sinceIso: string,
+  cursor: string,
   dest: { channel_type: string; platform_id: string },
 ): boolean {
-  const row = getOutboundDb()
-    .prepare(
-      `SELECT 1 FROM messages_out
-       WHERE kind = 'chat' AND timestamp > ?
-         AND channel_type = ? AND platform_id = ?
-       LIMIT 1`,
-    )
-    .get(sinceIso, dest.channel_type, dest.platform_id);
-  // bun:sqlite returns null (not undefined) when no row matches.
-  return row != null;
+  return getAgentMailbox().operations.hasChatMessageToDestinationSince(cursor, {
+    channelType: dest.channel_type,
+    platformId: dest.platform_id,
+  });
 }
 
 /**
- * Current SQLite UTC timestamp in the same ISO-8601 shape written by
- * `writeMessageOut`, so lexical timestamp comparisons are exact. Capture
- * this at turn start.
+ * Capture an opaque, DB-consistent outbound cursor at a turn boundary.
+ * The legacy name remains so existing poll-loop callers do not bypass the
+ * mailbox seam.
  */
 export function outboundDbNow(): string {
-  const row = getOutboundDb().prepare("SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now') AS ts").get() as { ts: string };
-  return row.ts;
+  return getAgentMailbox().operations.getOutboundCursor();
 }
 
-/**
- * True if a deliberate send with this exact destination + text already exists
- * (an MCP send_message row from the current turn). Used by the task-fire
- * final-text dispatcher to drop the turn-final <message> echo of a send the
- * agent already made — the dedup happens where the duplication originates.
- */
+/** True when an exact deliberate task send already exists. */
 export function hasIdenticalSend(platformId: string, channelType: string, text: string): boolean {
-  const row = getOutboundDb()
-    .prepare(
-      `SELECT 1 FROM messages_out
-        WHERE platform_id = $platform_id AND channel_type = $channel_type
-          AND (in_reply_to IS NULL OR in_reply_to = '')
-          AND json_extract(content, '$.text') = $text
-        LIMIT 1`,
-    )
-    .get({ $platform_id: platformId, $channel_type: channelType, $text: text });
-  return row != null;
+  return getAgentMailbox().operations.hasIdenticalSend(platformId, channelType, text);
 }

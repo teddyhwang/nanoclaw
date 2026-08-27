@@ -138,11 +138,11 @@ export function prepareScheduledTask(input: {
 }
 
 /** Persist a prepared task through the Optimus host-only schedule.db. */
-export function createScheduledTask(
+export async function createScheduledTask(
   agentGroupId: string,
   task: PreparedScheduledTask,
   options?: { status?: 'pending' | 'paused'; originSessionId?: string | null },
-): { session: { id: string; agent_group_id: string }; row: ScheduledTaskRow } {
+): Promise<{ session: { id: string; agent_group_id: string }; row: ScheduledTaskRow }> {
   const id = makeTaskId(task.name);
   const content = JSON.stringify({
     prompt: task.prompt,

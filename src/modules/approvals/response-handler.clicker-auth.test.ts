@@ -48,9 +48,9 @@ const BYSTANDER = 'discord:bystander-9';
 
 let handlerCalls: number;
 
-beforeEach(() => {
-  const db = initTestDb();
-  runMigrations(db);
+beforeEach(async () => {
+  const db = await initTestDb();
+  await runMigrations(db);
   handlerCalls = 0;
   wakeContainer.mockClear();
   writeSessionMessage.mockClear();
@@ -59,14 +59,14 @@ beforeEach(() => {
     handlerCalls += 1;
   });
 
-  createAgentGroup({
+  await createAgentGroup({
     id: AG,
     name: 'Test',
     folder: 'test',
     agent_provider: null,
     created_at: now(),
   });
-  createSession({
+  await createSession({
     id: SESSION,
     agent_group_id: AG,
     messaging_group_id: null,
@@ -78,9 +78,9 @@ beforeEach(() => {
     created_at: now(),
   });
   // OWNER is an eligible approver (owner role, global). BYSTANDER has no role.
-  createUser({ id: OWNER, kind: 'discord', display_name: 'Owner', created_at: now() });
-  createUser({ id: BYSTANDER, kind: 'discord', display_name: 'Bystander', created_at: now() });
-  grantRole({
+  await createUser({ id: OWNER, kind: 'discord', display_name: 'Owner', created_at: now() });
+  await createUser({ id: BYSTANDER, kind: 'discord', display_name: 'Bystander', created_at: now() });
+  await grantRole({
     user_id: OWNER,
     role: 'owner',
     agent_group_id: null,
@@ -88,7 +88,7 @@ beforeEach(() => {
     granted_at: now(),
   });
 
-  createPendingApproval({
+  await createPendingApproval({
     approval_id: APPROVAL,
     session_id: SESSION,
     request_id: APPROVAL,
@@ -102,8 +102,8 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => {
-  closeDb();
+afterEach(async () => {
+  await closeDb();
 });
 
 function click(value: string, userId: string | null): ResponsePayload {
@@ -126,7 +126,7 @@ describe('handleApprovalsResponse clicker authorization', () => {
     // row must survive for a real approver.
     expect(claimed).toBe(true);
     expect(handlerCalls).toBe(0);
-    expect(getPendingApproval(APPROVAL)).toBeDefined();
+    expect(await getPendingApproval(APPROVAL)).toBeDefined();
     expect(wakeContainer).not.toHaveBeenCalled();
   });
 
@@ -137,7 +137,7 @@ describe('handleApprovalsResponse clicker authorization', () => {
     expect(handlerCalls).toBe(0);
     // Critical: an unauthorized Reject must not delete the row, or a
     // bystander could deny any legitimate pending request.
-    expect(getPendingApproval(APPROVAL)).toBeDefined();
+    expect(await getPendingApproval(APPROVAL)).toBeDefined();
   });
 
   it('ignores a click with no resolvable user id and leaves the row pending', async () => {
@@ -145,7 +145,7 @@ describe('handleApprovalsResponse clicker authorization', () => {
 
     expect(claimed).toBe(true);
     expect(handlerCalls).toBe(0);
-    expect(getPendingApproval(APPROVAL)).toBeDefined();
+    expect(await getPendingApproval(APPROVAL)).toBeDefined();
   });
 
   it('acts on an approve click from an eligible approver and consumes the row', async () => {
@@ -153,7 +153,7 @@ describe('handleApprovalsResponse clicker authorization', () => {
 
     expect(claimed).toBe(true);
     expect(handlerCalls).toBe(1);
-    expect(getPendingApproval(APPROVAL)).toBeUndefined();
+    expect(await getPendingApproval(APPROVAL)).toBeUndefined();
   });
 
   it('acts on a reject click from an eligible approver and consumes the row', async () => {
@@ -163,7 +163,7 @@ describe('handleApprovalsResponse clicker authorization', () => {
     // Reject does not invoke the registered handler, but it does consume
     // the row (the request was authoritatively denied by an approver).
     expect(handlerCalls).toBe(0);
-    expect(getPendingApproval(APPROVAL)).toBeUndefined();
+    expect(await getPendingApproval(APPROVAL)).toBeUndefined();
   });
 });
 
@@ -181,15 +181,15 @@ describe('handleApprovalsResponse — sensitive_golf_confirm actor-keyed auth', 
   const ACTOR = 'discord:actor-7';
   let golfHandlerCalls: number;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     golfHandlerCalls = 0;
     registerApprovalHandler(GOLF_ACTION, async () => {
       golfHandlerCalls += 1;
     });
     // ACTOR is NOT an approver (no role) — proving auth keys off actorId,
     // not pickApprover, for this action.
-    createUser({ id: ACTOR, kind: 'discord', display_name: 'Actor', created_at: now() });
-    createPendingApproval({
+    await createUser({ id: ACTOR, kind: 'discord', display_name: 'Actor', created_at: now() });
+    await createPendingApproval({
       approval_id: GOLF_APPROVAL,
       session_id: SESSION,
       request_id: GOLF_APPROVAL,
@@ -218,7 +218,7 @@ describe('handleApprovalsResponse — sensitive_golf_confirm actor-keyed auth', 
     const claimed = await handleApprovalsResponse(golfClick('confirm', BYSTANDER));
     expect(claimed).toBe(true);
     expect(golfHandlerCalls).toBe(0);
-    expect(getPendingApproval(GOLF_APPROVAL)).toBeDefined();
+    expect(await getPendingApproval(GOLF_APPROVAL)).toBeDefined();
     expect(wakeContainer).not.toHaveBeenCalled();
   });
 
@@ -228,20 +228,20 @@ describe('handleApprovalsResponse — sensitive_golf_confirm actor-keyed auth', 
     const claimed = await handleApprovalsResponse(golfClick('confirm', OWNER));
     expect(claimed).toBe(true);
     expect(golfHandlerCalls).toBe(0);
-    expect(getPendingApproval(GOLF_APPROVAL)).toBeDefined();
+    expect(await getPendingApproval(GOLF_APPROVAL)).toBeDefined();
   });
 
   it('fires the handler on the actor Confirm and consumes the row', async () => {
     const claimed = await handleApprovalsResponse(golfClick('confirm', ACTOR));
     expect(claimed).toBe(true);
     expect(golfHandlerCalls).toBe(1);
-    expect(getPendingApproval(GOLF_APPROVAL)).toBeUndefined();
+    expect(await getPendingApproval(GOLF_APPROVAL)).toBeUndefined();
   });
 
   it('treats Cancel as the negative path: no handler, row consumed', async () => {
     const claimed = await handleApprovalsResponse(golfClick('cancel', ACTOR));
     expect(claimed).toBe(true);
     expect(golfHandlerCalls).toBe(0);
-    expect(getPendingApproval(GOLF_APPROVAL)).toBeUndefined();
+    expect(await getPendingApproval(GOLF_APPROVAL)).toBeUndefined();
   });
 });

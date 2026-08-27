@@ -13,12 +13,11 @@ import path from 'path';
 import { getEnginePaths } from './paths.js';
 import { engineEvents, emitEngineEvent } from './events.js';
 import { enforceStartupBackoff, resetCircuitBreaker } from '../circuit-breaker.js';
-import { migrateGroupsToClaudeLocal } from '../claude-md-compose.js';
 import { initDb } from '../db/connection.js';
 import { backfillContainerConfigs } from '../backfill-container-configs.js';
 import { runMigrations } from '../db/migrations/index.js';
-import { applyPluginMigrations } from './db-extensions.js';
-import { ensureContainerRuntimeRunning, cleanupOrphans } from '../container-runtime.js';
+import { adoptRunningSessions } from '../container-runner.js';
+import { getSessionDriver } from '../drivers/index.js';
 import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, stopDeliveryPolls } from '../delivery.js';
 import { startHostSweep, stopHostSweep } from '../host-sweep.js';
 import { routeInbound } from '../router.js';
@@ -42,6 +41,8 @@ async function dispatchResponse(payload: ResponsePayload): Promise<void> {
     try {
       const claimed = await handler(payload);
       if (claimed) return;
+      // Per-handler isolation: one plugin must not block later responders.
+      // eslint-disable-next-line no-catch-all/no-catch-all
     } catch (err) {
       log.error('Response handler threw', { questionId: payload.questionId, err });
     }
@@ -64,23 +65,20 @@ export async function _bootForHost(opts: { managedSignals: boolean }): Promise<v
 
   // 1. Init central DB (path resolved through engine-paths so overrides apply)
   const dbPath = path.join(getEnginePaths().dataDir, 'v2.db');
-  const db = initDb(dbPath);
-  runMigrations(db);
-  applyPluginMigrations(db);
+  const db = await initDb(dbPath, { role: 'host' });
+  await runMigrations(db);
   log.info('Central DB ready', { path: dbPath });
 
-  // 1b. One-time filesystem cutover — idempotent.
-  migrateGroupsToClaudeLocal();
-
-  // 1c. One-time backfill — seed container_configs rows from any pre-DB
+  // 1b. One-time backfill — seed container_configs rows from any pre-DB
   //     `groups/<folder>/container.json` files. Idempotent: rows that
   //     already exist are skipped. Runs here so embedded hosts (e.g.
   //     Optimus) get the same behaviour as the standalone src/index.ts.
-  backfillContainerConfigs();
+  await backfillContainerConfigs();
 
-  // 2. Container runtime
-  ensureContainerRuntimeRunning();
-  cleanupOrphans();
+  // 2. Selected session driver: fail startup if unavailable, then adopt
+  // install-owned live sessions and reap only terminal residue.
+  await getSessionDriver().ensureReady?.();
+  await adoptRunningSessions();
 
   // 3. Channel adapters
   await initChannelAdapters((adapter: ChannelAdapter): ChannelSetup => {
@@ -219,6 +217,8 @@ export async function _bootForHost(opts: { managedSignals: boolean }): Promise<v
   try {
     const { migrateLegacySeries } = await import('../modules/scheduling/migrate-legacy-series.js');
     migrateLegacySeries();
+    // Boot must continue if one-time compatibility migration fails.
+    // eslint-disable-next-line no-catch-all/no-catch-all
   } catch (err) {
     log.error('Legacy-series migration threw — continuing boot', { err });
   }

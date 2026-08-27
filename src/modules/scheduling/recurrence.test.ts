@@ -1,35 +1,21 @@
-/**
- * Tests for `handleRecurrence` — the fire-time materializer.
- *
- * Post-S405-fix model: the series lives in the host-only agent-group
- * schedule.db. handleRecurrence reads due series from schedule.db, writes
- * ONE pending occurrence into the session inbound.db, and advances the
- * series in schedule.db (next cron occurrence, or cancel a one-shot).
- *
- * Invariants under test:
- *  - a due recurring series materializes exactly one inbound.db occurrence
- *    and the series advances to a FUTURE process_after (still pending);
- *  - cron is interpreted in TIMEZONE, not UTC (ported from v1) — the
- *    advanced process_after is a real future instant;
- *  - a one-shot fires once then the series is cancelled (never fires
- *    twice);
- *  - a not-yet-due series materializes nothing;
- *  - idempotency: a second tick while the prior occurrence is still
- *    unconsumed does NOT stack a duplicate inbound.db row (but the
- *    schedule still advances so the cron clock doesn't drift).
- *
- * schedule.db is opened via the base-dir-explicit seam (openScheduleDbAt
- * + the injectable opener arg on handleRecurrence) so the test is
- * hermetic and not bound to config.ts's import-time DATA_DIR snapshot.
- */
+/** S405 schedule.db fire-time materialization tests. */
 import fs from 'fs';
 import path from 'path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { ensureSchema, openInboundDb } from '../../db/session-db.js';
-import { handleRecurrence } from './recurrence.js';
-import { openScheduleDbAt, upsertSeries } from './schedule-store.js';
+const timezone = vi.hoisted(() => ({ value: 'UTC' }));
+vi.mock('../../container-config.js', () => ({
+  resolveGroupTimezone: vi.fn(async () => timezone.value),
+}));
+vi.mock('../../log.js', () => ({
+  log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },
+}));
+
+import { wrapSqliteInbound } from '../../mailbox/sqlite/index.js';
+import { ensureSchema, openInboundDb } from '../../mailbox/sqlite/session-db.js';
 import type { Session } from '../../types.js';
+import { handleRecurrence } from './recurrence.js';
+import { listLiveSeries, openScheduleDbAt, updateSeries, upsertSeries } from './schedule-store.js';
 
 const TEST_ROOT = '/tmp/nanoclaw-recurrence-test';
 const AG = 'ag-test';
@@ -38,21 +24,18 @@ const BASE = path.join(TEST_ROOT, 'data', 'v2-sessions');
 const SESS_DIR = path.join(BASE, AG, SESS);
 const IN_DB = path.join(SESS_DIR, 'inbound.db');
 
-// Base-dir-explicit opener injected into handleRecurrence so it reads the
-// same tmp schedule.db the test seeds.
-const openSched = (ag: string) => openScheduleDbAt(BASE, ag);
-
 beforeEach(() => {
-  if (fs.existsSync(TEST_ROOT)) fs.rmSync(TEST_ROOT, { recursive: true });
+  timezone.value = 'UTC';
+  fs.rmSync(TEST_ROOT, { recursive: true, force: true });
   fs.mkdirSync(SESS_DIR, { recursive: true });
   ensureSchema(IN_DB, 'inbound');
 });
 
 afterEach(() => {
-  if (fs.existsSync(TEST_ROOT)) fs.rmSync(TEST_ROOT, { recursive: true });
+  fs.rmSync(TEST_ROOT, { recursive: true, force: true });
 });
 
-function fakeSession(): Session {
+function session(): Session {
   return {
     id: SESS,
     agent_group_id: AG,
@@ -65,139 +48,187 @@ function fakeSession(): Session {
   } as Session;
 }
 
-function seedSeries(seriesId: string, recurrence: string | null, processAfter: string | null) {
-  const sched = openScheduleDbAt(BASE, AG);
+function seedSeries(
+  seriesId: string,
+  recurrence: string | null,
+  processAfter: string | null,
+  content = JSON.stringify({ prompt: 'do it', script: null, createdByUserId: null }),
+): void {
+  const db = openSchedule();
   try {
-    upsertSeries(sched, {
+    upsertSeries(db, {
       seriesId,
       agentGroupId: AG,
       recurrence,
       processAfter,
-      content: JSON.stringify({ prompt: 'do it', script: null, createdByUserId: null }),
+      content,
       platformId: null,
       channelType: null,
       threadId: null,
     });
   } finally {
-    sched.close();
+    db.close();
   }
 }
 
-function inboundTaskRows() {
+function openSchedule(agentGroupId: string = AG) {
+  return openScheduleDbAt(BASE, agentGroupId);
+}
+
+async function sweep(): Promise<void> {
   const db = openInboundDb(IN_DB);
   try {
-    return db
-      .prepare(
-        `SELECT id, status, process_after, recurrence, series_id, kind, trigger
-           FROM messages_in WHERE kind='task' ORDER BY seq`,
-      )
-      .all() as Array<{
-      id: string;
-      status: string;
-      process_after: string | null;
-      recurrence: string | null;
-      series_id: string;
-      kind: string;
-      trigger: number;
-    }>;
+    await handleRecurrence(wrapSqliteInbound(db), session(), openSchedule);
   } finally {
     db.close();
   }
 }
 
-function seriesRow(seriesId: string) {
-  const sched = openScheduleDbAt(BASE, AG);
+function inboundTaskRows(): Array<{
+  id: string;
+  status: string;
+  process_after: string | null;
+  recurrence: string | null;
+  series_id: string;
+  kind: string;
+  trigger: number;
+  content: string;
+}> {
+  const db = openInboundDb(IN_DB);
   try {
-    return sched
-      .prepare(`SELECT status, process_after, last_fired_at FROM task_series WHERE series_id=?`)
-      .get(seriesId) as { status: string; process_after: string | null; last_fired_at: string | null };
+    return db
+      .prepare(
+        `SELECT id, status, process_after, recurrence, series_id, kind, trigger, content
+           FROM messages_in WHERE kind = 'task' ORDER BY seq`,
+      )
+      .all() as ReturnType<typeof inboundTaskRows>;
   } finally {
-    sched.close();
+    db.close();
   }
 }
 
-describe('handleRecurrence — fire-time materialization', () => {
-  it('materializes one due occurrence and advances the recurring series into the future', async () => {
-    seedSeries('task-1', '0 9 * * *', '2020-01-01T00:00:00.000Z'); // long overdue
-    const inDb = openInboundDb(IN_DB);
-    try {
-      await handleRecurrence(inDb, fakeSession(), openSched);
-    } finally {
-      inDb.close();
-    }
+function seriesRow(seriesId: string): {
+  status: string;
+  process_after: string | null;
+  last_fired_at: string | null;
+  content: string;
+} {
+  const db = openSchedule();
+  try {
+    return db
+      .prepare('SELECT status, process_after, last_fired_at, content FROM task_series WHERE series_id = ?')
+      .get(seriesId) as ReturnType<typeof seriesRow>;
+  } finally {
+    db.close();
+  }
+}
+
+describe('handleRecurrence', () => {
+  it('materializes one due occurrence and advances the recurring schedule.db series', async () => {
+    seedSeries('task-1', '0 9 * * *', '2020-01-01T00:00:00.000Z');
+
+    await sweep();
 
     const rows = inboundTaskRows();
     expect(rows).toHaveLength(1);
-    expect(rows[0].series_id).toBe('task-1');
-    expect(rows[0].status).toBe('pending');
-    expect(rows[0].trigger).toBe(1);
-    // The occurrence is a fire-now row: recurrence + process_after live in
-    // schedule.db, not on the transient inbound row.
-    expect(rows[0].recurrence).toBeNull();
-    expect(rows[0].process_after).toBeNull();
-    expect(rows[0].id).not.toBe('task-1'); // fresh occurrence id, not the series id
+    expect(rows[0]).toMatchObject({
+      status: 'pending',
+      process_after: null,
+      recurrence: null,
+      series_id: 'task-1',
+      kind: 'task',
+      trigger: 1,
+    });
+    expect(rows[0].id).not.toBe('task-1');
 
     const series = seriesRow('task-1');
-    expect(series.status).toBe('pending'); // still live (recurring)
-    expect(new Date(series.process_after!).getTime()).toBeGreaterThan(Date.now()); // advanced
+    expect(series.status).toBe('pending');
+    expect(new Date(series.process_after!).getTime()).toBeGreaterThan(Date.now());
     expect(series.last_fired_at).toBeTruthy();
   });
 
-  it('fires a one-shot exactly once then cancels the series', async () => {
+  it('grounds the next cron fire in the async group timezone', async () => {
+    timezone.value = 'Asia/Tokyo';
+    seedSeries('task-tz', '0 9 * * *', '2020-01-01T00:00:00.000Z');
+
+    await sweep();
+
+    // Tokyo has no DST: 09:00 local is exactly 00:00 UTC.
+    expect(seriesRow('task-tz').process_after).toMatch(/T00:00:00\.000Z$/);
+  });
+
+  it('fires a one-shot once, cancels its series, and never fires it again', async () => {
     seedSeries('task-oneshot', null, '2020-01-01T00:00:00.000Z');
-    const inDb = openInboundDb(IN_DB);
-    try {
-      await handleRecurrence(inDb, fakeSession(), openSched);
-    } finally {
-      inDb.close();
-    }
+
+    await sweep();
+    await sweep();
 
     expect(inboundTaskRows()).toHaveLength(1);
-    const series = seriesRow('task-oneshot');
-    expect(series.status).toBe('cancelled');
-    expect(series.process_after).toBeNull();
+    expect(seriesRow('task-oneshot')).toMatchObject({ status: 'cancelled', process_after: null });
   });
 
-  it('materializes nothing for a not-yet-due series', async () => {
-    seedSeries('task-future', '0 9 * * *', new Date(Date.now() + 3600_000).toISOString());
-    const inDb = openInboundDb(IN_DB);
-    try {
-      await handleRecurrence(inDb, fakeSession(), openSched);
-    } finally {
-      inDb.close();
-    }
-    expect(inboundTaskRows()).toHaveLength(0);
-    expect(seriesRow('task-future').status).toBe('pending'); // untouched
+  it('does not materialize a future series', async () => {
+    seedSeries('task-future', '0 9 * * *', new Date(Date.now() + 3_600_000).toISOString());
+
+    await sweep();
+
+    expect(inboundTaskRows()).toEqual([]);
+    expect(seriesRow('task-future').status).toBe('pending');
   });
 
-  it('is idempotent: a second tick with the prior occurrence still live does not stack a duplicate', async () => {
+  it('does not stack a second occurrence while the prior fire is unconsumed', async () => {
     seedSeries('task-rec', '*/5 * * * *', '2020-01-01T00:00:00.000Z');
-
-    const run = async () => {
-      const inDb = openInboundDb(IN_DB);
-      try {
-        await handleRecurrence(inDb, fakeSession(), openSched);
-      } finally {
-        inDb.close();
-      }
-    };
-
-    await run();
-    expect(inboundTaskRows()).toHaveLength(1);
+    await sweep();
     const firstFiredAt = seriesRow('task-rec').last_fired_at;
 
-    // Force the series due again (simulate the next cron tick arriving)
-    // while the first occurrence is STILL pending (container hasn't
-    // consumed it). The materializer must not add a second inbound row,
-    // but must still process the series (advance + restamp last_fired_at)
-    // so the cron clock keeps tracking. (process_after can legitimately
-    // resolve to the same wall-clock slot for a fixed */5 cron — the
-    // advance is observable via last_fired_at, which always restamps.)
-    await new Promise((r) => setTimeout(r, 5));
+    await new Promise((resolve) => setTimeout(resolve, 5));
     seedSeries('task-rec', '*/5 * * * *', '2020-01-01T00:00:00.000Z');
-    await run();
+    await sweep();
 
-    expect(inboundTaskRows()).toHaveLength(1); // NO duplicate
-    expect(seriesRow('task-rec').last_fired_at).not.toBe(firstFiredAt); // re-processed
+    expect(inboundTaskRows()).toHaveLength(1);
+    expect(seriesRow('task-rec').last_fired_at).not.toBe(firstFiredAt);
+  });
+
+  it('keeps an already-materialized due run immutable when the live series is updated', async () => {
+    const oldContent = JSON.stringify({ prompt: 'old', script: 'echo old', createdByUserId: null });
+    seedSeries('task-update', '0 9 * * *', '2020-01-01T00:00:00.000Z', oldContent);
+    await sweep();
+
+    const db = openSchedule();
+    try {
+      expect(updateSeries(db, 'task-update', { prompt: 'new', script: 'echo new' })).toBe(1);
+    } finally {
+      db.close();
+    }
+
+    expect(JSON.parse(inboundTaskRows()[0].content)).toMatchObject({ prompt: 'old', script: 'echo old' });
+    expect(JSON.parse(seriesRow('task-update').content)).toMatchObject({ prompt: 'new', script: 'echo new' });
+  });
+});
+
+describe('S405 task-series projection', () => {
+  it('replaces the container-visible snapshot without exposing schedule.db', () => {
+    seedSeries('task-live', '0 9 * * *', '2999-01-01T00:00:00.000Z');
+    const schedule = openSchedule();
+    const inbound = openInboundDb(IN_DB);
+    try {
+      const mailbox = wrapSqliteInbound(inbound);
+      mailbox.replaceTaskSeriesSnapshot(
+        listLiveSeries(schedule).map((series) => ({
+          seriesId: series.series_id,
+          status: series.status === 'paused' ? 'paused' : 'pending',
+          recurrence: series.recurrence,
+          processAfter: series.process_after,
+          content: series.content,
+        })),
+      );
+      expect(inbound.prepare('SELECT series_id FROM task_series').all()).toEqual([{ series_id: 'task-live' }]);
+
+      mailbox.replaceTaskSeriesSnapshot([]);
+      expect(inbound.prepare('SELECT series_id FROM task_series').all()).toEqual([]);
+    } finally {
+      schedule.close();
+      inbound.close();
+    }
   });
 });

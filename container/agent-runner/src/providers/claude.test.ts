@@ -5,12 +5,10 @@ import {
   isRejectedClaudeRateLimitEvent,
   isRetryableClaudeApiRateLimitResult,
   mcpTimeoutEnv,
-  selectResultTextForDelivery,
-  shouldDeliverAssistantTextForRetryableResult,
 } from './claude.js';
 
-describe('ClaudeProvider result delivery helpers', () => {
-  it('extracts text from SDK assistant message content blocks', () => {
+describe('ClaudeProvider streaming and rate-limit helpers', () => {
+  it('joins SDK assistant text blocks in content order without inventing separators', () => {
     const text = extractAssistantText({
       type: 'assistant',
       message: {
@@ -22,40 +20,7 @@ describe('ClaudeProvider result delivery helpers', () => {
       },
     });
 
-    expect(text).toBe('<message to="chat">Done.</message>\n<internal>logged</internal>');
-  });
-
-  it('uses the last assistant message when the final SDK result is internal-only', () => {
-    const text = selectResultTextForDelivery(
-      '<internal>Page updated and notes logged.</internal>',
-      '<message to="chat">Done — page is current.</message>',
-    );
-
-    expect(text).toBe('<message to="chat">Done — page is current.</message>');
-  });
-
-  it('keeps a wrapped final SDK result instead of replaying an earlier assistant message', () => {
-    const text = selectResultTextForDelivery(
-      '<message to="chat">Final answer.</message>',
-      '<message to="chat">Working on it.</message>',
-    );
-
-    expect(text).toBe('<message to="chat">Final answer.</message>');
-  });
-
-  it('treats message blocks with extra attributes as wrapped final results', () => {
-    const text = selectResultTextForDelivery(
-      '<message to="chat" reply_to_message_id="#7">Resolved.</message>',
-      '<message to="chat">Working on it.</message>',
-    );
-
-    expect(text).toBe('<message to="chat" reply_to_message_id="#7">Resolved.</message>');
-  });
-
-  it('keeps unwrapped public final text so the poll-loop safety net can label it', () => {
-    const text = selectResultTextForDelivery('Done but forgot the wrapper.', '<message to="chat">Working.</message>');
-
-    expect(text).toBe('Done but forgot the wrapper.');
+    expect(text).toBe('<message to="chat">Done.</message><internal>logged</internal>');
   });
 
   it('classifies Claude SDK API rate-limit results as retryable', () => {
@@ -92,24 +57,6 @@ describe('ClaudeProvider result delivery helpers', () => {
         rate_limit_info: { status: 'allowed', overageStatus: 'rejected' },
       }),
     ).toBe(true);
-  });
-
-  it('preserves wrapped assistant output when the SDK final result is a retryable rate-limit string', () => {
-    expect(
-      shouldDeliverAssistantTextForRetryableResult(
-        "API Error: Request rejected (429) · This request would exceed your account's rate limit.",
-        '<message to="chat">The answer already streamed.</message>',
-      ),
-    ).toBe(true);
-  });
-
-  it('does not invent output for retryable rate-limit strings without wrapped assistant text', () => {
-    expect(
-      shouldDeliverAssistantTextForRetryableResult(
-        "API Error: Request rejected (429) · This request would exceed your account's rate limit.",
-        null,
-      ),
-    ).toBe(false);
   });
 });
 

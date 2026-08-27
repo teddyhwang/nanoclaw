@@ -1,62 +1,53 @@
 /**
- * Inbound message operations (container side).
- *
- * Reads from inbound.db (host-owned, opened read-only).
- * Writes processing status to processing_ack in outbound.db (container-owned).
- *
- * The container never writes to inbound.db — all status tracking goes through
- * processing_ack. The host reads processing_ack to sync message lifecycle.
+ * Legacy runner-facing inbound API, backed by the registered mailbox.
  */
 import { getConfig } from '../config.js';
-import { openInboundDb, withInboundDb, getOutboundDb } from './connection.js';
-
-// Cache whether inbound.db has the on_wake column (added in v2.0.48).
-// The container opens inbound.db read-only, so it can't ALTER —
-// gracefully degrade when running against an older session DB.
-let _hasOnWake: boolean | null = null;
-function hasOnWakeColumn(db: ReturnType<typeof openInboundDb>): boolean {
-  if (_hasOnWake !== null) return _hasOnWake;
-  const cols = new Set(
-    (db.prepare("PRAGMA table_info('messages_in')").all() as Array<{ name: string }>).map((c) => c.name),
-  );
-  _hasOnWake = cols.has('on_wake');
-  return _hasOnWake;
-}
-
-/**
- * Test-only: clear the process-lifetime `on_wake` schema-probe cache.
- * The cache is correct in production (one inbound.db per container
- * process) but leaks across tests that open different-schema DBs in one
- * process — a pre-migration-schema test would otherwise read a `true`
- * cached from an earlier normal-schema test (or vice-versa) and assert
- * the wrong branch. Call in beforeEach/afterEach. Mirrors the
- * `_reset*ForTests` convention used elsewhere in the codebase.
- */
-export function _resetOnWakeCacheForTests(): void {
-  _hasOnWake = null;
-}
+import { getAgentMailbox } from '../mailbox/index.js';
+import type { InboundMessage } from '../mailbox/types.js';
 
 export interface MessageInRow {
-  _rowid?: number;
   id: string;
   seq: number | null;
-  kind: string;
+  kind: InboundMessage['kind'];
   timestamp: string;
   status: string;
   process_after: string | null;
   recurrence: string | null;
-  /** Stable identity across recurrences. Recurring tasks get a fresh row id
-   *  per occurrence (host-sweep clones the row); `series_id` is identical
-   *  across the series so per-task history aggregates correctly. Null on
-   *  pre-migration rows that never got backfilled. */
+  /**
+   * Stable identity across recurrences. Recurring tasks get a fresh row id
+   * per occurrence while `series_id` remains stable across the series.
+   */
   series_id: string | null;
   tries: number;
-  /** 1 = wake-eligible (default); 0 = accumulated context only */
+  /** 1 = wake-eligible (default); 0 = accumulated context only. */
   trigger: number;
   platform_id: string | null;
   channel_type: string | null;
   thread_id: string | null;
   content: string;
+  source_session_id: string | null;
+  on_wake: number;
+}
+
+function messageRow(message: InboundMessage): MessageInRow {
+  return {
+    id: message.id,
+    seq: message.sequence,
+    kind: message.kind,
+    timestamp: message.timestamp,
+    status: message.status,
+    process_after: message.processAfter,
+    recurrence: message.recurrence,
+    series_id: message.seriesId,
+    tries: message.tries,
+    trigger: message.trigger ? 1 : 0,
+    platform_id: message.platformId,
+    channel_type: message.channelType,
+    thread_id: message.threadId,
+    content: message.content,
+    source_session_id: message.sourceSessionId,
+    on_wake: message.onWake ? 1 : 0,
+  };
 }
 
 // Cap on how many messages reach the agent in one prompt. Read from
@@ -65,223 +56,52 @@ function getMaxMessagesPerPrompt(): number {
   try {
     return getConfig().maxMessagesPerPrompt;
   } catch {
-    // Config not loaded yet (e.g. test harness) — use default
+    // Config not loaded yet (e.g. test harness) — use default.
     return 10;
   }
 }
 
 /**
- * Fetch pending messages that are due for processing.
- * Reads from inbound.db (read-only), filters against processing_ack in outbound.db
- * to skip messages already picked up by this or a previous container run.
- *
- * Returns the most recent `maxMessagesPerPrompt` pending rows in
- * chronological order, regardless of their `trigger` flag: accumulated
- * context (trigger=0) rides along with the wake-eligible rows so the agent
- * sees the prior context it missed. Host's countDueMessages gates waking on
- * trigger=1 separately (see src/db/session-db.ts).
+ * Fetch due pending messages while excluding work already claimed by this
+ * runner. The mailbox implementation owns filtering and cap accounting so
+ * system/claimed/stale/off-route rows cannot crowd real wake rows out.
  */
-/**
- * Soft age-out for trigger=0 accumulate rows. Older than this and the
- * row is treated as stale context — `getPendingMessages` skips it (it
- * still lives in messages_in for audit + search-conversations recall,
- * which queries the table directly).
- *
- * The accumulate contract is "ride along with the next trigger=1 wake
- * so the agent sees the prior context it missed." If the wake never
- * comes within a day, the conversation has moved on; the row is dead
- * weight that takes prompt budget and (with the LIMIT) competes with
- * fresh context. Trigger=1 rows are NOT age-capped here — they
- * represent due work and should be processed regardless of age.
- */
-const STALE_ACCUMULATE_AGE_MS = 24 * 60 * 60 * 1000;
-
 export function getPendingMessages(isFirstPoll = false): MessageInRow[] {
-  // Both the schema probe and the pending SELECT read inbound.db (host
-  // writer + VirtioFS, corrupt-prone — see withInboundDb), so both run
-  // inside the retry. The outbound ack filter is container-owned with no
-  // cross-mount write race, so it stays outside the retry scope.
-  const pending = withInboundDb((inbound) => {
-    // Three layers of filtering to avoid the LIMIT starving real work
-    // and to bound prompt budget:
-    //
-    // 1. Exclude `kind='system'` at the SQL layer. Those rows are MCP-tool
-    //    responses (search_conversations_response, ask_user_question
-    //    responses) consumed directly by their respective tools' own
-    //    queries against messages_in. The poll loop has always stripped
-    //    them in its app-layer filter, but having them count toward the
-    //    LIMIT meant a session that accumulated unconsumed sys-resp rows
-    //    (one per search when the consumer forgot to markCompleted —
-    //    fixed in apps/optimus/container-tools/src/search-conversations.ts)
-    //    could starve out real task / chat rows.
-    //
-    // 2. Soft age-out for stale trigger=0 accumulate rows. Older than
-    //    24h and the row is no longer useful context — the next-trigger
-    //    pattern means the agent has had a full day of opportunities
-    //    to see it, the conversation has moved on, and including it now
-    //    wastes prompt budget. Trigger=1 rows skip the age check —
-    //    they represent due work, age doesn't matter. Observed
-    //    2026-05-12 in #boysnight: 4309 trigger=0 chat rows accumulated
-    //    over weeks were riding the LIMIT and starving a due dream-*
-    //    task; even without that starve interaction, no agent benefits
-    //    from week-old chitchat as "context."
-    //
-    // 3. Order by `trigger DESC, seq DESC` so trigger=1 rows are
-    //    guaranteed to be at the front of the LIMIT window. Otherwise
-    //    a stream of trigger=0 accumulate rows buries the older
-    //    trigger=1 wake row beneath the LIMIT cutoff and the
-    //    container's poll loop hits the `!messages.some(trigger===1)`
-    //    accumulate gate and sleeps forever. With trigger-priority
-    //    ordering, the dream task surfaces first and the gate advances.
-    //
-    // Pre-migration session DBs predate the on_wake column (added in
-    // v2.0.48). `hasOnWakeColumn` makes the on_wake filter conditional
-    // so the container gracefully degrades against older inbound.db
-    // schemas instead of erroring out.
-    const staleAccumulateCutoff = new Date(Date.now() - STALE_ACCUMULATE_AGE_MS).toISOString();
-    const onWakeFilter = hasOnWakeColumn(inbound) ? 'AND (on_wake = 0 OR ?1 = 1)' : '';
-    return inbound
-      .prepare(
-        `SELECT rowid AS _rowid, * FROM messages_in
-         WHERE status = 'pending'
-           AND kind != 'system'
-           AND (process_after IS NULL OR datetime(process_after) <= datetime('now'))
-           ${onWakeFilter}
-           AND (trigger = 1 OR datetime(timestamp) >= datetime(?3))
-         ORDER BY trigger DESC, seq DESC
-         LIMIT ?2`,
-      )
-      .all(isFirstPoll ? 1 : 0, getMaxMessagesPerPrompt(), staleAccumulateCutoff) as MessageInRow[];
-  });
-
-  if (pending.length === 0) return [];
-
-  // Filter out messages already acknowledged in outbound.db
-  const outbound = getOutboundDb();
-  const ackedIds = new Set(
-    (outbound.prepare('SELECT message_id FROM processing_ack').all() as Array<{ message_id: string }>).map(
-      (r) => r.message_id,
-    ),
-  );
-
-  const unacked = pending.filter((m) => !ackedIds.has(m.id));
-
-  // Sort by seq ASC for chronological agent view. Can't just
-  // `.reverse()` because the SQL `ORDER BY trigger DESC, seq DESC`
-  // groups trigger=1 rows ahead of trigger=0 — a plain reverse would
-  // put trigger=0 chat first, trigger=1 task last, which both
-  // confuses the agent's time-ordering and lets the trigger=1 row
-  // end up at the tail of formatMessages' chat block.
-  return scopeChatBatchToTriggerRoute(unacked).sort(compareMessageOrderAsc);
+  return getAgentMailbox().operations.getPendingMessages(getMaxMessagesPerPrompt(), isFirstPoll).map(messageRow);
 }
 
-function scopeChatBatchToTriggerRoute(messages: MessageInRow[]): MessageInRow[] {
-  const taskTrigger = messages.find((m) => m.trigger === 1 && m.kind === 'task');
-  if (taskTrigger) return messages;
-
-  const chatTrigger = messages.filter((m) => m.trigger === 1).sort(compareMessageOrderDesc)[0];
-  if (!chatTrigger) return messages;
-
-  return messages.filter((m) => sameRoute(m, chatTrigger));
+/** Test-only compatibility hook for the SQLite driver's schema-probe cache. */
+export function _resetOnWakeCacheForTests(): void {
+  getAgentMailbox().operations.resetPendingMessageSchemaCacheForTesting?.();
 }
 
-function sameRoute(a: MessageInRow, b: MessageInRow): boolean {
-  return a.channel_type === b.channel_type && a.platform_id === b.platform_id && a.thread_id === b.thread_id;
-}
-
-function compareMessageOrderAsc(a: MessageInRow, b: MessageInRow): number {
-  const seqDelta = (a.seq ?? 0) - (b.seq ?? 0);
-  if (seqDelta !== 0) return seqDelta;
-  const timestampDelta = (a.timestamp ?? '').localeCompare(b.timestamp ?? '');
-  if (timestampDelta !== 0) return timestampDelta;
-  const rowidDelta = (a._rowid ?? 0) - (b._rowid ?? 0);
-  if (rowidDelta !== 0) return rowidDelta;
-  return a.id.localeCompare(b.id);
-}
-
-function compareMessageOrderDesc(a: MessageInRow, b: MessageInRow): number {
-  return -compareMessageOrderAsc(a, b);
-}
-
-/** Mark messages as processing — writes to processing_ack in outbound.db. */
 export function markProcessing(ids: string[]): void {
-  if (ids.length === 0) return;
-  const db = getOutboundDb();
-  const stmt = db.prepare(
-    "INSERT OR REPLACE INTO processing_ack (message_id, status, status_changed) VALUES (?, 'processing', ?)",
-  );
-  db.transaction(() => {
-    for (const id of ids) stmt.run(id, new Date().toISOString());
-  })();
+  getAgentMailbox().operations.markMessages(ids, 'processing');
 }
 
-/** Mark messages as completed — updates processing_ack in outbound.db. */
 export function markCompleted(ids: string[]): void {
-  if (ids.length === 0) return;
-  const db = getOutboundDb();
-  const stmt = db.prepare(
-    "INSERT OR REPLACE INTO processing_ack (message_id, status, status_changed) VALUES (?, 'completed', ?)",
-  );
-  db.transaction(() => {
-    for (const id of ids) stmt.run(id, new Date().toISOString());
-  })();
+  getAgentMailbox().operations.markMessages(ids, 'completed');
 }
 
-/**
- * Ack task messages whose pre-task script gated the run. The reason decides
- * the ack: `gated` (wakeAgent=false) is the monitor working as designed → a
- * plain `completed`; `error` (broken script) → `script-skip:error`, which the
- * host's ack sync records as a FAILED run so recurrence can read the trailing
- * failed streak off the occurrence rows and back the series off.
- */
 export function markScriptSkipped(skips: Array<{ id: string; reason: string }>): void {
-  if (skips.length === 0) return;
-  const db = getOutboundDb();
-  const stmt = db.prepare(
-    'INSERT OR REPLACE INTO processing_ack (message_id, status, status_changed) VALUES (?, ?, ?)',
-  );
-  db.transaction(() => {
-    for (const s of skips) stmt.run(s.id, s.reason === 'error' ? 'script-skip:error' : 'completed', new Date().toISOString());
-  })();
+  getAgentMailbox().operations.markScriptSkipped(skips);
 }
 
-/** Mark a single message as failed — writes to processing_ack in outbound.db. */
 export function markFailed(id: string): void {
-  getOutboundDb()
-    .prepare(
-      "INSERT OR REPLACE INTO processing_ack (message_id, status, status_changed) VALUES (?, 'failed', ?)",
-    )
-    .run(id, new Date().toISOString());
+  getAgentMailbox().operations.markMessages([id], 'failed');
 }
 
-/** Get a message by ID (read from inbound.db). */
 export function getMessageIn(id: string): MessageInRow | undefined {
-  return withInboundDb(
-    (inbound) => inbound.prepare('SELECT * FROM messages_in WHERE id = ?').get(id) as MessageInRow | undefined,
-  );
+  const message = getAgentMailbox().operations.getMessageIn(id);
+  return message && messageRow(message);
 }
 
-/**
- * Find a pending response to a question (by questionId in content).
- * Reads from inbound.db, checks processing_ack to skip already-handled responses.
- */
 export function findQuestionResponse(questionId: string): MessageInRow | undefined {
-  // Only the inbound read is corrupt-prone (host writer + VirtioFS,
-  // see withInboundDb). outbound is container-owned, no cross-mount
-  // write race, so its ack check stays outside the retry scope.
-  const response = withInboundDb(
-    (inbound) =>
-      inbound
-        .prepare("SELECT * FROM messages_in WHERE status = 'pending' AND content LIKE ?")
-        .get(`%"questionId":"${questionId}"%`) as MessageInRow | undefined,
-  );
+  const message = getAgentMailbox().operations.findQuestionResponse(questionId);
+  return message && messageRow(message);
+}
 
-  if (!response) return undefined;
-
-  // Check it hasn't been acked already
-  const outbound = getOutboundDb();
-  const acked = outbound.prepare('SELECT 1 FROM processing_ack WHERE message_id = ?').get(response.id);
-  if (acked) return undefined;
-
-  return response;
+export function findCliResponse(requestId: string): MessageInRow | undefined {
+  const message = getAgentMailbox().operations.findCliResponse(requestId);
+  return message && messageRow(message);
 }

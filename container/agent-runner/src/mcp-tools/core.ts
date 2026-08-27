@@ -10,7 +10,6 @@
 import fs from 'fs';
 import path from 'path';
 
-import { getInboundDb, getOutboundDb } from '../db/connection.js';
 import { findByName, getAllDestinations } from '../destinations.js';
 import {
   getMessageIdBySeq,
@@ -18,8 +17,9 @@ import {
   getRoutingBySeq,
   writeMessageOut,
 } from '../db/messages-out.js';
-import { getCurrentBatchReplyTarget, getCurrentInReplyTo } from '../db/session-state.js';
 import { getSessionRouting } from '../db/session-routing.js';
+import { getCurrentBatchReplyTarget, getCurrentInReplyTo } from '../db/session-state.js';
+import { getAgentMailbox } from '../mailbox/index.js';
 import { attachLocalFileLinks, outboxDirFor, sweepLocalFileLinks } from '../local-file-links.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
@@ -52,30 +52,11 @@ import type { McpToolDefinition } from './types.js';
  * fix was to stop relying on it.
  */
 function isTaskOnlyTurn(): boolean {
-  // True when at least one row is processing AND none of the
-  // currently-processing rows is a non-task inbound row. Mirrors
-  // poll-loop's `triggerRows.every((m) => m.kind === 'task')`. Fails
-  // open (returns false → normal reply resolution) on any error so a
-  // DB hiccup can't silently strip reply pills from real chat replies.
+  // This is deliberately a mailbox operation rather than a SQLite query:
+  // alternate mailbox drivers must be able to preserve the rollout fallback
+  // without the MCP process reaching around the registered seam.
   try {
-    const out = getOutboundDb();
-    const processing = out.prepare("SELECT message_id FROM processing_ack WHERE status = 'processing'").all() as Array<{
-      message_id: string;
-    }>;
-    if (processing.length === 0) return false;
-    const ids = processing.map((r) => r.message_id);
-    const placeholders = ids.map(() => '?').join(',');
-    const inb = getInboundDb();
-    const nonTask = inb
-      .prepare(
-        `SELECT 1 AS hit FROM messages_in
-         WHERE id IN (${placeholders}) AND kind != 'task' LIMIT 1`,
-      )
-      .get(...ids) as { hit: number } | null | undefined;
-    // bun:sqlite's .get() returns null (not undefined) on no-row, so
-    // test nullish, not strict undefined — getting this wrong made the
-    // guard silently no-op (the original 2026-05-15 mis-fix).
-    return nonTask == null;
+    return getAgentMailbox().operations.isTaskOnlyTurn();
   } catch (err) {
     log(`isTaskOnlyTurn check failed (failing open): ${err instanceof Error ? err.message : String(err)}`);
     return false;
@@ -111,18 +92,9 @@ function resolveInReplyTo(channelType: string, platformId: string): string | nul
   // Scheduled-task fires must not inherit a stale chat reply target.
   if (isTaskOnlyTurn()) return null;
   try {
-    const db = getInboundDb();
-    const row = db
-      .prepare(
-        `SELECT id FROM messages_in
-         WHERE channel_type = ? AND platform_id = ?
-           AND kind != 'task' AND trigger = 1
-         ORDER BY seq DESC LIMIT 1`,
-      )
-      .get(channelType, platformId) as { id: string } | undefined;
-    return row?.id ?? null;
+    return getAgentMailbox().operations.getLatestInboundRoute(channelType, platformId)?.inReplyTo ?? null;
   } catch (err) {
-    log(`resolveInReplyTo DB fallback failed: ${err instanceof Error ? err.message : String(err)}`);
+    log(`resolveInReplyTo mailbox fallback failed: ${err instanceof Error ? err.message : String(err)}`);
     return null;
   }
 }
@@ -268,7 +240,7 @@ export const sendMessage: McpToolDefinition = {
     // real attachment (see local-file-links.ts).
     const swept = sweepLocalFileLinks(text);
     const files = attachLocalFileLinks(swept.links, id, { log });
-    const seq = writeMessageOut({
+    const seq = await writeMessageOut({
       id,
       in_reply_to: explicitReply.inReplyTo ?? resolveInReplyTo(routing.channel_type, routing.platform_id),
       kind: 'chat',
@@ -337,7 +309,7 @@ export const sendFile: McpToolDefinition = {
       reservedNames: [filename],
     });
 
-    writeMessageOut({
+    await writeMessageOut({
       id,
       in_reply_to: resolveInReplyTo(routing.channel_type, routing.platform_id),
       kind: 'chat',
@@ -390,7 +362,7 @@ export const editMessage: McpToolDefinition = {
     if (swept.links.length > 0) {
       log(`edit_message: stripped ${swept.links.length} unusable local-file link(s) — an edit cannot carry files`);
     }
-    writeMessageOut({
+    await writeMessageOut({
       id,
       kind: 'chat',
       platform_id: routing.platform_id,
@@ -437,7 +409,7 @@ export const addReaction: McpToolDefinition = {
     }
 
     const id = generateId();
-    writeMessageOut({
+    await writeMessageOut({
       id,
       kind: 'chat',
       platform_id: routing.platform_id,
@@ -479,7 +451,7 @@ export const removeReaction: McpToolDefinition = {
     }
 
     const id = generateId();
-    writeMessageOut({
+    await writeMessageOut({
       id,
       kind: 'chat',
       platform_id: routing.platform_id,

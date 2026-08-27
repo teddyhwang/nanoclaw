@@ -25,7 +25,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
-import { initTestSessionDb, closeSessionDb, getInboundDb } from './connection.js';
+import { initTestSessionDb, closeSessionDb, getInboundDb } from '../mailbox/sqlite/connection.js';
 import { getPendingMessages, _resetOnWakeCacheForTests, type MessageInRow } from './messages-in.js';
 
 function insertPending(id: string, onWakeCol: boolean) {

@@ -18,6 +18,18 @@ vi.mock('../log.js', () => ({
   log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },
 }));
 
+// Keep template stamping tests isolated from host runtime registration;
+// schedule-store only needs this path helper.
+vi.mock('../session-manager.js', () => ({
+  sessionsBaseDir: () => '/tmp/nanoclaw-create-agent-test/data/v2-sessions',
+}));
+// Secret-classifier behavior belongs to mcp.test.ts. These tests only need the
+// parser constants without loading the approvals/delivery module graph.
+vi.mock('../modules/self-mod/request.js', () => ({
+  SECRET_ENV_KEY_RE: /(TOKEN|SECRET|PASSW(OR)?D|API_?KEY|APIKEY|CREDENTIAL|PRIVATE_?KEY|AUTH)/i,
+  SECRET_VALUE_RE: /^(sk-|ghp_|github_pat_|xox[a-z]-|AKIA|-----BEGIN )/,
+}));
+
 import { closeDb, getAllAgentGroups, initTestDb, runMigrations } from '../db/index.js';
 import { getContainerConfig } from '../db/container-configs.js';
 import { PERSONA_PREPEND_FILE } from '../group-persona.js';
@@ -66,21 +78,21 @@ function writeTask(name: string, schedule: string, prompt: string, script?: stri
   fs.writeFileSync(path.join(dir, `${name}.md`), `---\nschedule: "${schedule}"\n${scriptBlock}---\n\n${prompt}\n`);
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   fs.rmSync(TEST_ROOT, { recursive: true, force: true });
   fs.mkdirSync(TEST_ROOT, { recursive: true });
-  runMigrations(initTestDb());
+  await runMigrations(await initTestDb());
   writeTemplate();
 });
 
-afterEach(() => {
-  closeDb();
+afterEach(async () => {
+  await closeDb();
   fs.rmSync(TEST_ROOT, { recursive: true, force: true });
 });
 
 describe('createAgentFromTemplate', () => {
-  it('writes the persona prepend verbatim — no injected context refs, no .seed.md', () => {
-    const { group: g, report } = createAgentFromTemplate('sales/sdr', { name: 'SDR Test' });
+  it('writes the persona prepend verbatim — no injected context refs, no .seed.md', async () => {
+    const { group: g, report } = await createAgentFromTemplate('sales/sdr', { name: 'SDR Test' });
 
     const groupDir = path.join(GROUPS_DIR, g.folder);
     const prepend = fs.readFileSync(path.join(groupDir, PERSONA_PREPEND_FILE), 'utf-8');
@@ -92,15 +104,15 @@ describe('createAgentFromTemplate', () => {
     expect(g.id).toMatch(/^ag-/);
   });
 
-  it('copies template skills into the group-private Claude-plane skills dir', () => {
-    const { group: g } = createAgentFromTemplate('sales/sdr', { name: 'SDR Skills' });
+  it('copies template skills into the group-private Claude-plane skills dir', async () => {
+    const { group: g } = await createAgentFromTemplate('sales/sdr', { name: 'SDR Skills' });
 
     const skill = path.join(DATA_DIR, 'v2-sessions', g.id, '.claude-shared', 'skills', 'widget', 'SKILL.md');
     expect(fs.existsSync(skill)).toBe(true);
   });
 
-  it('copies the whole plugin into plugins/<name> and provisions plugin-data/<name>', () => {
-    const { group: g } = createAgentFromTemplate('sales/sdr', { name: 'SDR Plugin Copy' });
+  it('copies the whole plugin into plugins/<name> and provisions plugin-data/<name>', async () => {
+    const { group: g } = await createAgentFromTemplate('sales/sdr', { name: 'SDR Plugin Copy' });
 
     const pluginDir = path.join(GROUPS_DIR, g.folder, 'plugins', 'sdr');
     // The whole-plugin copy fixes the broken-sibling-reference class of bugs:
@@ -115,10 +127,10 @@ describe('createAgentFromTemplate', () => {
     expect(fs.existsSync(path.join(GROUPS_DIR, g.folder, 'plugin-data', 'sdr', 'state'))).toBe(true);
   });
 
-  it('records the ownership marker on every server and pluginRoot on stdio only', () => {
-    const { group: g } = createAgentFromTemplate('sales/sdr', { name: 'SDR Mcp' });
+  it('records the ownership marker on every server and pluginRoot on stdio only', async () => {
+    const { group: g } = await createAgentFromTemplate('sales/sdr', { name: 'SDR Mcp' });
 
-    const servers = JSON.parse(getContainerConfig(g.id)!.mcp_servers);
+    const servers = JSON.parse((await getContainerConfig(g.id))!.mcp_servers);
     expect(servers.hubspot).toMatchObject({ command: 'npx', pluginRoot: '/workspace/agent/plugins/sdr' });
     expect(servers.docs).toEqual({ type: 'http', url: 'https://mcp.example.com/mcp', plugin: 'sdr' });
     // Declared cwd wins; an omitted one defaults to the plugin root (spec §7.2.1).
@@ -126,18 +138,18 @@ describe('createAgentFromTemplate', () => {
     expect(servers.search.cwd).toBe('${PLUGIN_ROOT}');
   });
 
-  it('refuses a template whose task names collide on the truncated id slug', () => {
+  it('refuses a template whose task names collide on the truncated id slug', async () => {
     // Both names slug to the same 24-char prefix; the collision must surface
     // at first stamp, not on the first later restamp.
     writeTask('a'.repeat(30), '0 9 * * *', 'First.');
     writeTask(`${'a'.repeat(30)}b`, '0 9 * * *', 'Second.');
 
-    expect(() => createAgentFromTemplate('sales/sdr', { name: 'SDR Collide' })).toThrow(/collide on id slug/);
-    expect(getAllAgentGroups()).toHaveLength(0);
+    await expect(createAgentFromTemplate('sales/sdr', { name: 'SDR Collide' })).rejects.toThrow(/collide on id slug/);
+    expect(await getAllAgentGroups()).toHaveLength(0);
   });
 
-  it('writes context extras at their template-relative paths', () => {
-    const { group: g } = createAgentFromTemplate('sales/sdr', { name: 'SDR Extras' });
+  it('writes context extras at their template-relative paths', async () => {
+    const { group: g } = await createAgentFromTemplate('sales/sdr', { name: 'SDR Extras' });
 
     const groupDir = path.join(GROUPS_DIR, g.folder);
     expect(fs.existsSync(path.join(groupDir, 'playbook.md'))).toBe(true);
@@ -145,30 +157,30 @@ describe('createAgentFromTemplate', () => {
     expect(fs.existsSync(path.join(groupDir, 'context'))).toBe(false);
   });
 
-  it('derives the display name: explicit option → extension agentName → folder leaf', () => {
+  it('derives the display name: explicit option → extension agentName → folder leaf', async () => {
     fs.rmSync(TPL, { recursive: true, force: true });
     writeTemplate({ extensions: { [NANOCLAW_EXTENSION_NS]: { agentName: 'Sales Development Rep' } } });
-    const { group: named } = createAgentFromTemplate('sales/sdr');
+    const { group: named } = await createAgentFromTemplate('sales/sdr');
     expect(named.name).toBe('Sales Development Rep');
 
     fs.rmSync(TPL, { recursive: true, force: true });
     writeTemplate();
-    const { group: fallback } = createAgentFromTemplate('sales/sdr');
+    const { group: fallback } = await createAgentFromTemplate('sales/sdr');
     expect(fallback.name).toBe('sdr');
 
     fs.rmSync(TPL, { recursive: true, force: true });
     writeTemplate({ extensions: { [NANOCLAW_EXTENSION_NS]: { agentName: 'Ignored' } } });
-    const { group: explicit } = createAgentFromTemplate('sales/sdr', { name: 'Chosen' });
+    const { group: explicit } = await createAgentFromTemplate('sales/sdr', { name: 'Chosen' });
     expect(explicit.name).toBe('Chosen');
   });
 
-  it('stamps a persona-less conformant plugin: no prepend file, group still complete', () => {
+  it('stamps a persona-less conformant plugin: no prepend file, group still complete', async () => {
     fs.rmSync(TPL, { recursive: true, force: true });
     fs.mkdirSync(path.join(TPL, 'skills', 'greet'), { recursive: true });
     fs.writeFileSync(path.join(TPL, 'plugin.json'), JSON.stringify({ $schema: PLUGIN_SCHEMA_URL, name: 'greeter' }));
     fs.writeFileSync(path.join(TPL, 'skills', 'greet', 'SKILL.md'), '---\nname: greet\ndescription: says hi\n---\n');
 
-    const { group: g, report } = createAgentFromTemplate('sales/sdr');
+    const { group: g, report } = await createAgentFromTemplate('sales/sdr');
 
     expect(g.name).toBe('sdr'); // folder leaf, not the manifest name
     expect(fs.existsSync(path.join(GROUPS_DIR, g.folder, PERSONA_PREPEND_FILE))).toBe(false);
@@ -179,26 +191,26 @@ describe('createAgentFromTemplate', () => {
     expect(report).toEqual([]);
   });
 
-  it('surfaces the reader report to the caller', () => {
+  it('surfaces the reader report to the caller', async () => {
     fs.writeFileSync(
       path.join(TPL, 'plugin.json'),
       JSON.stringify({ $schema: PLUGIN_SCHEMA_URL, name: 'sdr', publisher: 'acme' }),
     );
-    const { report } = createAgentFromTemplate('sales/sdr', { name: 'SDR Report' });
+    const { report } = await createAgentFromTemplate('sales/sdr', { name: 'SDR Report' });
     expect(report).toEqual([expect.stringContaining('unknown field "publisher"')]);
   });
 
-  it('rejects a template containing a symlink before any group state is created', () => {
+  it('rejects a template containing a symlink before any group state is created', async () => {
     fs.symlinkSync('/etc/hosts', path.join(TPL, 'stolen'));
 
-    expect(() => createAgentFromTemplate('sales/sdr', { name: 'Evil' })).toThrow(/symlink/);
-    expect(getAllAgentGroups()).toEqual([]);
+    await expect(createAgentFromTemplate('sales/sdr', { name: 'Evil' })).rejects.toThrow(/symlink/);
+    expect(await getAllAgentGroups()).toEqual([]);
   });
 
-  it('creates template tasks paused in the host-only agent-group schedule', () => {
+  it('creates template tasks paused in the host-only agent-group schedule', async () => {
     writeTask('weekday-briefing', '0 9 * * 1-5', 'Send the weekday briefing.');
 
-    const { group: g } = createAgentFromTemplate('sales/sdr', { name: 'SDR Tasks' });
+    const { group: g } = await createAgentFromTemplate('sales/sdr', { name: 'SDR Tasks' });
     const db = openScheduleDb(g.id);
     const rows = db.prepare('SELECT status, recurrence, process_after, content FROM task_series').all() as Array<{
       status: string;
@@ -221,11 +233,11 @@ describe('createAgentFromTemplate', () => {
     expect(fs.existsSync(path.join(GROUPS_DIR, g.folder, 'tasks', 'weekday-briefing.md'))).toBe(false);
   });
 
-  it('stamps a valid timezone onto the config row and grounds template task first runs in it', () => {
+  it('stamps a valid timezone onto the config row and grounds template task first runs in it', async () => {
     writeTask('daily-digest', '0 9 * * *', 'Send the digest.');
 
-    const { group: g } = createAgentFromTemplate('sales/sdr', { name: 'SDR TZ', timezone: 'Asia/Tokyo' });
-    expect(getContainerConfig(g.id)?.timezone).toBe('Asia/Tokyo');
+    const { group: g } = await createAgentFromTemplate('sales/sdr', { name: 'SDR TZ', timezone: 'Asia/Tokyo' });
+    expect((await getContainerConfig(g.id))?.timezone).toBe('Asia/Tokyo');
 
     const db = openScheduleDb(g.id);
     const row = db.prepare('SELECT process_after FROM task_series').get() as { process_after: string };
@@ -237,16 +249,16 @@ describe('createAgentFromTemplate', () => {
     expect(row.process_after).toMatch(/T00:00:00/);
   });
 
-  it('ignores an invalid timezone — the group follows the install default', () => {
-    const { group: g } = createAgentFromTemplate('sales/sdr', { name: 'SDR Bad TZ', timezone: 'Not/AZone' });
-    expect(getContainerConfig(g.id)?.timezone).toBeNull();
+  it('ignores an invalid timezone — the group follows the install default', async () => {
+    const { group: g } = await createAgentFromTemplate('sales/sdr', { name: 'SDR Bad TZ', timezone: 'Not/AZone' });
+    expect((await getContainerConfig(g.id))?.timezone).toBeNull();
   });
 
-  it('forwards multiline scripts unchanged through the shared task creation path', () => {
+  it('forwards multiline scripts unchanged through the shared task creation path', async () => {
     const script = 'count=2\necho \'{"wakeAgent": true, "data": {"count": 2}}\'';
     writeTask('alert-watch', '*/15 * * * *', 'Investigate new alerts.', script);
 
-    const { group: g } = createAgentFromTemplate('sales/sdr', { name: 'Scripted Tasks' });
+    const { group: g } = await createAgentFromTemplate('sales/sdr', { name: 'Scripted Tasks' });
     const db = openScheduleDb(g.id);
     const rows = db.prepare('SELECT status, recurrence, content FROM task_series').all() as Array<{
       status: string;
@@ -268,11 +280,11 @@ describe('createAgentFromTemplate', () => {
   it.each([
     ['invalid cron', 'not a cron', /invalid --recurrence/],
     ['too-frequent cron', '* * * * *', /has not been scheduled/],
-  ])('rejects %s before creating the agent group', (_case, schedule, expected) => {
+  ])('rejects %s before creating the agent group', async (_case, schedule, expected) => {
     writeTask('broken', schedule, 'Never created.');
 
-    expect(() => createAgentFromTemplate('sales/sdr', { name: 'Broken Tasks' })).toThrow(expected);
-    expect(getAllAgentGroups()).toEqual([]);
+    await expect(createAgentFromTemplate('sales/sdr', { name: 'Broken Tasks' })).rejects.toThrow(expected);
+    expect(await getAllAgentGroups()).toEqual([]);
     expect(fs.existsSync(path.join(GROUPS_DIR, 'broken-tasks'))).toBe(false);
   });
 });

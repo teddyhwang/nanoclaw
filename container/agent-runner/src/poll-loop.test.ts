@@ -3,11 +3,11 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
-import { initTestSessionDb, closeSessionDb, getInboundDb } from './db/connection.js';
+import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './mailbox/sqlite/connection.js';
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
-import { isCorruptionError, processQuery } from './poll-loop.js';
+import { processQuery } from './poll-loop.js';
 import { confirmationGatePaused, noteToolResult, resetConfirmationGateState } from './confirmation-gate-state.js';
 import { MockProvider } from './providers/mock.js';
 import {
@@ -441,11 +441,13 @@ describe('mock provider', () => {
     }
 
     const typed = events.filter((e) => e.type !== 'activity');
-    expect(typed.length).toBeGreaterThanOrEqual(2);
+    expect(typed.length).toBeGreaterThanOrEqual(3);
     expect(typed[0].type).toBe('init');
-    const resultEvent = typed[1];
-    expect(resultEvent.type).toBe('result');
-    expect(resultEvent.type === 'result' ? resultEvent.text : undefined).toBe('Echo: Hello');
+    // The mock declares emitsMidTurnText, so the turn's text streams as a
+    // text event before the result repeats it.
+    expect(typed[1].type).toBe('text');
+    expect(typed[2].type).toBe('result');
+    expect((typed[2] as { text: string }).text).toBe('Echo: Hello');
   });
 
   it('should handle push() during active query', async () => {
@@ -468,6 +470,73 @@ describe('mock provider', () => {
     expect(results).toHaveLength(2);
     expect(results[0].text).toBe('Re: First');
     expect(results[1].text).toBe('Re: Second');
+  });
+});
+
+describe('streamed task delivery keeps the Optimus sole-send contract', () => {
+  it('delivers a task mid-turn/final block exactly once and records that dispatch', async () => {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+         VALUES ('discord-task', 'Discord Task', 'channel', 'discord', 'chan-task', NULL)`,
+      )
+      .run();
+
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      const block = '<message to="discord-task">Task result.</message>';
+      yield { type: 'init', continuation: 'task-session' };
+      yield { type: 'text', text: block };
+      yield { type: 'result', text: block };
+    }
+
+    const query: AgentQuery = {
+      push: () => {},
+      end: () => {},
+      events: events(),
+      abort: () => {},
+    };
+    const taskFireContexts = [
+      {
+        seriesId: 'series-1',
+        taskId: 'task-1',
+        dispatched: [],
+        assistantText: null,
+        written: false,
+      },
+    ];
+
+    await processQuery(
+      query,
+      {
+        platformId: null,
+        channelType: null,
+        threadId: 'system:tasks:series-1',
+        inReplyTo: null,
+        taskFire: true,
+      },
+      ['task-1'],
+      'claude',
+      null,
+      false,
+      'TestBot',
+      taskFireContexts,
+      null,
+      undefined,
+      'task prompt',
+      undefined,
+      true,
+    );
+
+    const chatRows = getUndeliveredMessages().filter((row) => row.kind === 'chat');
+    expect(chatRows).toHaveLength(1);
+    expect(JSON.parse(chatRows[0].content).text).toBe('Task result.');
+    expect(chatRows[0].in_reply_to).toBeNull();
+
+    const fire = getOutboundDb()
+      .prepare("SELECT status, dispatched FROM task_fires WHERE task_id = 'task-1'")
+      .get() as { status: string; dispatched: string };
+    expect(fire.status).toBe('completed');
+    expect(JSON.parse(fire.dispatched)).toEqual([{ destination: 'discord-task', body: 'Task result.' }]);
   });
 });
 
@@ -512,7 +581,7 @@ describe('end-to-end with mock provider', () => {
 
     for await (const event of query.events) {
       if (event.type === 'result' && event.text) {
-        writeMessageOut({
+        await writeMessageOut({
           id: `out-${Date.now()}`,
           in_reply_to: routing.inReplyTo,
           kind: 'chat',
@@ -555,10 +624,10 @@ describe('dispatchResultText safety net (local fork patch)', () => {
       .run(name, name, ROUTING.channelType!, ROUTING.platformId!);
   }
 
-  it('suppresses bare result text and emits only a silent control row when no <message> block is present', () => {
+  it('suppresses bare result text and emits only a silent control row when no <message> block is present', async () => {
     insertChannelDestination('boys-night');
 
-    dispatchResultText('Calendar event created and the knowledge base updated.', ROUTING);
+    await dispatchResultText('Calendar event created and the knowledge base updated.', ROUTING);
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
@@ -568,10 +637,13 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(out[0].platform_id).toBeNull();
   });
 
-  it('does not invoke safety net when at least one <message> block is dispatched (mixed turn)', () => {
+  it('does not invoke safety net when at least one <message> block is dispatched (mixed turn)', async () => {
     insertChannelDestination('boys-night');
 
-    dispatchResultText('Some scratchpad notes.\n<message to="boys-night">Booked.</message>\nMore scratchpad.', ROUTING);
+    await dispatchResultText(
+      'Some scratchpad notes.\n<message to="boys-night">Booked.</message>\nMore scratchpad.',
+      ROUTING,
+    );
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
@@ -580,10 +652,10 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(text).not.toContain('[degraded');
   });
 
-  it('strips nested <internal> blocks from delivered <message> bodies', () => {
+  it('strips nested <internal> blocks from delivered <message> bodies', async () => {
     insertChannelDestination('boys-night');
 
-    dispatchResultText(
+    await dispatchResultText(
       '<message to="boys-night">Visible line.<internal>private scratchpad</internal>Still visible.</message>',
       ROUTING,
     );
@@ -596,10 +668,10 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(text).not.toContain('private scratchpad');
   });
 
-  it('drops a <message> body that consists entirely of nested <internal> scratchpad', () => {
+  it('drops a <message> body that consists entirely of nested <internal> scratchpad', async () => {
     insertChannelDestination('boys-night');
 
-    dispatchResultText(
+    await dispatchResultText(
       '<message to="boys-night"><internal>Task aborted: already passed. No post warranted.</internal></message>',
       ROUTING,
     );
@@ -612,7 +684,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(out[0].platform_id).toBeNull();
   });
 
-  it('recovers a final <message> block whose closing </message> was dropped by the model (2026-05-28 epicure pairing)', () => {
+  it('recovers a final <message> block whose closing </message> was dropped by the model (2026-05-28 epicure pairing)', async () => {
     // Long-bodied Claude replies occasionally end without emitting the
     // trailing `</message>`. Pre-fix, the strict regex matched zero blocks
     // and the entire (correct) answer was suppressed as scratchpad,
@@ -620,7 +692,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     // by treating end-of-text as an implicit close on the trailing opener.
     insertChannelDestination('boys-night');
 
-    dispatchResultText(
+    await dispatchResultText(
       '<message to="boys-night" reply_to_message_id="#1">Epicure pulled the pairing graph for beef + onion and the strongest universal bridges are cumin, paprika, parsley, red pepper, and olive oil.',
       ROUTING,
     );
@@ -633,14 +705,14 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(text).not.toContain('</message>');
   });
 
-  it('does not synthesize a close when a properly closed <message> block is followed by unwrapped trailing text', () => {
+  it('does not synthesize a close when a properly closed <message> block is followed by unwrapped trailing text', async () => {
     // The recovery must not fire when the LAST opener already has its
     // matching `</message>` — trailing scratchpad after a closed block is
     // a normal mixed turn (covered by the test above) and should keep
     // hitting the existing scratchpad path, not get re-wrapped.
     insertChannelDestination('boys-night');
 
-    dispatchResultText(
+    await dispatchResultText(
       '<message to="boys-night">Done.</message>\nSome trailing scratchpad notes that include the substring <message but no real opener.',
       ROUTING,
     );
@@ -651,7 +723,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(text).toBe('Done.');
   });
 
-  it('allows an explicit reply_to_message_id on a task-style <message> block', () => {
+  it('allows an explicit reply_to_message_id on a task-style <message> block', async () => {
     insertChannelDestination('boys-night');
     getInboundDb()
       .prepare(
@@ -660,7 +732,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
       )
       .run(ROUTING.channelType, ROUTING.platformId);
 
-    dispatchResultText('<message to="boys-night" reply_to_message_id="#2">✅ AI status resolved</message>', {
+    await dispatchResultText('<message to="boys-night" reply_to_message_id="#2">✅ AI status resolved</message>', {
       ...ROUTING,
       inReplyTo: null,
     });
@@ -671,7 +743,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(out[0].in_reply_to).toBe('incident-start-platform-id');
   });
 
-  it('rejects explicit reply_to_message_id targeting an accumulated trigger=0 inbound row', () => {
+  it('rejects explicit reply_to_message_id targeting an accumulated trigger=0 inbound row', async () => {
     insertChannelDestination('boys-night');
     getInboundDb()
       .prepare(
@@ -680,7 +752,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
       )
       .run(ROUTING.channelType, ROUTING.platformId);
 
-    const result = dispatchResultText(
+    const result = await dispatchResultText(
       '<message to="boys-night" reply_to_message_id="#444">This should not reach chat.</message>',
       ROUTING,
     );
@@ -691,7 +763,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(out.every((row) => row.kind !== 'chat')).toBe(true);
   });
 
-  it('same-channel dispatch reply pill stays on the turn-authoritative target even when a NEWER trigger=1 inbound exists in the channel', () => {
+  it('same-channel dispatch reply pill stays on the turn-authoritative target even when a NEWER trigger=1 inbound exists in the channel', async () => {
     // 2026-05-23 New York Crew WhatsApp regression: while Optimus was
     // answering Jon's older hotel-name request, Nicole sent a new
     // @optimus request. The destination-thread hunt picks "newest
@@ -711,7 +783,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
       )
       .run(ROUTING.channelType, ROUTING.platformId);
 
-    dispatchResultText('<message to="boys-night">Done.</message>', ROUTING);
+    await dispatchResultText('<message to="boys-night">Done.</message>', ROUTING);
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
@@ -719,7 +791,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(out[0].in_reply_to).not.toBe('newer-different-user-msg');
   });
 
-  it('keeps task-style <message> blocks standalone when no explicit reply target is supplied', () => {
+  it('keeps task-style <message> blocks standalone when no explicit reply target is supplied', async () => {
     insertChannelDestination('boys-night');
     getInboundDb()
       .prepare(
@@ -728,17 +800,17 @@ describe('dispatchResultText safety net (local fork patch)', () => {
       )
       .run(ROUTING.channelType, ROUTING.platformId);
 
-    dispatchResultText('<message to="boys-night">🔥 AI status update</message>', { ...ROUTING, inReplyTo: null });
+    await dispatchResultText('<message to="boys-night">🔥 AI status update</message>', { ...ROUTING, inReplyTo: null });
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
     expect(out[0].in_reply_to).toBeNull();
   });
 
-  it('emits silent_turn_complete control row (no chat) for empty/whitespace-only result text', () => {
+  it('emits silent_turn_complete control row (no chat) for empty/whitespace-only result text', async () => {
     insertChannelDestination('boys-night');
 
-    dispatchResultText('   \n\n   ', ROUTING);
+    await dispatchResultText('   \n\n   ', ROUTING);
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
@@ -748,7 +820,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(JSON.parse(out[0].content)).toEqual({ action: 'silent_turn_complete' });
   });
 
-  it('SUPPRESSES the scary degraded fallback on an addressed turn that is awaiting sensitive-gate confirmation', () => {
+  it('SUPPRESSES the scary degraded fallback on an addressed turn that is awaiting sensitive-gate confirmation', async () => {
     // 2026-05-18 confidence-killer: a gated request makes the model end
     // its turn with only `<internal>Waiting for X confirmation.</internal>`
     // (zero <message>) — an addressed, zero-output turn. Pre-fix this hit
@@ -758,7 +830,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     // emit a quiet silent_turn_complete, NOT a chat message.
     insertChannelDestination('boys-night');
 
-    dispatchResultText(
+    await dispatchResultText(
       '<internal>Waiting for Google Calendar confirmation.</internal>',
       ROUTING,
       true, // addressed
@@ -775,12 +847,12 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(anyChat).toBeUndefined();
   });
 
-  it('REGRESSION GUARD: a genuine no-output addressed turn gets a non-alarming scoped fallback', () => {
+  it('REGRESSION GUARD: a genuine no-output addressed turn gets a non-alarming scoped fallback', async () => {
     // The real tool-failure case (2026-05-17 AI Friends) must not silently
     // disappear or synthesize an alarming internal diagnostic.
     insertChannelDestination('boys-night');
 
-    dispatchResultText(
+    await dispatchResultText(
       '<internal>search_conversations returned nothing and I have no answer.</internal>',
       ROUTING,
       true, // addressed
@@ -795,10 +867,10 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(out[0].channel_type).toBe(ROUTING.channelType);
   });
 
-  it('emits silent_turn_complete (not safety-net chat) for <internal>-only output (private maintenance turn)', () => {
+  it('emits silent_turn_complete (not safety-net chat) for <internal>-only output (private maintenance turn)', async () => {
     insertChannelDestination('boys-night');
 
-    dispatchResultText(
+    await dispatchResultText(
       '<internal>Nothing new to save. The Tico calendar preference and the security rule were already saved in the previous maintenance task.</internal>',
       ROUTING,
     );
@@ -812,10 +884,10 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(out[0].channel_type).toBeNull();
   });
 
-  it('emits silent_turn_complete when only <internal> tags + whitespace remain after strip', () => {
+  it('emits silent_turn_complete when only <internal> tags + whitespace remain after strip', async () => {
     insertChannelDestination('boys-night');
 
-    dispatchResultText(
+    await dispatchResultText(
       '\n  <internal>silent decision</internal>\n  <internal>another silent thought</internal>  \n',
       ROUTING,
     );
@@ -825,10 +897,10 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(JSON.parse(out[0].content).action).toBe('silent_turn_complete');
   });
 
-  it('does NOT emit silent_turn_complete when a <message> block was sent (typing pause comes from delivery instead)', () => {
+  it('does NOT emit silent_turn_complete when a <message> block was sent (typing pause comes from delivery instead)', async () => {
     insertChannelDestination('boys-night');
 
-    dispatchResultText('<message to="boys-night">Done.</message>', ROUTING);
+    await dispatchResultText('<message to="boys-night">Done.</message>', ROUTING);
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
@@ -836,10 +908,10 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(JSON.parse(out[0].content).text).toBe('Done.');
   });
 
-  it('emits silent_turn_complete when unwrapped text is suppressed', () => {
+  it('emits silent_turn_complete when unwrapped text is suppressed', async () => {
     insertChannelDestination('boys-night');
 
-    dispatchResultText('Bare unwrapped reply that should be retried, not sent.', ROUTING);
+    await dispatchResultText('Bare unwrapped reply that should be retried, not sent.', ROUTING);
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
@@ -849,7 +921,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     });
   });
 
-  it('dedupes near-duplicate <message> blocks within one turn (whitespace-insensitive)', () => {
+  it('dedupes near-duplicate <message> blocks within one turn (whitespace-insensitive)', async () => {
     // Real failure 2026-05-12 in Tico+Janathan WA group: the model
     // emitted two <message to="chat"> blocks that differed only by a
     // single trailing space before \n. Without per-turn dedup, both
@@ -857,7 +929,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     // twice ~3 sec apart.
     insertChannelDestination('boys-night');
 
-    dispatchResultText(
+    await dispatchResultText(
       '<message to="boys-night">Okay FINE, that\'s fair 😂 \n\nHere — drop them into suno.com.</message>' +
         '<message to="boys-night">Okay FINE, that\'s fair 😂\n\nHere — drop them into suno.com.</message>',
       ROUTING,
@@ -868,10 +940,10 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(JSON.parse(out[0].content).text).toContain('Okay FINE');
   });
 
-  it('still allows two <message> blocks when bodies differ in substance', () => {
+  it('still allows two <message> blocks when bodies differ in substance', async () => {
     insertChannelDestination('boys-night');
 
-    dispatchResultText(
+    await dispatchResultText(
       '<message to="boys-night">First reply.</message>' +
         '<message to="boys-night">Second, genuinely different reply.</message>',
       ROUTING,
@@ -888,7 +960,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     const { writeMessageOut } = await import('./db/messages-out.js');
     const turnStartedAt = '2026-06-04 00:00:00';
 
-    writeMessageOut({
+    await writeMessageOut({
       id: 'tool-sent-1',
       kind: 'chat',
       channel_type: ROUTING.channelType,
@@ -898,7 +970,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
       }),
     });
 
-    dispatchResultText(
+    await dispatchResultText(
       '<message to="boys-night">## Recap — last 24h\n\n- **One thing.** Already sent via send_message.</message>',
       ROUTING,
       false,
@@ -910,7 +982,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(JSON.parse(out[0].content).text).toContain('Already sent via send_message');
   });
 
-  it('drops with log when routing has no origin channel (defensive)', () => {
+  it('drops with log when routing has no origin channel (defensive)', async () => {
     const blankRouting: RoutingContext = {
       platformId: null,
       channelType: null,
@@ -918,7 +990,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
       inReplyTo: null,
     };
 
-    dispatchResultText('I did the thing.', blankRouting);
+    await dispatchResultText('I did the thing.', blankRouting);
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
@@ -930,10 +1002,10 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     });
   });
 
-  it('addressed + zero output: sends a scoped failure fallback instead of going silent', () => {
+  it('addressed + zero output: sends a scoped failure fallback instead of going silent', async () => {
     insertChannelDestination('boys-night');
 
-    dispatchResultText('   \n\n   ', ROUTING, /* addressed */ true);
+    await dispatchResultText('   \n\n   ', ROUTING, /* addressed */ true);
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
@@ -957,7 +1029,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     const { writeMessageOut } = await import('./db/messages-out.js');
     const turnStartedAt = '2026-05-21T00:00:00';
     // Simulate send_file's outbound row, written DURING the turn.
-    writeMessageOut({
+    await writeMessageOut({
       id: 'img-out-1',
       kind: 'chat',
       channel_type: ROUTING.channelType,
@@ -967,7 +1039,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
 
     // Agent's result text has no <message> block (it delivered via the
     // tool) — addressed turn, but turnStartedAt is supplied.
-    dispatchResultText('   \n\n   ', ROUTING, /* addressed */ true, turnStartedAt);
+    await dispatchResultText('   \n\n   ', ROUTING, /* addressed */ true, turnStartedAt);
 
     const out = getUndeliveredMessages();
     // The send_file row, plus a silent_turn_complete control row — and
@@ -981,7 +1053,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
   it('tool delivery suppresses a wrapping retry without addressed attribution', async () => {
     const { writeMessageOut } = await import('./db/messages-out.js');
     const turnStartedAt = '2026-08-11T00:00:00';
-    writeMessageOut({
+    await writeMessageOut({
       id: 'file-out-with-caption',
       kind: 'chat',
       channel_type: ROUTING.channelType,
@@ -989,7 +1061,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
       content: JSON.stringify({ text: 'Image caption', files: ['image.png'] }),
     });
 
-    const result = dispatchResultText(
+    const result = await dispatchResultText(
       '<internal>File sent with caption.</internal>\n\n<internal-trace>send_file</internal-trace>',
       ROUTING,
       false,
@@ -1014,7 +1086,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     const { writeMessageOut } = await import('./db/messages-out.js');
     const turnStartedAt = '2026-06-10T00:00:00';
     // Simulate send_message's outbound row — the actual recap, written mid-turn.
-    writeMessageOut({
+    await writeMessageOut({
       id: 'recap-out-1',
       kind: 'chat',
       channel_type: ROUTING.channelType,
@@ -1023,7 +1095,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     });
 
     // Final response: a DIFFERENT-text summary block to the same destination.
-    dispatchResultText(
+    await dispatchResultText(
       '<message to="ai-friends">Recap sent (#29021).</message>',
       ROUTING,
       /* addressed */ false,
@@ -1055,7 +1127,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     insertChannelDestination('boys-night');
     const { writeMessageOut } = await import('./db/messages-out.js');
     const turnStartedAt = '2026-06-10T00:00:00';
-    writeMessageOut({
+    await writeMessageOut({
       id: 'tool-out-1',
       kind: 'chat',
       channel_type: ROUTING.channelType,
@@ -1063,7 +1135,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
       content: JSON.stringify({ text: 'Here is the file.', files: ['x.pdf'] }),
     });
 
-    dispatchResultText(
+    await dispatchResultText(
       '<message to="boys-night">And here is the follow-up note.</message>',
       ROUTING,
       /* addressed */ true,
@@ -1083,10 +1155,10 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(followup).toHaveLength(1);
   });
 
-  it('addressed + <internal>-only output: sends scoped failure fallback', () => {
+  it('addressed + <internal>-only output: sends scoped failure fallback', async () => {
     insertChannelDestination('boys-night');
 
-    dispatchResultText('<internal>I cannot answer this, search failed</internal>', ROUTING, true);
+    await dispatchResultText('<internal>I cannot answer this, search failed</internal>', ROUTING, true);
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
@@ -1100,7 +1172,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     insertChannelDestination('boys-night');
     const { writeMessageOut } = await import('./db/messages-out.js');
     const turnStartedAt = '2026-06-07 20:04:00';
-    writeMessageOut({
+    await writeMessageOut({
       id: 'progress-ack',
       kind: 'chat',
       channel_type: ROUTING.channelType,
@@ -1108,7 +1180,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
       content: JSON.stringify({ text: 'Here are the requested photos.', files: ['one.jpg', 'two.jpg'] }),
     });
 
-    dispatchResultText(
+    await dispatchResultText(
       '<internal>Resumed after compaction; the requested action may have completed.</internal>',
       ROUTING,
       true,
@@ -1121,10 +1193,10 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(JSON.parse(out[1].content)).toEqual({ action: 'silent_turn_complete' });
   });
 
-  it('addressed + compacted + internal-only output: notifies when nothing was delivered', () => {
+  it('addressed + compacted + internal-only output: notifies when nothing was delivered', async () => {
     insertChannelDestination('boys-night');
 
-    dispatchResultText(
+    await dispatchResultText(
       '<internal>Compacted before the requested action could be confirmed.</internal>',
       ROUTING,
       true,
@@ -1137,11 +1209,11 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(JSON.parse(out[0].content).text).toContain('compacted before I could send a final status update');
   });
 
-  it('NOT addressed + zero output: keeps silent_turn_complete (ambient/maintenance unchanged)', () => {
+  it('NOT addressed + zero output: keeps silent_turn_complete (ambient/maintenance unchanged)', async () => {
     insertChannelDestination('boys-night');
 
     // Same empty turn, but not addressed (ambient group lull / task).
-    dispatchResultText('   \n\n   ', ROUTING, /* addressed */ false);
+    await dispatchResultText('   \n\n   ', ROUTING, /* addressed */ false);
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
@@ -1149,21 +1221,21 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(JSON.parse(out[0].content)).toEqual({ action: 'silent_turn_complete' });
   });
 
-  it('addressed defaults to false: omitting the arg preserves prior silent behavior', () => {
+  it('addressed defaults to false: omitting the arg preserves prior silent behavior', async () => {
     insertChannelDestination('boys-night');
 
     // No third arg — every pre-existing caller/test path.
-    dispatchResultText('<internal>silent</internal>', ROUTING);
+    await dispatchResultText('<internal>silent</internal>', ROUTING);
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
     expect(JSON.parse(out[0].content).action).toBe('silent_turn_complete');
   });
 
-  it('addressed + a real <message> block: normal delivery, no fallback (addressed satisfied)', () => {
+  it('addressed + a real <message> block: normal delivery, no fallback (addressed satisfied)', async () => {
     insertChannelDestination('boys-night');
 
-    dispatchResultText('<message to="boys-night">Here is your answer.</message>', ROUTING, true);
+    await dispatchResultText('<message to="boys-night">Here is your answer.</message>', ROUTING, true);
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
@@ -1173,7 +1245,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(text).not.toContain('addressed turn produced no output');
   });
 
-  it('addressed + zero output but no origin channel: emits only silent control row', () => {
+  it('addressed + zero output but no origin channel: emits only silent control row', async () => {
     const blankRouting: RoutingContext = {
       platformId: null,
       channelType: null,
@@ -1181,7 +1253,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
       inReplyTo: null,
     };
 
-    dispatchResultText('   ', blankRouting, true);
+    await dispatchResultText('   ', blankRouting, true);
 
     // No channel to deliver fallback text to, so the runner emits only an
     // internal control row and does not fabricate a chat destination.
@@ -1454,44 +1526,6 @@ describe('error result with no <message> envelope', () => {
   });
 });
 
-describe('isCorruptionError', () => {
-  it('matches the Docker Desktop macOS torn-read symptom', () => {
-    expect(isCorruptionError('database disk image is malformed')).toBe(true);
-  });
-
-  it('matches wrapped SQLite corruption codes', () => {
-    expect(isCorruptionError('SqliteError: SQLITE_CORRUPT_VTAB: ...')).toBe(true);
-    expect(isCorruptionError('file is not a database')).toBe(true);
-  });
-
-  it('returns false for unrelated errors', () => {
-    expect(isCorruptionError('database is locked')).toBe(false);
-    expect(isCorruptionError('no such table: messages_in')).toBe(false);
-    expect(isCorruptionError('')).toBe(false);
-  });
-});
-
-// --- Task-run turn wiring: the REAL processQuery path (one-door) ---
-// These drive the actual call sites (autoAppendTaskLog at result-handling,
-// shouldNudgeTaskBlocks gating, and follow-up turn reset). Deleting the wiring
-// — not just the helpers — goes red here.
-
-const TASK_ROUTING = {
-  platformId: null,
-  channelType: null,
-  threadId: 'system:tasks:ser-1',
-  inReplyTo: 't1',
-  taskRun: true,
-};
-
-function taskLogRows(): Array<{ text: string }> {
-  return (
-    getOutboundDb().prepare("SELECT content FROM messages_out WHERE kind = 'task_log' ORDER BY seq").all() as Array<{
-      content: string;
-    }>
-  ).map((r) => JSON.parse(r.content) as { text: string });
-}
-
 /**
  * Local-file-link salvage on the `<message>` dispatch path (2026-08-19,
  * Nicole DM). The MCP `send_message` path is covered in mcp-tools/core.test.ts;
@@ -1532,11 +1566,11 @@ describe('dispatchResultText — local-file-link salvage', () => {
     return full;
   };
 
-  it('delivers the linked files as attachments and drops the sandbox: markup', () => {
+  it('delivers the linked files as attachments and drops the sandbox: markup', async () => {
     const pdf = workspaceFile('card-print.pdf', 'PDF');
     const png = workspaceFile('card-300dpi.png', 'PNG');
 
-    const result = dispatchResultText(
+    const result = await dispatchResultText(
       `<message to="nicole-dm">Done — recreated at standard business-card size.\n\n` +
         `[Print-ready PDF](sandbox:${pdf})\n\n[300-DPI PNG](sandbox:${png})</message>`,
       ROUTING,
@@ -1553,8 +1587,11 @@ describe('dispatchResultText — local-file-link salvage', () => {
     expect(fs.readFileSync(path.join(tmp, 'outbox', out[0].id, 'card-print.pdf'), 'utf-8')).toBe('PDF');
   });
 
-  it('drops a link-only block whose file does not exist rather than posting a blank message', () => {
-    const result = dispatchResultText('<message to="nicole-dm">sandbox:/workspace/agent/gone.pdf</message>', ROUTING);
+  it('drops a link-only block whose file does not exist rather than posting a blank message', async () => {
+    const result = await dispatchResultText(
+      '<message to="nicole-dm">sandbox:/workspace/agent/gone.pdf</message>',
+      ROUTING,
+    );
 
     expect(result.sent).toBe(0);
     const out = getUndeliveredMessages();
@@ -1562,8 +1599,8 @@ describe('dispatchResultText — local-file-link salvage', () => {
     expect(out.every((m) => m.kind === 'system')).toBe(true);
   });
 
-  it('still delivers surrounding prose when the linked file is missing', () => {
-    dispatchResultText(
+  it('still delivers surrounding prose when the linked file is missing', async () => {
+    await dispatchResultText(
       '<message to="nicole-dm">Here you go: [the PDF](sandbox:/workspace/agent/gone.pdf)</message>',
       ROUTING,
     );
@@ -1575,8 +1612,8 @@ describe('dispatchResultText — local-file-link salvage', () => {
     expect(content.files).toBeUndefined();
   });
 
-  it('leaves an ordinary message untouched', () => {
-    dispatchResultText('<message to="nicole-dm">See [the docs](https://example.com/x).</message>', ROUTING);
+  it('leaves an ordinary message untouched', async () => {
+    await dispatchResultText('<message to="nicole-dm">See [the docs](https://example.com/x).</message>', ROUTING);
 
     const content = JSON.parse(getUndeliveredMessages()[0].content);
     expect(content.text).toBe('See [the docs](https://example.com/x).');

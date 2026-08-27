@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { sqliteRaw } from './drivers/sqlite.js';
 
 import {
-  initTestDb,
+  initSqliteTestDb,
+  getDb,
   closeDb,
   runMigrations,
   createAgentGroup,
@@ -31,40 +33,43 @@ import {
   getRunningSessions,
   updateSession,
   deleteSession,
+  upsertConfirmationGrant,
+  getConfirmationGrant,
   createPendingQuestion,
   getPendingQuestion,
   deletePendingQuestion,
   getContainerConfig,
   createContainerConfig,
 } from './index.js';
+import { _resetPluginMigrationsForTests, registerPluginMigrations } from '../engine/db-extensions.js';
 
 function now() {
   return new Date().toISOString();
 }
 
-beforeEach(() => {
-  const db = initTestDb();
-  runMigrations(db);
+beforeEach(async () => {
+  const db = await initSqliteTestDb();
+  await runMigrations(db);
 });
 
-afterEach(() => {
-  closeDb();
+afterEach(async () => {
+  await closeDb();
 });
 
 // ── Migrations ──
 
 describe('migrations', () => {
-  it('should be idempotent', () => {
-    const db = initTestDb();
-    runMigrations(db);
+  it('should be idempotent', async () => {
+    const db = await initSqliteTestDb();
+    await runMigrations(db);
     // Running again should not throw
-    runMigrations(db);
+    await runMigrations(db);
   });
 
-  it('adds messaging_group_agents.threads as a nullable, default-free override column (019)', () => {
-    const db = initTestDb();
-    runMigrations(db);
-    const col = db
+  it('adds messaging_group_agents.threads as a nullable, default-free override column (019)', async () => {
+    const db = await initSqliteTestDb();
+    await runMigrations(db);
+    const col = sqliteRaw(db)
       .prepare(
         `SELECT type, "notnull", dflt_value FROM pragma_table_info('messaging_group_agents') WHERE name = 'threads'`,
       )
@@ -77,11 +82,50 @@ describe('migrations', () => {
     expect(col!.dflt_value).toBeNull();
   });
 
-  it('persists approval card bodies for terminal rendering (021)', () => {
-    const db = initTestDb();
-    runMigrations(db);
+  it('applies fork and v2.3 migrations exactly once', async () => {
+    const db = await initSqliteTestDb();
+    await runMigrations(db);
+    await runMigrations(db);
+    const names = sqliteRaw(db)
+      .prepare(
+        `SELECT name, COUNT(*) AS count FROM schema_version
+          WHERE name IN ('optimus-container-config-fields', 'optimus-sensitive-gate-mode', 'confirmation-grants', 'messaging-group-detached-at', 'approvals-instance')
+          GROUP BY name ORDER BY name`,
+      )
+      .all() as Array<{ name: string; count: number }>;
+    expect(names).toHaveLength(5);
+    expect(names.every((row) => row.count === 1)).toBe(true);
+  });
+
+  it('runs embedded-host plugin migrations through the unified async driver runner', async () => {
+    registerPluginMigrations([
+      {
+        name: 'optimus-plugin-test',
+        async up(db) {
+          await db.exec('CREATE TABLE optimus_plugin_test (id TEXT PRIMARY KEY)');
+        },
+      },
+    ]);
+    try {
+      await runMigrations(getDb());
+      expect(
+        sqliteRaw(getDb()).prepare("SELECT name FROM sqlite_master WHERE name = 'optimus_plugin_test'").get(),
+      ).toBeDefined();
+      expect(
+        sqliteRaw(getDb())
+          .prepare("SELECT COUNT(*) AS count FROM schema_version WHERE name = 'optimus-plugin-test'")
+          .get(),
+      ).toEqual({ count: 1 });
+    } finally {
+      _resetPluginMigrationsForTests();
+    }
+  });
+
+  it('persists approval card bodies for terminal rendering (021)', async () => {
+    const db = await initSqliteTestDb();
+    await runMigrations(db);
     for (const table of ['pending_approvals', 'pending_channel_approvals', 'pending_sender_approvals']) {
-      const col = db
+      const col = sqliteRaw(db)
         .prepare(`SELECT type, "notnull", dflt_value FROM pragma_table_info(?) WHERE name = 'question'`)
         .get(table) as { type: string; notnull: number; dflt_value: string } | undefined;
       expect(col, table).toEqual({ type: 'TEXT', notnull: 1, dflt_value: "''" });
@@ -100,42 +144,42 @@ describe('agent groups', () => {
     created_at: now(),
   });
 
-  it('should create and retrieve', () => {
-    createAgentGroup(ag());
-    const result = getAgentGroup('ag-1');
+  it('should create and retrieve', async () => {
+    await createAgentGroup(ag());
+    const result = await getAgentGroup('ag-1');
     expect(result).toBeDefined();
     expect(result!.name).toBe('Test Agent');
     expect(result!.folder).toBe('test-agent');
   });
 
-  it('should find by folder', () => {
-    createAgentGroup(ag());
-    const result = getAgentGroupByFolder('test-agent');
+  it('should find by folder', async () => {
+    await createAgentGroup(ag());
+    const result = await getAgentGroupByFolder('test-agent');
     expect(result).toBeDefined();
     expect(result!.id).toBe('ag-1');
   });
 
-  it('should list all', () => {
-    createAgentGroup(ag());
-    createAgentGroup({ ...ag(), id: 'ag-2', name: 'Another', folder: 'another' });
-    expect(getAllAgentGroups()).toHaveLength(2);
+  it('should list all', async () => {
+    await createAgentGroup(ag());
+    await createAgentGroup({ ...ag(), id: 'ag-2', name: 'Another', folder: 'another' });
+    expect(await getAllAgentGroups()).toHaveLength(2);
   });
 
-  it('should update', () => {
-    createAgentGroup(ag());
-    updateAgentGroup('ag-1', { name: 'Updated' });
-    expect(getAgentGroup('ag-1')!.name).toBe('Updated');
+  it('should update', async () => {
+    await createAgentGroup(ag());
+    await updateAgentGroup('ag-1', { name: 'Updated' });
+    expect((await getAgentGroup('ag-1'))!.name).toBe('Updated');
   });
 
-  it('should delete', () => {
-    createAgentGroup(ag());
-    deleteAgentGroup('ag-1');
-    expect(getAgentGroup('ag-1')).toBeUndefined();
+  it('should delete', async () => {
+    await createAgentGroup(ag());
+    await deleteAgentGroup('ag-1');
+    expect(await getAgentGroup('ag-1')).toBeUndefined();
   });
 
-  it('should enforce unique folder', () => {
-    createAgentGroup(ag());
-    expect(() => createAgentGroup({ ...ag(), id: 'ag-dup' })).toThrow();
+  it('should enforce unique folder', async () => {
+    await createAgentGroup(ag());
+    await expect(createAgentGroup({ ...ag(), id: 'ag-dup' })).rejects.toThrow();
   });
 });
 
@@ -152,64 +196,60 @@ describe('messaging groups', () => {
     created_at: now(),
   });
 
-  it('should create and retrieve', () => {
-    createMessagingGroup(mg());
-    const result = getMessagingGroup('mg-1');
+  it('should create and retrieve', async () => {
+    await createMessagingGroup(mg());
+    const result = await getMessagingGroup('mg-1');
     expect(result).toBeDefined();
     expect(result!.channel_type).toBe('discord');
   });
 
-  it('should find by platform', () => {
-    createMessagingGroup(mg());
-    const result = getMessagingGroupByPlatform('discord', 'chan-123');
+  it('should find by platform', async () => {
+    await createMessagingGroup(mg());
+    const result = await getMessagingGroupByPlatform('discord', 'chan-123');
     expect(result).toBeDefined();
     expect(result!.id).toBe('mg-1');
   });
 
-  it('should enforce unique channel_type + platform_id', () => {
-    createMessagingGroup(mg());
-    expect(() => createMessagingGroup({ ...mg(), id: 'mg-dup' })).toThrow();
+  it('should enforce unique channel_type + platform_id', async () => {
+    await createMessagingGroup(mg());
+    await expect(createMessagingGroup({ ...mg(), id: 'mg-dup' })).rejects.toThrow();
   });
 
-  it('should update', () => {
-    createMessagingGroup(mg());
-    updateMessagingGroup('mg-1', { name: 'Updated' });
-    expect(getMessagingGroup('mg-1')!.name).toBe('Updated');
+  it('should update', async () => {
+    await createMessagingGroup(mg());
+    await updateMessagingGroup('mg-1', { name: 'Updated' });
+    expect((await getMessagingGroup('mg-1'))!.name).toBe('Updated');
   });
 
-  it('should delete', () => {
-    createMessagingGroup(mg());
-    deleteMessagingGroup('mg-1');
-    expect(getMessagingGroup('mg-1')).toBeUndefined();
+  it('should delete', async () => {
+    await createMessagingGroup(mg());
+    await deleteMessagingGroup('mg-1');
+    expect(await getMessagingGroup('mg-1')).toBeUndefined();
   });
 
-  it('setMessagingGroupPlatformId rewrites + is idempotent', () => {
-    createMessagingGroup(mg());
-    const changed1 = setMessagingGroupPlatformId('mg-1', 'chan-999');
+  it('setMessagingGroupPlatformId rewrites + is idempotent', async () => {
+    await createMessagingGroup(mg());
+    const changed1 = await setMessagingGroupPlatformId('mg-1', 'chan-999');
     expect(changed1).toBe(true);
-    expect(getMessagingGroup('mg-1')!.platform_id).toBe('chan-999');
-    // Old id no longer resolves.
-    expect(getMessagingGroupByPlatform('discord', 'chan-123')).toBeUndefined();
-    // New id resolves.
-    expect(getMessagingGroupByPlatform('discord', 'chan-999')!.id).toBe('mg-1');
-    // Re-applying same new id is a no-op (returns false).
-    const changed2 = setMessagingGroupPlatformId('mg-1', 'chan-999');
-    expect(changed2).toBe(false);
+    expect((await getMessagingGroup('mg-1'))!.platform_id).toBe('chan-999');
+    expect(await getMessagingGroupByPlatform('discord', 'chan-123')).toBeUndefined();
+    expect((await getMessagingGroupByPlatform('discord', 'chan-999'))!.id).toBe('mg-1');
+    expect(await setMessagingGroupPlatformId('mg-1', 'chan-999')).toBe(false);
   });
 });
 
 // ── Messaging Group Agents ──
 
 describe('messaging group agents', () => {
-  beforeEach(() => {
-    createAgentGroup({
+  beforeEach(async () => {
+    await createAgentGroup({
       id: 'ag-1',
       name: 'Agent',
       folder: 'agent',
       agent_provider: null,
       created_at: now(),
     });
-    createMessagingGroup({
+    await createMessagingGroup({
       id: 'mg-1',
       channel_type: 'discord',
       platform_id: 'chan-1',
@@ -233,77 +273,77 @@ describe('messaging group agents', () => {
     created_at: now(),
   });
 
-  it('should create and list by messaging group', () => {
-    createMessagingGroupAgent(mga());
-    const results = getMessagingGroupAgents('mg-1');
+  it('should create and list by messaging group', async () => {
+    await createMessagingGroupAgent(mga());
+    const results = await getMessagingGroupAgents('mg-1');
     expect(results).toHaveLength(1);
     expect(results[0].agent_group_id).toBe('ag-1');
   });
 
-  it('should order by priority descending', () => {
-    createMessagingGroupAgent(mga());
-    createAgentGroup({
+  it('should order by priority descending', async () => {
+    await createMessagingGroupAgent(mga());
+    await createAgentGroup({
       id: 'ag-2',
       name: 'Agent2',
       folder: 'agent2',
       agent_provider: null,
       created_at: now(),
     });
-    createMessagingGroupAgent({ ...mga(), id: 'mga-2', agent_group_id: 'ag-2', priority: 10 });
-    const results = getMessagingGroupAgents('mg-1');
+    await createMessagingGroupAgent({ ...mga(), id: 'mga-2', agent_group_id: 'ag-2', priority: 10 });
+    const results = await getMessagingGroupAgents('mg-1');
     expect(results[0].agent_group_id).toBe('ag-2');
     expect(results[1].agent_group_id).toBe('ag-1');
   });
 
-  it('should enforce unique messaging_group + agent_group', () => {
-    createMessagingGroupAgent(mga());
-    expect(() => createMessagingGroupAgent({ ...mga(), id: 'mga-dup' })).toThrow();
+  it('should enforce unique messaging_group + agent_group', async () => {
+    await createMessagingGroupAgent(mga());
+    await expect(createMessagingGroupAgent({ ...mga(), id: 'mga-dup' })).rejects.toThrow();
   });
 
-  it('should update', () => {
-    createMessagingGroupAgent(mga());
-    updateMessagingGroupAgent('mga-1', { priority: 5 });
-    expect(getMessagingGroupAgent('mga-1')!.priority).toBe(5);
+  it('should update', async () => {
+    await createMessagingGroupAgent(mga());
+    await updateMessagingGroupAgent('mga-1', { priority: 5 });
+    expect((await getMessagingGroupAgent('mga-1'))!.priority).toBe(5);
   });
 
-  it('should delete', () => {
-    createMessagingGroupAgent(mga());
-    deleteMessagingGroupAgent('mga-1');
-    expect(getMessagingGroupAgents('mg-1')).toHaveLength(0);
+  it('should delete', async () => {
+    await createMessagingGroupAgent(mga());
+    await deleteMessagingGroupAgent('mga-1');
+    expect(await getMessagingGroupAgents('mg-1')).toHaveLength(0);
   });
 
-  it('should enforce foreign key on agent_group_id', () => {
-    expect(() => createMessagingGroupAgent({ ...mga(), agent_group_id: 'nonexistent' })).toThrow();
+  it('should enforce foreign key on agent_group_id', async () => {
+    await expect(createMessagingGroupAgent({ ...mga(), agent_group_id: 'nonexistent' })).rejects.toThrow();
   });
 
   it('auto-creates an agent_destinations row for the wiring', async () => {
     const { getDestinationByTarget, getDestinations } =
       await import('../modules/agent-to-agent/db/agent-destinations.js');
-    createMessagingGroupAgent(mga());
+    await createMessagingGroupAgent(mga());
 
-    const dest = getDestinationByTarget('ag-1', 'channel', 'mg-1');
+    const dest = await getDestinationByTarget('ag-1', 'channel', 'mg-1');
     expect(dest).toBeDefined();
     expect(dest!.local_name).toBe('gen'); // normalized from mg.name='Gen'
-    expect(getDestinations('ag-1')).toHaveLength(1);
+    expect(await getDestinations('ag-1')).toHaveLength(1);
   });
 
   it('does not duplicate destination row on re-wiring', async () => {
     const { getDestinations } = await import('../modules/agent-to-agent/db/agent-destinations.js');
-    createMessagingGroupAgent(mga());
+    await createMessagingGroupAgent(mga());
     // Re-create the same wiring throws (PK unique), but even if we got the
     // row in some other way (e.g. via createDestination directly followed
     // by createMessagingGroupAgent), we should not end up with two rows.
-    deleteMessagingGroupAgent('mga-1');
-    createMessagingGroupAgent(mga());
-    expect(getDestinations('ag-1')).toHaveLength(1);
+    await deleteMessagingGroupAgent('mga-1');
+    await createMessagingGroupAgent(mga());
+    expect(await getDestinations('ag-1')).toHaveLength(1);
   });
 
   it('breaks local_name collisions within an agent group', async () => {
     const { getDestinations } = await import('../modules/agent-to-agent/db/agent-destinations.js');
     // Two messaging groups with the same `name` wired to the same agent
     // should get distinct local_names (gen, gen-2).
-    createMessagingGroupAgent(mga());
-    createMessagingGroup({
+    await createMessagingGroupAgent(mga());
+    await createMessagingGroup({
       id: 'mg-2',
       channel_type: 'discord',
       platform_id: 'chan-2',
@@ -312,11 +352,9 @@ describe('messaging group agents', () => {
       unknown_sender_policy: 'strict',
       created_at: now(),
     });
-    createMessagingGroupAgent({ ...mga(), id: 'mga-2', messaging_group_id: 'mg-2' });
+    await createMessagingGroupAgent({ ...mga(), id: 'mga-2', messaging_group_id: 'mg-2' });
 
-    const dests = getDestinations('ag-1')
-      .map((d) => d.local_name)
-      .sort();
+    const dests = (await getDestinations('ag-1')).map((d) => d.local_name).sort();
     expect(dests).toEqual(['gen', 'gen-2']);
   });
 });
@@ -324,15 +362,15 @@ describe('messaging group agents', () => {
 // ── Sessions ──
 
 describe('sessions', () => {
-  beforeEach(() => {
-    createAgentGroup({
+  beforeEach(async () => {
+    await createAgentGroup({
       id: 'ag-1',
       name: 'Agent',
       folder: 'agent',
       agent_provider: null,
       created_at: now(),
     });
-    createMessagingGroup({
+    await createMessagingGroup({
       id: 'mg-1',
       channel_type: 'discord',
       platform_id: 'chan-1',
@@ -355,126 +393,115 @@ describe('sessions', () => {
     created_at: now(),
   });
 
-  it('should create and retrieve', () => {
-    createSession(sess());
-    const result = getSession('sess-1');
+  it('should create and retrieve', async () => {
+    await createSession(sess());
+    const result = await getSession('sess-1');
     expect(result).toBeDefined();
     expect(result!.agent_group_id).toBe('ag-1');
   });
 
-  it('should find by messaging group (shared, no thread)', () => {
-    createSession(sess());
-    const result = findSession('mg-1', null);
+  it('should find by messaging group (shared, no thread)', async () => {
+    await createSession(sess());
+    const result = await findSession('mg-1', null);
     expect(result).toBeDefined();
     expect(result!.id).toBe('sess-1');
   });
 
-  it('should find by messaging group + thread', () => {
-    createSession({ ...sess(), thread_id: 'thread-1' });
-    expect(findSession('mg-1', 'thread-1')).toBeDefined();
-    expect(findSession('mg-1', 'thread-2')).toBeUndefined();
-    expect(findSession('mg-1', null)).toBeUndefined();
+  it('should find by messaging group + thread', async () => {
+    await createSession({ ...sess(), thread_id: 'thread-1' });
+    expect(await findSession('mg-1', 'thread-1')).toBeDefined();
+    expect(await findSession('mg-1', 'thread-2')).toBeUndefined();
+    expect(await findSession('mg-1', null)).toBeUndefined();
   });
 
-  it('should only find active sessions', () => {
-    createSession({ ...sess(), status: 'closed' });
-    expect(findSession('mg-1', null)).toBeUndefined();
+  it('should only find active sessions', async () => {
+    await createSession({ ...sess(), status: 'closed' });
+    expect(await findSession('mg-1', null)).toBeUndefined();
   });
 
-  it('should list by agent group', () => {
-    createSession(sess());
-    createSession({ ...sess(), id: 'sess-2', thread_id: 'thread-1' });
-    expect(getSessionsByAgentGroup('ag-1')).toHaveLength(2);
+  it('should list by agent group', async () => {
+    await createSession(sess());
+    await createSession({ ...sess(), id: 'sess-2', thread_id: 'thread-1' });
+    expect(await getSessionsByAgentGroup('ag-1')).toHaveLength(2);
   });
 
-  it('should list active sessions', () => {
-    createSession(sess());
-    createSession({ ...sess(), id: 'sess-closed', status: 'closed', thread_id: 'thread-x' });
-    expect(getActiveSessions()).toHaveLength(1);
+  it('should list active sessions', async () => {
+    await createSession(sess());
+    await createSession({ ...sess(), id: 'sess-closed', status: 'closed', thread_id: 'thread-x' });
+    expect(await getActiveSessions()).toHaveLength(1);
   });
 
-  // Regression for S335: `isReplyToOurBot` was scoped to active sessions
-  // only, so a user reply (quote-reply on WA / native reply pill on Discord
-  // / Telegram) to a bot message from a previously-closed session — operator
-  // clear-session, container idle-teardown that flips status to 'closed' —
-  // returned false. mention/mention-sticky wirings then silently dropped
-  // the reply (wake=false) even though the intent is obviously to continue
-  // the thread. The audit-preserved closed-session inbound.db still has the
-  // `delivered` row; we just need a session lookup that includes it.
-  it('finds the most-recent closed session per agent + messaging group + thread', () => {
-    const earlier = '2026-05-01T00:00:00.000Z';
-    const later = '2026-05-12T00:00:00.000Z';
-    createSession({ ...sess(), id: 'sess-old', status: 'closed', created_at: earlier });
-    createSession({ ...sess(), id: 'sess-new', status: 'closed', created_at: later });
-    const result = findMostRecentClosedSessionForAgent('ag-1', 'mg-1', null);
-    expect(result).toBeDefined();
-    expect(result!.id).toBe('sess-new');
+  it('finds the most-recent closed session per agent + messaging group + thread', async () => {
+    await createSession({ ...sess(), id: 'sess-old', status: 'closed', created_at: '2026-05-01T00:00:00.000Z' });
+    await createSession({ ...sess(), id: 'sess-new', status: 'closed', created_at: '2026-05-12T00:00:00.000Z' });
+    expect((await findMostRecentClosedSessionForAgent('ag-1', 'mg-1', null))!.id).toBe('sess-new');
   });
 
-  it('closed-session lookup ignores active rows so active+closed coexisting is fine', () => {
-    createSession({ ...sess(), id: 'sess-active', status: 'active' });
-    createSession({ ...sess(), id: 'sess-closed', status: 'closed' });
-    expect(findSessionForAgent('ag-1', 'mg-1', null)!.id).toBe('sess-active');
-    expect(findMostRecentClosedSessionForAgent('ag-1', 'mg-1', null)!.id).toBe('sess-closed');
+  it('closed-session lookup ignores active rows', async () => {
+    await createSession({ ...sess(), id: 'sess-active', status: 'active' });
+    await createSession({ ...sess(), id: 'sess-closed', status: 'closed' });
+    expect((await findSessionForAgent('ag-1', 'mg-1', null))!.id).toBe('sess-active');
+    expect((await findMostRecentClosedSessionForAgent('ag-1', 'mg-1', null))!.id).toBe('sess-closed');
   });
 
-  it('closed-session lookup respects thread scoping', () => {
-    createSession({
-      ...sess(),
-      id: 'sess-thread-a',
-      status: 'closed',
-      thread_id: 'thread-a',
-    });
-    createSession({
-      ...sess(),
-      id: 'sess-thread-b',
-      status: 'closed',
-      thread_id: 'thread-b',
-    });
-    expect(findMostRecentClosedSessionForAgent('ag-1', 'mg-1', 'thread-a')!.id).toBe('sess-thread-a');
-    expect(findMostRecentClosedSessionForAgent('ag-1', 'mg-1', 'thread-b')!.id).toBe('sess-thread-b');
-    expect(findMostRecentClosedSessionForAgent('ag-1', 'mg-1', null)).toBeUndefined();
+  it('closed-session lookup respects thread scoping', async () => {
+    await createSession({ ...sess(), id: 'sess-thread-a', status: 'closed', thread_id: 'thread-a' });
+    await createSession({ ...sess(), id: 'sess-thread-b', status: 'closed', thread_id: 'thread-b' });
+    expect((await findMostRecentClosedSessionForAgent('ag-1', 'mg-1', 'thread-a'))!.id).toBe('sess-thread-a');
+    expect((await findMostRecentClosedSessionForAgent('ag-1', 'mg-1', 'thread-b'))!.id).toBe('sess-thread-b');
+    expect(await findMostRecentClosedSessionForAgent('ag-1', 'mg-1', null)).toBeUndefined();
   });
 
-  it('closed-session lookup returns undefined when no closed rows exist', () => {
-    createSession({ ...sess(), status: 'active' });
-    expect(findMostRecentClosedSessionForAgent('ag-1', 'mg-1', null)).toBeUndefined();
+  it('closed-session lookup returns undefined when no closed rows exist', async () => {
+    await createSession({ ...sess(), status: 'active' });
+    expect(await findMostRecentClosedSessionForAgent('ag-1', 'mg-1', null)).toBeUndefined();
   });
 
-  it('should list running sessions', () => {
-    createSession({ ...sess(), container_status: 'running' });
-    createSession({ ...sess(), id: 'sess-idle', container_status: 'idle', thread_id: 'thread-1' });
-    createSession({ ...sess(), id: 'sess-stopped', container_status: 'stopped', thread_id: 'thread-2' });
-    expect(getRunningSessions()).toHaveLength(2);
+  it('should list running sessions', async () => {
+    await createSession({ ...sess(), container_status: 'running' });
+    await createSession({ ...sess(), id: 'sess-idle', container_status: 'idle', thread_id: 'thread-1' });
+    await createSession({ ...sess(), id: 'sess-stopped', container_status: 'stopped', thread_id: 'thread-2' });
+    expect(await getRunningSessions()).toHaveLength(2);
   });
 
-  it('should update', () => {
-    createSession(sess());
-    updateSession('sess-1', { container_status: 'running', last_active: now() });
-    const result = getSession('sess-1')!;
+  it('deletes per-actor confirmation grants before deleting a session', async () => {
+    await createSession(sess());
+    const stamp = now();
+    await upsertConfirmationGrant('sess-1', 'discord:user-a', stamp);
+    await upsertConfirmationGrant('sess-1', 'discord:user-b', stamp);
+    expect(await getConfirmationGrant('sess-1', 'discord:user-a')).toBeDefined();
+    await deleteSession('sess-1');
+    expect(await getConfirmationGrant('sess-1', 'discord:user-a')).toBeUndefined();
+    expect(await getConfirmationGrant('sess-1', 'discord:user-b')).toBeUndefined();
+  });
+
+  it('should update', async () => {
+    await createSession(sess());
+    await updateSession('sess-1', { container_status: 'running', last_active: now() });
+    const result = (await getSession('sess-1'))!;
     expect(result.container_status).toBe('running');
     expect(result.last_active).not.toBeNull();
   });
 
-  it('should delete', () => {
-    createSession(sess());
-    deleteSession('sess-1');
-    expect(getSession('sess-1')).toBeUndefined();
+  it('should delete', async () => {
+    await createSession(sess());
+    await deleteSession('sess-1');
+    expect(await getSession('sess-1')).toBeUndefined();
   });
 });
 
 // ── Pending Questions ──
 
 describe('pending questions', () => {
-  beforeEach(() => {
-    createAgentGroup({
+  beforeEach(async () => {
+    await createAgentGroup({
       id: 'ag-1',
       name: 'Agent',
       folder: 'agent',
       agent_provider: null,
       created_at: now(),
     });
-    createSession({
+    await createSession({
       id: 'sess-1',
       agent_group_id: 'ag-1',
       messaging_group_id: null,
@@ -487,8 +514,8 @@ describe('pending questions', () => {
     });
   });
 
-  it('should create and retrieve', () => {
-    createPendingQuestion({
+  it('should create and retrieve', async () => {
+    await createPendingQuestion({
       question_id: 'q-1',
       session_id: 'sess-1',
       message_out_id: 'msg-out-1',
@@ -499,15 +526,15 @@ describe('pending questions', () => {
       options: [{ label: 'Yes', selectedLabel: 'Yes', value: 'yes' }],
       created_at: now(),
     });
-    const result = getPendingQuestion('q-1');
+    const result = await getPendingQuestion('q-1');
     expect(result).toBeDefined();
     expect(result!.session_id).toBe('sess-1');
     expect(result!.title).toBe('Test');
     expect(result!.options[0].value).toBe('yes');
   });
 
-  it('should delete', () => {
-    createPendingQuestion({
+  it('should delete', async () => {
+    await createPendingQuestion({
       question_id: 'q-1',
       session_id: 'sess-1',
       message_out_id: 'msg-out-1',
@@ -518,17 +545,17 @@ describe('pending questions', () => {
       options: [{ label: 'Yes', selectedLabel: 'Yes', value: 'yes' }],
       created_at: now(),
     });
-    deletePendingQuestion('q-1');
-    expect(getPendingQuestion('q-1')).toBeUndefined();
+    await deletePendingQuestion('q-1');
+    expect(await getPendingQuestion('q-1')).toBeUndefined();
   });
 });
 
 // ── Container Configs ──
 
 describe('container configs', () => {
-  it('createContainerConfig persists cli_scope', () => {
-    createAgentGroup({ id: 'ag-full', name: 'Full', folder: 'full', agent_provider: null, created_at: now() });
-    createContainerConfig({
+  it('createContainerConfig persists cli_scope', async () => {
+    await createAgentGroup({ id: 'ag-full', name: 'Full', folder: 'full', agent_provider: null, created_at: now() });
+    await createContainerConfig({
       agent_group_id: 'ag-full',
       provider: null,
       model: null,
@@ -548,7 +575,7 @@ describe('container configs', () => {
       sensitive_gate_mode: null,
       updated_at: now(),
     });
-    const row = getContainerConfig('ag-full');
+    const row = await getContainerConfig('ag-full');
     expect(row).toBeDefined();
     expect(row!.cli_scope).toBe('global');
   });
