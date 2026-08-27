@@ -181,6 +181,15 @@ export const CLASSIFICATION_REGISTRY: Record<string, Record<string, ToolClass>> 
     resy_cancel: { classification: 'destructive' }, // cancels a real reservation
     resy_workspace_members: { classification: 'read', pii: true },
   },
+  chronogolf: {
+    chronogolf_search_courses: { classification: 'read' }, // public course data
+    chronogolf_course: { classification: 'read' },
+    chronogolf_availability: { classification: 'read' },
+    chronogolf_reservations: { classification: 'read', pii: true },
+    chronogolf_booking_preview: { classification: 'read', pii: true }, // saved-card summary
+    chronogolf_book: { classification: 'write' }, // creates/charges a reservation
+    chronogolf_workspace_members: { classification: 'read', pii: true },
+  },
   housesigma: {
     housesigma_search_map: { classification: 'read' }, // public listings
     housesigma_listing_preview: { classification: 'read' },

@@ -173,6 +173,24 @@ describe('resy integration policy', () => {
   });
 });
 
+describe('chronogolf integration policy', () => {
+  it('public course and availability reads always allow', () => {
+    for (const tool of ['chronogolf_search_courses', 'chronogolf_course', 'chronogolf_availability']) {
+      expect(decide('chronogolf', tool, {}, true)).toBe(ALLOW);
+    }
+  });
+  it('reservation, preview, and member reads are gated only in public chats', () => {
+    for (const tool of ['chronogolf_reservations', 'chronogolf_booking_preview', 'chronogolf_workspace_members']) {
+      expect(decide('chronogolf', tool, {}, false)).toBe(ALLOW);
+      expect(decide('chronogolf', tool, {}, true)).toBe(CONFIRM);
+    }
+  });
+  it('booking is a write and always requires confirmation', () => {
+    expect(decide('chronogolf', 'chronogolf_book', {}, false)).toBe(CONFIRM);
+    expect(decide('chronogolf', 'chronogolf_book', {}, true)).toBe(CONFIRM);
+  });
+});
+
 describe('housesigma + realtorca — all public reads → always allow (except members)', () => {
   it('housesigma listing reads allow even in public', () => {
     for (const t of [
