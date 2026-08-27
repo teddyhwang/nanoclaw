@@ -141,9 +141,11 @@ describe('opentable integration policy', () => {
       expect(decide('opentable', t, {}, true)).toBe(ALLOW);
     }
   });
-  it('opentable_reservations = personal PII read (public-only)', () => {
-    expect(decide('opentable', 'opentable_reservations', {}, false)).toBe(ALLOW);
-    expect(decide('opentable', 'opentable_reservations', {}, true)).toBe(CONFIRM);
+  it('personal reservation/preview reads are gated only in public chats', () => {
+    for (const tool of ['opentable_reservations', 'opentable_booking_preview']) {
+      expect(decide('opentable', tool, {}, false)).toBe(ALLOW);
+      expect(decide('opentable', tool, {}, true)).toBe(CONFIRM);
+    }
   });
   it('book = write (any), cancel = destructive (any)', () => {
     expect(decide('opentable', 'opentable_book', {}, false)).toBe(CONFIRM);

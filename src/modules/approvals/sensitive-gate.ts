@@ -167,6 +167,7 @@ export const CLASSIFICATION_REGISTRY: Record<string, Record<string, ToolClass>> 
     opentable_availability: { classification: 'read' },
     opentable_restaurant: { classification: 'read' },
     opentable_reservations: { classification: 'read', pii: true }, // personal reservations
+    opentable_booking_preview: { classification: 'read', pii: true }, // card summary + requests
     opentable_book: { classification: 'write' },
     opentable_cancel: { classification: 'destructive' },
     opentable_workspace_members: { classification: 'read', pii: true },
