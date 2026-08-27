@@ -201,11 +201,15 @@ export interface McpHttpServerConfig {
 
 export interface AgentQuery {
   /**
-   * Push a follow-up message into the active query. Pass `imageBlocks` to
-   * send a multimodal message (text + images) rather than text-only. Empty
-   * or omitted `imageBlocks` falls back to a text-only message.
+   * Push a follow-up message into the active query. The poll loop supplies
+   * `ImageContentBlock[]`; providers may narrow this to their native attachment
+   * view (OpenCode uses local file descriptors). Initial-query images remain
+   * strongly typed through `QueryInput.imageBlocks`; only this provider-owned
+   * streaming callback erases the batch shape so registry providers can adapt
+   * or ignore unsupported blocks safely.
    */
-  push(message: string, imageBlocks?: ImageContentBlock[]): void;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  push(message: string, providerAttachments?: any[]): void;
 
   /** Signal that no more input will be sent. */
   end(): void;
