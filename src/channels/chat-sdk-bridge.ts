@@ -365,6 +365,16 @@ export function normalizeDmThreadId(threadId: string, messageId: string): string
   return threadId;
 }
 
+/**
+ * Recover readable content a platform adapter left only in `message.raw`.
+ *
+ * The bridge drops `raw` before persisting (it can be very large), so anything
+ * the adapter did not project into `Message.toJSON()` is lost at that point.
+ * A platform that carries readable content outside the normal text — Slack
+ * puts pasted tables in `attachments[].blocks[]` — returns it here as text.
+ * Return null when there is nothing to recover.
+ */
+export type RawTextExtractor = (raw: Record<string, unknown>) => string | null;
 // ---------------------------------------------------------------------------
 // Membership hook
 // ---------------------------------------------------------------------------
@@ -493,6 +503,12 @@ export interface ChatSdkBridgeConfig {
   botUserId?: string;
   /** Platform-specific reply context extraction. */
   extractReplyContext?: ReplyContextExtractor;
+  /**
+   * Recover readable content the platform adapter left only in `message.raw`.
+   * The returned text is appended to the message body and persisted; the raw
+   * provider payload is still dropped.
+   */
+  extractRawText?: RawTextExtractor;
   /**
    * Platform-specific poll serialization. Discord delivers a native poll as a
    * structured `poll` object on the raw payload with NO text body — without
@@ -963,6 +979,22 @@ export async function enrichAttachments(attachments: Attachment[]): Promise<Arra
   return enriched;
 }
 
+/**
+ * Append platform-rescued text to the serialized body, before `raw` is dropped.
+ * No extractor, or nothing recovered, leaves the body byte-identical.
+ */
+export function appendRawText(
+  serialized: Record<string, unknown>,
+  raw: Record<string, unknown>,
+  extract?: RawTextExtractor,
+): void {
+  if (!extract) return;
+  const extra = extract(raw);
+  if (!extra) return;
+  const text = typeof serialized.text === 'string' ? serialized.text : '';
+  serialized.text = text ? `${text}\n\n${extra}` : extra;
+}
+
 export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter {
   const { adapter } = config;
   // The instance name becomes a webhook route segment (the route regex is
@@ -1004,6 +1036,11 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     const enrichedAttachments = sdkAttachments.length > 0 ? await enrichAttachments(sdkAttachments) : [];
     if (enrichedAttachments.length > 0) {
       serialized.attachments = enrichedAttachments;
+    }
+
+    // Recover platform content the Chat SDK omitted, while raw is still here.
+    if (message.raw) {
+      appendRawText(serialized, message.raw as Record<string, unknown>, config.extractRawText);
     }
 
     // Extract reply context via platform-specific hook. Awaited so async

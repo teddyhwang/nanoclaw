@@ -4,6 +4,8 @@ All notable changes to NanoClaw will be documented in this file.
 
 ## [Unreleased]
 
+- **Chat SDK channels can recover content the adapter left in the raw payload.** The bridge drops `message.raw` before persisting, so anything a platform did not project into its message text was lost — Slack keeps pasted tables in `attachments[].blocks[]`, and an agent saw only the sentence before the table. A new optional `extractRawText` hook on `ChatSdkBridgeConfig` lets a channel rescue that content as text before raw is discarded. Raw payloads still never reach the database, and a channel that does not set the hook is unaffected.
+
 - [BREAKING] **Agents now receive their capability instructions.** `CLAUDE.md` was a list of `@` imports into `/app`; Claude Code silently drops imports resolving outside the project directory, so eight of nine instruction sections never reached the model. It is now one flat file with every source inlined, shared with the Codex provider. Customized source breaks on two surfaces: `src/claude-md-compose.ts` is now `src/project-doc-compose.ts` with `composeGroupClaudeMd(group)` becoming `composeGroupProjectDoc(group, groupDir, spec)`, and the `/app/CLAUDE.md` and `/workspace/agent/.claude-fragments` mounts are gone. **Migration:** `grep -rn "claude-md-compose\|composeGroupClaudeMd\|claude-fragments" src/ setup/ scripts/` — no hits means nothing to do; otherwise repoint the import and pass `DEFAULT_PROJECT_DOC` as the third argument. Then clear the leftovers once: `rm -rf groups/*/.claude-fragments groups/*/.claude-shared.md` — they are inert (nothing reads them) but sit in the agent's working directory.
 
 ## [2.3.0] - 2026-08-24
