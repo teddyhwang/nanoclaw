@@ -126,6 +126,44 @@ describe('poll loop integration', () => {
     await loopPromise.catch(() => {});
   });
 
+  it('keeps acknowledged chat work alive when reflection arrives before its first result', async () => {
+    // Live repro: New York Crew 2026-08-29. The agent acknowledged Teddy's
+    // forecast request through send_message; that outbound immediately
+    // scheduled a trigger=1 reflection task. The task-wake deferral called
+    // query.end() before Codex's result, aborting the promised forecast work.
+    // Teddy retried three hours later and the same sequence repeated.
+    insertMessage(
+      'm-forecast',
+      { sender: 'Teddy', text: 'Check the Saturday rain forecast and adjust our itinerary' },
+      { platformId: 'chan-1', channelType: 'whatsapp' },
+    );
+
+    const provider = new DelayedResultProvider('<message to="discord-test">rain-proof schedule</message>');
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 3000, 'codex');
+
+    await waitFor(() => provider.queries === 1, 1000);
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, trigger, series_id, platform_id, channel_type, content)
+         VALUES ('t-reflection', 'task', datetime('now'), 'pending', 1, 'reflection-test', 'chan-1', 'whatsapp', ?)`,
+      )
+      .run(JSON.stringify({ prompt: 'INTERNAL MAINTENANCE TASK — DO NOT MESSAGE THE USER.' }));
+
+    await sleep(800);
+    expect(provider.ends).toBe(0);
+    expect(getUndeliveredMessages()).toHaveLength(0);
+
+    provider.releaseResult();
+    await waitFor(() => getUndeliveredMessages().some((row) => row.kind === 'chat'), 1500);
+    expect(JSON.parse(getUndeliveredMessages().find((row) => row.kind === 'chat')!.content).text).toBe(
+      'rain-proof schedule',
+    );
+
+    controller.abort();
+    await loopPromise.catch(() => {});
+  });
+
   it('delivers a Claude result that absorbed a same-sender follow-up', async () => {
     // Live repro: Danielle DM 2026-08-25. Claude absorbed "make me a meal
     // plan" into the pending result and generated the plan, but the Codex-
@@ -753,7 +791,8 @@ describe('poll loop integration', () => {
     // runner must also exit so host-sweep can observe a stopped container,
     // clear the processing claim with backoff, and re-fire the row.
     const ack = getOutboundDb().prepare("SELECT status FROM processing_ack WHERE message_id = 't-dream'").get() as
-      { status: string } | undefined;
+      | { status: string }
+      | undefined;
     expect(ack?.status).not.toBe('completed');
     // And it produced no outbound (it genuinely did nothing).
     expect(getUndeliveredMessages()).toHaveLength(0);
@@ -774,7 +813,8 @@ describe('poll loop integration', () => {
     await expect(runPollLoopWithTimeout(provider, controller.signal, 2000)).resolves.toBeUndefined();
 
     const ack = getOutboundDb().prepare("SELECT status FROM processing_ack WHERE message_id = 'm-retry-chat'").get() as
-      { status: string } | undefined;
+      | { status: string }
+      | undefined;
     expect(ack?.status).not.toBe('completed');
     expect(getUndeliveredMessages()).toHaveLength(0);
   });
@@ -802,7 +842,8 @@ describe('poll loop integration', () => {
     // Wait until the turn is in flight (row claimed 'processing'), then reap.
     await waitFor(() => {
       const ack = getOutboundDb().prepare("SELECT status FROM processing_ack WHERE message_id = 'm-cut'").get() as
-        { status: string } | undefined;
+        | { status: string }
+        | undefined;
       return ack?.status === 'processing';
     }, 2000);
 
@@ -817,7 +858,8 @@ describe('poll loop integration', () => {
     // The cut-short turn produced nothing and must NOT be marked completed —
     // the next container re-processes it.
     const ack = getOutboundDb().prepare("SELECT status FROM processing_ack WHERE message_id = 'm-cut'").get() as
-      { status: string } | undefined;
+      | { status: string }
+      | undefined;
     expect(ack?.status).not.toBe('completed');
     expect(getUndeliveredMessages()).toHaveLength(0);
   });

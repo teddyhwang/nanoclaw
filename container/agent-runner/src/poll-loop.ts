@@ -1583,6 +1583,25 @@ export async function processQuery(
           }
           newMessages = userOnly;
           if (newMessages.length === 0) {
+            // A trigger task commonly appears immediately after an
+            // acknowledgement because the host schedules reflection from
+            // that outbound. Ending before the chat's first result aborts
+            // the promised work and lets the silent reflection replace it
+            // (New York Crew, twice on 2026-08-29). Defer immediately, but
+            // hold the active query until its result is safely delivered.
+            if (!mayEndQueryForDeferredFollowUps(resultIndex > 0, wrappingRetryInFlight)) {
+              if (!loggedHoldingForFirstResult) {
+                loggedHoldingForFirstResult = true;
+                const holdReason = wrappingRetryInFlight
+                  ? 'the wrapping retry is still in flight'
+                  : 'the active user turn is still in flight (no result yet)';
+                log(
+                  `Holding active user query open — ${taskDeferred.length} deferred maintenance task ` +
+                    `wake(s) pending but ${holdReason}`,
+                );
+              }
+              return;
+            }
             // Nothing pushable remains — end the active stream regardless of
             // whether cross-sender deferred too. The earlier rationale here
             // ("if only task rows deferred, leave open so Result: can land")
