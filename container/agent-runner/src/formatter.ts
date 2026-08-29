@@ -122,7 +122,14 @@ export function extractMessageSender(msg: MessageInRow): string | null {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function extractSenderId(msg: MessageInRow, content: any): string | null {
-  const raw: string | null = content?.senderId || content?.author?.userId || null;
+  // `chat-sdk` adapters use senderId / author.userId. The native WhatsApp
+  // adapter writes the participant JID as `sender` instead. Omitting that
+  // shape made every WhatsApp group participant look anonymous, so the
+  // poll-loop treated a different person's interjection as a same-sender
+  // follow-up and could suppress the active result as superseded (Tico:
+  // Teddy's broad golf answer was dropped when Nicole asked "Centennial?",
+  // 2026-08-27).
+  const raw: string | null = content?.senderId || content?.author?.userId || content?.sender || null;
   if (!raw) return null;
   // Already namespaced (e.g. "telegram:123") — use as-is.
   if (raw.includes(':')) return raw;

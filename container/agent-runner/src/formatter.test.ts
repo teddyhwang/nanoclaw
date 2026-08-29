@@ -599,6 +599,14 @@ describe('extractMessageSender', () => {
     expect(extractMessageSender(m)).toBe('discord:@me:abc');
   });
 
+  it('uses the native WhatsApp participant JID to distinguish group senders', () => {
+    insertMessage('m1', 'chat', { sender: '159867859914790@lid', senderName: 'Teddy Hwang' });
+    const msgs = getPendingMessages();
+    const m = msgs.find((m) => m.id === 'm1')!;
+    m.channel_type = 'whatsapp';
+    expect(extractMessageSender(m)).toBe('whatsapp:159867859914790@lid');
+  });
+
   it('returns null when no sender info is present', () => {
     insertMessage('m1', 'chat', { text: 'hi' });
     const msgs = getPendingMessages();
