@@ -13,9 +13,16 @@ import { MockProvider } from './providers/mock.js';
 import {
   shouldSendErrorResponseForBatch,
   dispatchResultText,
+  enforceDreamSessionRotation,
   isAwaitingSensitiveConfirmation,
   shouldKeepaliveBridge,
 } from './poll-loop.js';
+import {
+  getContinuation,
+  getContinuationStartedAt,
+  setContinuation,
+  setContinuationStartedAt,
+} from './db/session-state.js';
 import type { RoutingContext } from './formatter.js';
 import type { AgentQuery, ProviderEvent } from './providers/types.js';
 
@@ -48,6 +55,31 @@ function insertMessage(
       JSON.stringify(content),
     );
 }
+
+describe('Dream session rotation', () => {
+  it('clears every provider continuation after a successful Dream result', () => {
+    setContinuation('claude', 'claude-thread');
+    setContinuationStartedAt('claude', '2026-08-28');
+    setContinuation('codex', 'codex-thread');
+    setContinuationStartedAt('codex', '2026-08-28');
+
+    expect(enforceDreamSessionRotation(true, true)).toBe(4);
+    expect(getContinuation('claude')).toBeUndefined();
+    expect(getContinuationStartedAt('claude')).toBeUndefined();
+    expect(getContinuation('codex')).toBeUndefined();
+    expect(getContinuationStartedAt('codex')).toBeUndefined();
+  });
+
+  it('preserves session state for non-Dream and result-less turns', () => {
+    setContinuation('claude', 'claude-thread');
+    setContinuationStartedAt('claude', '2026-08-28');
+
+    expect(enforceDreamSessionRotation(false, true)).toBeNull();
+    expect(enforceDreamSessionRotation(true, false)).toBeNull();
+    expect(getContinuation('claude')).toBe('claude-thread');
+    expect(getContinuationStartedAt('claude')).toBe('2026-08-28');
+  });
+});
 
 /**
  * Insert + read-back as a plain MessageInRow shape. Used by tests that

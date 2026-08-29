@@ -981,10 +981,34 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         `Shutdown mid-turn before any result — leaving ${processingIds.length} message(s) pending for next container`,
       );
     } else {
+      // Dream rotation is a runtime invariant, not an optional model action.
+      // The maintenance prompt still asks the agent to call rotate_session so
+      // the transcript records Phase 6 explicitly, but MCP discovery can fail
+      // before the tool becomes visible (Teddy DM, 2026-08-25) and a broken
+      // plugin barrel can remove the entire namespace (2026-08-28). A
+      // successful Dream result means the maintenance turn is complete, so
+      // enforce the same idempotent clear here before acknowledging its task
+      // row. This preserves retry semantics: errored, result-less, and
+      // shutdown-interrupted Dreams do not rotate.
+      const dreamRotation = enforceDreamSessionRotation(Boolean(config.isDreamRun), sawResult);
+      if (dreamRotation !== null) {
+        const cleared = dreamRotation;
+        log(`Dream pass complete — enforced session rotation (${cleared} tracking row(s) cleared)`);
+      }
       markCompleted(processingIds);
       log(`Completed ${ids.length} message(s)`);
     }
   }
+}
+
+/**
+ * Enforce the post-Dream rotation invariant after a completed provider result.
+ * Exported so the success/error boundary remains regression-testable without
+ * running the infinite poll loop.
+ */
+export function enforceDreamSessionRotation(isDreamRun: boolean, sawResult: boolean): number | null {
+  if (!isDreamRun || !sawResult) return null;
+  return clearAllSessionTrackingState();
 }
 
 export function shouldSendErrorResponseForBatch(messages: MessageInRow[]): boolean {
