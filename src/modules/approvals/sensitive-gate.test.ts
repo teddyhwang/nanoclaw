@@ -189,6 +189,9 @@ describe('decideSensitiveGate — grant + policy path', async () => {
     expect(delivered[0].channelType).toBe('discord');
     expect(delivered[0].platformId).toBe('chan-x');
     const card = JSON.parse(delivered[0].body);
+    if (r.decision === 'confirm') {
+      expect(r.approvalId).toBe(card.questionId);
+    }
     expect(card.type).toBe('ask_question');
     expect(card.options.map((o: { value: string }) => o.value)).toEqual(['confirm', 'cancel']);
     expect(card.question).toContain('Actor');

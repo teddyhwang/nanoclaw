@@ -10,30 +10,28 @@ import {
 afterEach(() => _resetReplayResolutionForTesting());
 
 const S = 'sess-1';
-const I = 'google';
-const T = 'google_call';
+const A = 'cfm-approval-a';
 
 describe('replay-resolution tracker', () => {
-  it('unrecorded call is not resolved', () => {
-    expect(isReplayAlreadyResolved(S, I, T)).toBe(false);
+  it('treats an unrecorded approval as unresolved', () => {
+    expect(isReplayAlreadyResolved(S, A)).toBe(false);
   });
 
-  it('marking success makes the SAME (session,integration,tool) resolved', () => {
-    markReplaySucceeded(S, I, T);
-    expect(isReplayAlreadyResolved(S, I, T)).toBe(true);
+  it('marks the same session and approval as resolved', () => {
+    markReplaySucceeded(S, A);
+    expect(isReplayAlreadyResolved(S, A)).toBe(true);
   });
 
-  it('resolution is keyed precisely — a different tool/integration/session is unaffected', () => {
-    markReplaySucceeded(S, I, T);
-    expect(isReplayAlreadyResolved(S, I, 'other_tool')).toBe(false);
-    expect(isReplayAlreadyResolved(S, 'lunchmoney', T)).toBe(false);
-    expect(isReplayAlreadyResolved('sess-2', I, T)).toBe(false);
+  it('does not conflate concurrent approvals for the same tool', () => {
+    markReplaySucceeded(S, A);
+    expect(isReplayAlreadyResolved(S, 'cfm-approval-b')).toBe(false);
+    expect(isReplayAlreadyResolved('sess-2', A)).toBe(false);
   });
 
-  it('resolution TTL-expires — does not mask a genuinely new later request', () => {
+  it('expires resolution state so it cannot mask a later request', () => {
     const t0 = 1_000_000;
-    markReplaySucceeded(S, I, T, t0);
-    expect(isReplayAlreadyResolved(S, I, T, t0 + 1)).toBe(true);
-    expect(isReplayAlreadyResolved(S, I, T, t0 + REPLAY_RESOLUTION_TTL_MS + 1)).toBe(false);
+    markReplaySucceeded(S, A, t0);
+    expect(isReplayAlreadyResolved(S, A, t0 + 1)).toBe(true);
+    expect(isReplayAlreadyResolved(S, A, t0 + REPLAY_RESOLUTION_TTL_MS + 1)).toBe(false);
   });
 });

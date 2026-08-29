@@ -41,7 +41,9 @@ interface SensitiveMcpConfirmPayload {
   actorId?: string;
   integration?: string;
   tool?: string;
-  /** Set by requestConfirmation() — needed to address the replay. */
+  /** Set by requestConfirmation() — binds replay to this exact card/call. */
+  approvalId?: string;
+  /** Supplied by sensitive-gate — retained for logging and diagnostics. */
   groupFolder?: string;
 }
 
@@ -96,7 +98,7 @@ registerApprovalHandler('sensitive_mcp_confirm', async ({ session, payload, user
   // result back into the session. Provider/harness-agnostic; the model
   // does nothing special. The grant above still stands so any OTHER
   // sensitive call this session is friction-free.
-  if (!p.groupFolder || !p.integration || !p.tool) {
+  if (!p.approvalId || !p.groupFolder || !p.integration || !p.tool) {
     // No replay identity (older/edge payload) — fall back to the legacy
     // model-reissue nudge rather than silently dropping the action.
     await notify(
@@ -106,6 +108,7 @@ registerApprovalHandler('sensitive_mcp_confirm', async ({ session, payload, user
   }
 
   const outcome = await replayConfirmedMcpCall({
+    approvalId: p.approvalId,
     groupFolder: p.groupFolder,
     integration: p.integration,
     tool: p.tool,
@@ -117,7 +120,7 @@ registerApprovalHandler('sensitive_mcp_confirm', async ({ session, payload, user
     // call suppresses its contradictory failure appr-note. (2026-05-18:
     // a stale `expired` note and this `ok` note landed together and the
     // agent answered from the failure — user never saw the result.)
-    markReplaySucceeded(session.id, p.integration, p.tool);
+    markReplaySucceeded(session.id, p.approvalId);
     const rendered = renderReplayContent(outcome.content) || '(the action returned no output)';
     // Deliver the actual tool result as a system message the agent reads
     // and continues from — exactly as if the tool had returned inline.
@@ -128,6 +131,7 @@ registerApprovalHandler('sensitive_mcp_confirm', async ({ session, payload, user
       sessionId: session.id,
       integration: p.integration,
       tool: p.tool,
+      approvalId: p.approvalId,
       isError: outcome.isError,
     });
     return;
@@ -140,11 +144,12 @@ registerApprovalHandler('sensitive_mcp_confirm', async ({ session, payload, user
     // misleads the agent. `already_done` also means the call ran
     // elsewhere, so it is success-equivalent and never warrants a
     // failure note regardless.
-    if (outcome.status === 'already_done' || isReplayAlreadyResolved(session.id, p.integration, p.tool)) {
+    if (outcome.status === 'already_done' || isReplayAlreadyResolved(session.id, p.approvalId)) {
       log.info('sensitive_mcp_confirm: failure note suppressed (call already succeeded)', {
         sessionId: session.id,
         integration: p.integration,
         tool: p.tool,
+        approvalId: p.approvalId,
         status: outcome.status,
       });
       return;
@@ -161,6 +166,7 @@ registerApprovalHandler('sensitive_mcp_confirm', async ({ session, payload, user
       sessionId: session.id,
       integration: p.integration,
       tool: p.tool,
+      approvalId: p.approvalId,
       status: outcome.status,
     });
     return;
@@ -169,11 +175,12 @@ registerApprovalHandler('sensitive_mcp_confirm', async ({ session, payload, user
   // outcome.status === 'error' — replay round-trip failed. Suppress if a
   // success for the same call already landed; otherwise surface it (the
   // grant still exists so a manual re-issue would also work).
-  if (isReplayAlreadyResolved(session.id, p.integration, p.tool)) {
+  if (isReplayAlreadyResolved(session.id, p.approvalId)) {
     log.info('sensitive_mcp_confirm: error note suppressed (call already succeeded)', {
       sessionId: session.id,
       integration: p.integration,
       tool: p.tool,
+      approvalId: p.approvalId,
     });
     return;
   }
@@ -186,6 +193,7 @@ registerApprovalHandler('sensitive_mcp_confirm', async ({ session, payload, user
     sessionId: session.id,
     integration: p.integration,
     tool: p.tool,
+    approvalId: p.approvalId,
     message: outcome.message,
   });
 });

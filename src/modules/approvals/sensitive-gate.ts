@@ -177,6 +177,7 @@ export const CLASSIFICATION_REGISTRY: Record<string, Record<string, ToolClass>> 
     resy_availability: { classification: 'read' },
     resy_venue: { classification: 'read' },
     resy_reservations: { classification: 'read', pii: true }, // personal reservations
+    resy_booking_preview: { classification: 'read', pii: true }, // card summary + policies
     resy_book: { classification: 'write' }, // commits a real reservation
     resy_cancel: { classification: 'destructive' }, // cancels a real reservation
     resy_workspace_members: { classification: 'read', pii: true },
@@ -315,7 +316,7 @@ export interface SensitiveGateInput {
 
 export type SensitiveGateDecision =
   | { decision: 'allow'; reason: 'policy_allow' | 'live_grant' | 'gate_disabled_by_admin' }
-  | { decision: 'confirm' }
+  | { decision: 'confirm'; approvalId: string }
   | { decision: 'fail_closed'; reason: string };
 
 /**
@@ -418,7 +419,7 @@ export async function decideSensitiveGate(input: SensitiveGateInput): Promise<Se
   //    the grant (sensitive-mcp-confirm.ts); the re-issued call then
   //    finds the live grant above and passes.
   const what = `\`${tool}\`${integration ? ` (${integration})` : ''}`;
-  await requestConfirmation({
+  const approvalId = await requestConfirmation({
     session,
     agentName: agentGroup.name,
     action: 'sensitive_mcp_confirm',
@@ -433,12 +434,19 @@ export async function decideSensitiveGate(input: SensitiveGateInput): Promise<Se
     // Deliver the card to the resolved chat (source chat for merged groups).
     deliverTo: { channel_type: mg.channel_type, platform_id: mg.platform_id },
   });
+  if (!approvalId) {
+    return {
+      decision: 'fail_closed',
+      reason: 'confirmation card could not be delivered',
+    };
+  }
   log.info('sensitive-gate: confirmation required', {
     sessionId: session.id,
     actorId,
     integration,
     tool,
+    approvalId,
     isPublicChannel,
   });
-  return { decision: 'confirm' };
+  return { decision: 'confirm', approvalId };
 }

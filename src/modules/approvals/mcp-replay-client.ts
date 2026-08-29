@@ -3,7 +3,7 @@
  *
  * After a human taps Confirm on a sensitive-action card, the engine
  * (sensitive-mcp-confirm.ts) creates the `(session,actor)` grant and
- * then POSTs the gate identity `(groupFolder, integration, tool)` here.
+ * then POSTs the unique approval id (plus diagnostic gate fields) here.
  * Dashboard-server's `/mcp/_replay` route looks up the stashed,
  * still-bound tool callback and runs the credentialed MCP call IN ITS
  * OWN PROCESS (the grant is now satisfied) and returns the real
@@ -54,6 +54,7 @@ export type McpReplayOutcome =
  * user-facing message (the confirm path must never hang or loop).
  */
 export async function replayConfirmedMcpCall(args: {
+  approvalId: string;
   groupFolder: string;
   integration: string;
   tool: string;
@@ -71,6 +72,7 @@ export async function replayConfirmedMcpCall(args: {
         'X-Bridge-Secret': secret,
       },
       body: JSON.stringify({
+        approvalId: args.approvalId,
         groupFolder: args.groupFolder,
         integration: args.integration,
         tool: args.tool,

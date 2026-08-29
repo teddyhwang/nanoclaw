@@ -159,9 +159,11 @@ describe('resy integration policy', () => {
       expect(decide('resy', t, {}, true)).toBe(ALLOW);
     }
   });
-  it('resy_reservations = personal PII read (public-only)', () => {
+  it('reservation and booking-preview PII reads confirm only in public', () => {
     expect(decide('resy', 'resy_reservations', {}, false)).toBe(ALLOW);
     expect(decide('resy', 'resy_reservations', {}, true)).toBe(CONFIRM);
+    expect(decide('resy', 'resy_booking_preview', {}, false)).toBe(ALLOW);
+    expect(decide('resy', 'resy_booking_preview', {}, true)).toBe(CONFIRM);
   });
   it('book = write (any), cancel = destructive (any)', () => {
     expect(decide('resy', 'resy_book', {}, false)).toBe(CONFIRM);

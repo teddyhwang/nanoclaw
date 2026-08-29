@@ -358,10 +358,11 @@ export interface RequestConfirmationOptions {
  * dashboard-bridge IPC, and the host calls this. See
  * knowledge/projects/sensitive-action-approvals.md (v6).
  *
- * Fire-and-forget: the actor's click drives the registered handler for
- * `action` via the response dispatcher.
+ * Returns the unique approval id after the card is durably recorded and
+ * delivered, or null when delivery fails. The id is also force-merged into
+ * the row payload so a later replay can address this exact held call.
  */
-export async function requestConfirmation(opts: RequestConfirmationOptions): Promise<void> {
+export async function requestConfirmation(opts: RequestConfirmationOptions): Promise<string | null> {
   const { session, action, actorId, actorName, payload, title, question, agentName, deliverTo } = opts;
 
   // Prefer the caller-supplied source chat (merged agent-shared groups); fall
@@ -376,14 +377,14 @@ export async function requestConfirmation(opts: RequestConfirmationOptions): Pro
     // there is no DM fallback by design. Tell the agent so the held-back
     // call fails closed rather than silently proceeding.
     await notifyAgent(session, `${action} could not be confirmed: no originating chat to deliver the confirmation to.`);
-    return;
+    return null;
   }
 
   const approvalId = `cfm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const normalizedOptions = normalizeOptions(CONFIRM_OPTIONS);
-  // actorId is force-merged last so a caller can't accidentally shadow the
-  // authorization key via the opaque payload.
-  const rowPayload = { ...payload, actorId };
+  // actorId and approvalId are force-merged last so a caller cannot shadow
+  // either the authorization key or the exact replay identity.
+  const rowPayload = { ...payload, actorId, approvalId };
   await createPendingApproval({
     approval_id: approvalId,
     session_id: session.id,
@@ -401,7 +402,7 @@ export async function requestConfirmation(opts: RequestConfirmationOptions): Pro
   if (!adapter) {
     await deletePendingApproval(approvalId);
     await notifyAgent(session, `${action} could not be confirmed: no delivery adapter is configured.`);
-    return;
+    return null;
   }
   {
     const body = actorName ? `${actorName}: ${question}` : question;
@@ -429,9 +430,10 @@ export async function requestConfirmation(opts: RequestConfirmationOptions): Pro
       log.error('Failed to deliver confirmation card', { action, approvalId, err });
       await deletePendingApproval(approvalId);
       await notifyAgent(session, `${action} could not be confirmed: failed to deliver the confirmation card.`);
-      return;
+      return null;
     }
   }
 
   log.info('Confirmation requested', { action, approvalId, agentName, actorId });
+  return approvalId;
 }

@@ -174,7 +174,7 @@ describe('confirmation_grants accessors', async () => {
 
 describe('requestConfirmation', async () => {
   it('delivers the card in-channel to the originating messaging group and records actorId', async () => {
-    await requestConfirmation({
+    const approvalId = await requestConfirmation({
       session: { id: SESSION, agent_group_id: AG, messaging_group_id: MG } as never,
       agentName: 'Test',
       action: 'sensitive_mcp_confirm',
@@ -192,17 +192,22 @@ describe('requestConfirmation', async () => {
     expect(delivered[0].platformId).toBe('chan-public');
     const card = JSON.parse(delivered[0].body);
     expect(card.type).toBe('ask_question');
+    expect(approvalId).toBe(card.questionId);
     expect(card.options.map((o: { value: string }) => o.value)).toEqual(['confirm', 'cancel']);
     expect(card.question).toContain('Actor');
 
     // Row recorded with actorId force-merged onto the payload.
     const row = await getPendingApproval(card.questionId);
     expect(row).toBeDefined();
-    expect(JSON.parse(row!.payload)).toMatchObject({ actorId: ACTOR, integration: 'google' });
+    expect(JSON.parse(row!.payload)).toMatchObject({
+      actorId: ACTOR,
+      approvalId: card.questionId,
+      integration: 'google',
+    });
   });
 
   it('fails closed (notifies, no card) when the session has no originating chat', async () => {
-    await requestConfirmation({
+    const approvalId = await requestConfirmation({
       session: { id: SESSION, agent_group_id: AG, messaging_group_id: null } as never,
       agentName: 'Test',
       action: 'sensitive_mcp_confirm',
@@ -211,6 +216,7 @@ describe('requestConfirmation', async () => {
       title: 'x',
       question: 'y',
     });
+    expect(approvalId).toBeNull();
     expect(delivered).toHaveLength(0);
     expect(writeSessionMessage).toHaveBeenCalled();
   });
@@ -298,6 +304,7 @@ describe('handleApprovalsResponse — sensitive_mcp_confirm confirm/cancel/click
     expect(await getConfirmationGrant(SESSION, ACTOR)).toBeDefined();
     // The replay client was called with the exact gate identity.
     expect(replayConfirmedMcpCall).toHaveBeenCalledWith({
+      approvalId: qid,
       groupFolder: 'fam',
       integration: 'google',
       tool: 'google_call',
@@ -336,55 +343,32 @@ describe('handleApprovalsResponse — sensitive_mcp_confirm confirm/cancel/click
     expect(injected).toMatch(/dashboard unreachable/);
   });
 
-  it('Fix-B ordering: a SUCCESS then a stale EXPIRED for the same call suppresses the contradictory failure note', async () => {
-    // 2026-05-18 regression: a stale container returned `expired` for
-    // the same call a successful fresh-container replay had just
-    // delivered; both appr-notes landed and the agent answered from the
-    // failure ("approval window elapsed") — the real calendar result
-    // never reached the user. The success must win: the later/duplicate
-    // expired handler must NOT write a contradictory failure note.
-    replayConfirmedMcpCall.mockResolvedValueOnce({
-      status: 'ok',
-      content: [{ type: 'text', text: 'CALENDAR-RESULT' }],
-      isError: false,
-    });
-    const qid1 = await seedConfirmCardWithGroup();
-    await handleApprovalsResponse(click(qid1, 'confirm', ACTOR));
+  it('does not let one approval result suppress a distinct same-tool approval', async () => {
+    replayConfirmedMcpCall
+      .mockResolvedValueOnce({
+        status: 'ok',
+        content: [{ type: 'text', text: 'CALENDAR-RESULT' }],
+        isError: false,
+      })
+      .mockResolvedValueOnce({
+        status: 'error',
+        message: 'dashboard unreachable',
+      });
+    const firstApproval = await seedConfirmCardWithGroup();
+    const secondApproval = await seedConfirmCardWithGroup();
 
-    replayConfirmedMcpCall.mockResolvedValueOnce({ status: 'expired' });
-    const qid2 = await seedConfirmCardWithGroup();
-    await handleApprovalsResponse(click(qid2, 'confirm', ACTOR));
+    await handleApprovalsResponse(click(firstApproval, 'confirm', ACTOR));
+    await handleApprovalsResponse(click(secondApproval, 'confirm', ACTOR));
 
     const injected = writeSessionMessage.mock.calls
       .map((c) => JSON.parse((c[2] as { content: string }).content).text)
       .join('\n');
+    expect(firstApproval).not.toBe(secondApproval);
     expect(injected).toMatch(/CALENDAR-RESULT/);
-    expect(injected).not.toMatch(/confirmation window elapsed/);
-    expect(injected).not.toMatch(/could not be auto-completed/);
-  });
-
-  it('Fix-B ordering: a SUCCESS then a stale ERROR for the same call suppresses the failure note', async () => {
-    replayConfirmedMcpCall.mockResolvedValueOnce({
-      status: 'ok',
-      content: [{ type: 'text', text: 'CALENDAR-RESULT' }],
-      isError: false,
-    });
-    const qa = await seedConfirmCardWithGroup();
-    await handleApprovalsResponse(click(qa, 'confirm', ACTOR));
-
-    replayConfirmedMcpCall.mockResolvedValueOnce({
-      status: 'error',
-      message: 'dashboard unreachable',
-    });
-    const qb = await seedConfirmCardWithGroup();
-    await handleApprovalsResponse(click(qb, 'confirm', ACTOR));
-
-    const injected = writeSessionMessage.mock.calls
-      .map((c) => JSON.parse((c[2] as { content: string }).content).text)
-      .join('\n');
-    expect(injected).toMatch(/CALENDAR-RESULT/);
-    expect(injected).not.toMatch(/dashboard unreachable/);
-    expect(injected).not.toMatch(/auto-running .* failed/);
+    expect(injected).toMatch(/dashboard unreachable/);
+    const replayCalls = replayConfirmedMcpCall.mock.calls.slice(-2);
+    expect(replayCalls[0]?.[0]).toEqual(expect.objectContaining({ approvalId: firstApproval }));
+    expect(replayCalls[1]?.[0]).toEqual(expect.objectContaining({ approvalId: secondApproval }));
   });
 
   it('Fix-B ordering: `already_done` never emits a failure note (call ran elsewhere)', async () => {
