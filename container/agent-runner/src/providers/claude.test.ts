@@ -76,6 +76,17 @@ describe('mcpTimeoutEnv', () => {
     expect(env.MCP_TIMEOUT).toBe('1000');
   });
 
+  it('extends MCP startup for the simultaneous nightly Dream wave', () => {
+    const env = mcpTimeoutEnv({ NANOCLAW_DREAM_HARNESS: 'claude' });
+    expect(env.MCP_TOOL_TIMEOUT).toBe('120000');
+    expect(env.MCP_TIMEOUT).toBe('120000');
+  });
+
+  it('keeps an explicit Dream startup override authoritative', () => {
+    const env = mcpTimeoutEnv({ NANOCLAW_DREAM_HARNESS: 'claude', MCP_TIMEOUT: '45000' });
+    expect(env.MCP_TIMEOUT).toBe('45000');
+  });
+
   it('defaults each var independently', () => {
     const env = mcpTimeoutEnv({ MCP_TOOL_TIMEOUT: '90000' });
     expect(env.MCP_TOOL_TIMEOUT).toBe('90000');

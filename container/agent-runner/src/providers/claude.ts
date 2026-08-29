@@ -559,6 +559,7 @@ const CLAUDE_CODE_AUTO_COMPACT_WINDOW = process.env.CLAUDE_CODE_AUTO_COMPACT_WIN
  */
 const MCP_TOOL_TIMEOUT = process.env.MCP_TOOL_TIMEOUT || '120000';
 const MCP_TIMEOUT = process.env.MCP_TIMEOUT || '30000';
+const DREAM_MCP_TIMEOUT = '120000';
 
 /**
  * Resolve the MCP timeout env vars to inject into the CLI subprocess. A value
@@ -571,7 +572,12 @@ export function mcpTimeoutEnv(inherited: Record<string, string | undefined> = {}
 } {
   return {
     MCP_TOOL_TIMEOUT: inherited.MCP_TOOL_TIMEOUT ?? MCP_TOOL_TIMEOUT,
-    MCP_TIMEOUT: inherited.MCP_TIMEOUT ?? MCP_TIMEOUT,
+    // Every group's Dream fires in the same 04:00 wave. Under that startup
+    // load, Claude's 30s default intermittently discarded otherwise healthy
+    // MCP servers for the entire turn (Sameul Moolsan, 2026-08-23/25/26/27).
+    // Give maintenance turns enough time to connect their critical nanoclaw
+    // stdio server; keep the interactive fast-fail default unchanged.
+    MCP_TIMEOUT: inherited.MCP_TIMEOUT ?? (inherited.NANOCLAW_DREAM_HARNESS ? DREAM_MCP_TIMEOUT : MCP_TIMEOUT),
   };
 }
 
