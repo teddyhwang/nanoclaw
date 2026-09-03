@@ -899,6 +899,27 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(out[0].channel_type).toBe(ROUTING.channelType);
   });
 
+  it('honors an explicit silent-turn marker on an addressed follow-up', async () => {
+    // New York Crew, 2026-09-03: the taco question was answered, then a
+    // trailing video arrived as a second addressed push. The provider marked
+    // it intentionally silent, but the generic addressed-empty safety net sent
+    // a false failure after the successful answer.
+    insertChannelDestination('boys-night');
+
+    await dispatchResultText(
+      '<internal>silent turn</internal>\n\n<internal-trace>userMessage</internal-trace>',
+      ROUTING,
+      true,
+    );
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].kind).toBe('system');
+    expect(JSON.parse(out[0].content)).toEqual({
+      action: 'silent_turn_complete',
+    });
+  });
+
   it('emits silent_turn_complete (not safety-net chat) for <internal>-only output (private maintenance turn)', async () => {
     insertChannelDestination('boys-night');
 

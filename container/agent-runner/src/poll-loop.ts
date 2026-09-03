@@ -2423,6 +2423,7 @@ interface MidTurnDeliveryOptions {
 
 /** Complete internal spans are private scratchpad and never a content door. */
 const INTERNAL_SPAN_RE = /<internal\b[\s\S]*?<\/internal>/gi;
+const EXPLICIT_SILENT_TURN_RE = /<internal\b[^>]*>\s*silent turn\s*<\/internal>/i;
 const OPEN_INTERNAL_RE = /<internal\b/i;
 const OPEN_MESSAGE_RE = /<message\b/;
 
@@ -2743,6 +2744,9 @@ export async function dispatchResultText(
   if (lastIndex < normalizedText.length) scratchpadParts.push(normalizedText.slice(lastIndex));
 
   const scratchpad = stripInternalTags(scratchpadParts.join('')).trim();
+  // Delivery normalization strips every private <internal> span first, so the
+  // intent marker must be recognized against the original provider result.
+  const explicitlySilent = EXPLICIT_SILENT_TURN_RE.test(originalText);
   if (scratchpad) log(`[scratchpad] ${scratchpad.slice(0, 500)}${scratchpad.length > 500 ? '…' : ''}`);
 
   const deliveredViaTool = !!turnStartedAt && countChatMessagesSince(turnStartedAt) > 0;
@@ -2756,6 +2760,17 @@ export async function dispatchResultText(
   }
 
   if (sent === 0 && !anythingDelivered) {
+    // The destination contract gives the model one unambiguous way to say
+    // that an ambient/follow-up turn intentionally needs no reply. Honor it
+    // even when the engagement gate marked the inbound as addressed; otherwise
+    // a trailing attachment that adds nothing can manufacture a failure after
+    // the preceding turn already answered successfully.
+    if (explicitlySilent) {
+      log('Explicit silent-turn marker — suppressing degraded fallback');
+      await emitSilentTurnComplete();
+      return { sent, hasUnwrapped, dispatched, resultBlocks };
+    }
+
     if (addressed && compactedDuringTurn) {
       const destination = findByRouting(routing.channelType, routing.platformId);
       if (destination) {
