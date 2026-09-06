@@ -38,11 +38,21 @@ export async function handleRecurrence(
     due = getDueSeries(schedule, new Date().toISOString());
     for (const series of due) {
       try {
+        const parsedContent = JSON.parse(series.content) as { expiresAt?: unknown };
+        const expiresAt = typeof parsedContent.expiresAt === 'string' ? parsedContent.expiresAt : null;
         // Do not stack a second fire while an earlier occurrence is still
         // unconsumed. The schedule still advances so its cron clock does not
         // drift behind a slow/cold container.
         const alreadyLive = mailbox.hasLiveTaskOccurrence(series.series_id);
         const firedAt = new Date().toISOString();
+
+        // Expiry is end-exclusive: a series never materializes at or after
+        // its bound. This also safely retires an overdue series after downtime.
+        if (expiresAt !== null && firedAt >= expiresAt) {
+          advanceRecurrence(schedule, series.series_id, null, firedAt);
+          log.info('Expired scheduled series', { seriesId: series.series_id, expiresAt });
+          continue;
+        }
 
         if (!alreadyLive) {
           if (series.kind !== 'task') throw new Error(`unsupported scheduled series kind: ${series.kind}`);
@@ -68,7 +78,9 @@ export async function handleRecurrence(
           });
         }
 
-        const nextRun = await computeNextRun(series.recurrence, session.agent_group_id);
+        const computedNextRun = await computeNextRun(series.recurrence, session.agent_group_id);
+        const nextRun =
+          computedNextRun !== null && expiresAt !== null && computedNextRun >= expiresAt ? null : computedNextRun;
         advanceRecurrence(schedule, series.series_id, nextRun, firedAt);
         log.info('Advanced series', {
           seriesId: series.series_id,

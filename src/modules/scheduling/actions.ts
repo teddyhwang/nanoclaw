@@ -36,13 +36,19 @@ export async function handleScheduleTask(content: Record<string, unknown>, sessi
   const script = content.script as string | null;
   const processAfter = content.processAfter as string;
   const recurrence = (content.recurrence as string) || null;
+  const expiresAt = typeof content.expiresAt === 'string' ? content.expiresAt : null;
   // Optional dashboard-account id the agent captured from sender-identity
   // at schedule-time. Plugins use this at task.fired-time to stamp a
   // per-task identity so the task runs as the creator, not "whoever last
   // messaged the group." Pass-through field — engine never reads it.
   const createdByUserId = typeof content.createdByUserId === 'string' ? content.createdByUserId : null;
 
-  const taskContent = JSON.stringify({ prompt, script, createdByUserId });
+  const taskContent = JSON.stringify({
+    prompt,
+    script,
+    ...(expiresAt ? { expiresAt } : {}),
+    createdByUserId,
+  });
   const db = openScheduleDb(session.agent_group_id);
   try {
     upsertSeries(db, {
@@ -116,6 +122,9 @@ export async function handleUpdateTask(content: Record<string, unknown>, session
   }
   if (content.script === null || typeof content.script === 'string') {
     update.script = content.script as string | null;
+  }
+  if (content.expiresAt === null || typeof content.expiresAt === 'string') {
+    update.expiresAt = content.expiresAt as string | null;
   }
   const db = openScheduleDb(session.agent_group_id);
   let touched: number;

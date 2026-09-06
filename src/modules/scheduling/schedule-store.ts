@@ -252,6 +252,7 @@ export function resumeSeries(db: Database.Database, seriesId: string): number {
 export interface SeriesUpdate {
   prompt?: string;
   script?: string | null;
+  expiresAt?: string | null;
   recurrence?: string | null;
   processAfter?: string;
 }
@@ -274,10 +275,11 @@ export function updateSeries(db: Database.Database, seriesId: string, update: Se
   const sets: string[] = ['updated_at = @now'];
   const params: Record<string, unknown> = { seriesId, now: new Date().toISOString() };
 
-  if (update.prompt !== undefined || update.script !== undefined) {
+  if (update.prompt !== undefined || update.script !== undefined || update.expiresAt !== undefined) {
     const parsed = JSON.parse(row.content) as Record<string, unknown>;
     if (update.prompt !== undefined) parsed.prompt = update.prompt;
     if (update.script !== undefined) parsed.script = update.script;
+    if (update.expiresAt !== undefined) parsed.expiresAt = update.expiresAt;
     sets.push('content = @content');
     params.content = JSON.stringify(parsed);
   }

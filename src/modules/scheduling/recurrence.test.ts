@@ -176,6 +176,34 @@ describe('handleRecurrence', () => {
     expect(seriesRow('task-future').status).toBe('pending');
   });
 
+  it('cancels an expired recurring series without materializing it', async () => {
+    seedSeries(
+      'task-expired',
+      '0 9 * * *',
+      '2020-01-01T00:00:00.000Z',
+      JSON.stringify({ prompt: 'obsolete watch', expiresAt: '2020-01-02T00:00:00.000Z' }),
+    );
+
+    await sweep();
+
+    expect(inboundTaskRows()).toEqual([]);
+    expect(seriesRow('task-expired')).toMatchObject({ status: 'cancelled', process_after: null });
+  });
+
+  it('fires the last eligible occurrence then cancels when the next cron run reaches expiry', async () => {
+    seedSeries(
+      'task-last-run',
+      '0 9 * * *',
+      '2020-01-01T00:00:00.000Z',
+      JSON.stringify({ prompt: 'bounded watch', expiresAt: new Date(Date.now() + 60_000).toISOString() }),
+    );
+
+    await sweep();
+
+    expect(inboundTaskRows()).toHaveLength(1);
+    expect(seriesRow('task-last-run')).toMatchObject({ status: 'cancelled', process_after: null });
+  });
+
   it('does not stack a second occurrence while the prior fire is unconsumed', async () => {
     seedSeries('task-rec', '*/5 * * * *', '2020-01-01T00:00:00.000Z');
     await sweep();

@@ -113,6 +113,11 @@ export const scheduleTask: McpToolDefinition = {
           description:
             'Cron expression for recurring tasks (e.g., "0 9 * * 1-5" = weekdays at 9am user-local). Evaluated in the user\'s timezone.',
         },
+        expiresAt: {
+          type: 'string',
+          description:
+            'Optional end-exclusive ISO 8601 bound for a recurring task. No occurrence runs at or after this timestamp; the series cancels itself automatically. Use for event/deadline/trip watches.',
+        },
         script: {
           type: 'string',
           description: SCRIPT_FIELD_DESCRIPTION,
@@ -143,6 +148,16 @@ export const scheduleTask: McpToolDefinition = {
     const r = routing();
     const recurrence = (args.recurrence as string) || null;
     const script = (args.script as string) || null;
+    let expiresAt: string | null = null;
+    if (typeof args.expiresAt === 'string') {
+      try {
+        const d = parseZonedToUtc(args.expiresAt, TIMEZONE);
+        if (Number.isNaN(d.getTime())) return err(`invalid expiresAt: ${args.expiresAt}`);
+        expiresAt = d.toISOString();
+      } catch {
+        return err(`invalid expiresAt: ${args.expiresAt}`);
+      }
+    }
 
     // Write as a system action — host will insert into inbound.db
     await writeMessageOut({
@@ -158,6 +173,7 @@ export const scheduleTask: McpToolDefinition = {
         script,
         processAfter,
         recurrence,
+        expiresAt,
         platformId: r.platform_id,
         channelType: r.channel_type,
         threadId: r.thread_id,
@@ -195,9 +211,10 @@ export const listTasks: McpToolDefinition = {
     if (rows.length === 0) return ok('No tasks found.');
 
     const lines = rows.map((row) => {
-      const content = JSON.parse(row.content) as { prompt?: unknown };
+      const content = JSON.parse(row.content) as { prompt?: unknown; expiresAt?: unknown };
       const prompt = (typeof content.prompt === 'string' ? content.prompt : '').slice(0, 80);
-      return `- ${row.id} [${row.status}] at=${row.processAfter || 'now'} ${row.recurrence ? `recur=${row.recurrence} ` : ''}→ ${prompt}`;
+      const expiresAt = typeof content.expiresAt === 'string' ? content.expiresAt : null;
+      return `- ${row.id} [${row.status}] at=${row.processAfter || 'now'} ${row.recurrence ? `recur=${row.recurrence} ` : ''}${expiresAt ? `expires=${expiresAt} ` : ''}→ ${prompt}`;
     });
 
     return ok(lines.join('\n'));
@@ -325,6 +342,10 @@ export const updateTask: McpToolDefinition = {
           type: 'string',
           description: `New pre-agent script (optional). Pass empty string to clear. ${SCRIPT_FIELD_DESCRIPTION}`,
         },
+        expiresAt: {
+          type: 'string',
+          description: 'New end-exclusive ISO 8601 expiry (optional). Pass empty string to clear the expiry.',
+        },
       },
       required: ['taskId'],
     },
@@ -352,6 +373,18 @@ export const updateTask: McpToolDefinition = {
     // Empty string clears recurrence/script; undefined leaves them as-is.
     if (typeof args.recurrence === 'string') update.recurrence = args.recurrence === '' ? null : args.recurrence;
     if (typeof args.script === 'string') update.script = args.script === '' ? null : args.script;
+    if (typeof args.expiresAt === 'string') {
+      if (args.expiresAt === '') update.expiresAt = null;
+      else {
+        try {
+          const d = parseZonedToUtc(args.expiresAt, TIMEZONE);
+          if (Number.isNaN(d.getTime())) return err(`invalid expiresAt: ${args.expiresAt}`);
+          update.expiresAt = d.toISOString();
+        } catch {
+          return err(`invalid expiresAt: ${args.expiresAt}`);
+        }
+      }
+    }
 
     if (Object.keys(update).length === 1) return err('at least one field to update is required');
 

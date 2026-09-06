@@ -142,7 +142,11 @@ describe('schedule-store — series lifecycle (S405 structural fix)', () => {
     const db = freshDb();
     schedule(db, 'task-u', { recurrence: '*/5 * * * *', prompt: 'original' });
 
-    const touched = updateSeries(db, 'task-u', { prompt: 'updated', recurrence: '0 9 * * *' });
+    const touched = updateSeries(db, 'task-u', {
+      prompt: 'updated',
+      recurrence: '0 9 * * *',
+      expiresAt: '2026-09-06T00:00:00.000Z',
+    });
     expect(touched).toBe(1);
     const row = db.prepare(`SELECT content, recurrence FROM task_series WHERE series_id = ?`).get('task-u') as {
       content: string;
@@ -150,6 +154,7 @@ describe('schedule-store — series lifecycle (S405 structural fix)', () => {
     };
     expect(JSON.parse(row.content).prompt).toBe('updated');
     expect(JSON.parse(row.content).script).toBeNull(); // untouched
+    expect(JSON.parse(row.content).expiresAt).toBe('2026-09-06T00:00:00.000Z');
     expect(row.recurrence).toBe('0 9 * * *');
 
     cancelSeries(db, 'task-u');
