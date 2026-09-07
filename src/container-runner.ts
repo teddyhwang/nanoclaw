@@ -29,6 +29,7 @@ import { updateContainerConfigScalars } from './db/container-configs.js';
 import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';
 import { getDocsRoot, getSharedDreamSource } from './engine/composer-hooks.js';
 import { emitEngineEvent } from './engine/events.js';
+import { acquireSpawnAdmission } from './engine/spawn-admission.js';
 import { getEnginePaths, resolveGroupDir } from './engine/paths.js';
 import { getExtraSkillRoots } from './engine/skill-roots.js';
 import { composeGroupProjectDoc, DEFAULT_PROJECT_DOC } from './project-doc-compose.js';
@@ -146,8 +147,19 @@ export function wakeContainer(session: Session): Promise<boolean> {
     log.debug('Container wake already in-flight — joining existing promise', { sessionId: session.id });
     return existing;
   }
-  const promise = spawnContainer(session)
-    .then(() => true)
+  const promise = (async () => {
+    const release = await acquireSpawnAdmission(session, () => [...activeContainers.keys()]);
+    if (!release) {
+      log.debug('Container start deferred by admission guard', { sessionId: session.id });
+      return false;
+    }
+    try {
+      await spawnContainer(session);
+      return true;
+    } finally {
+      release();
+    }
+  })()
     .catch((err) => {
       log.warn('wakeContainer failed — host-sweep will retry', { sessionId: session.id, err });
       return false;

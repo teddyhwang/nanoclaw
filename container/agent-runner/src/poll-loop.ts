@@ -887,7 +887,11 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       // Everything else still completes: a non-retryable error is terminal
       // (re-running would just fail again), so we record the error fire and
       // move on as before.
-      if (errMsg.startsWith('retryable provider error, no result:')) {
+      const killedDream =
+        taskFireContexts.length > 0 &&
+        taskFireContexts.every((ctx) => ctx.seriesId.startsWith('dream-') && !ctx.written) &&
+        /Claude Code process exited with code 137\b/.test(errMsg);
+      if (errMsg.startsWith('retryable provider error, no result:') || killedDream) {
         retryableBatchFailure = true;
       }
 
@@ -990,7 +994,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       // enforce the same idempotent clear here before acknowledging its task
       // row. This preserves retry semantics: errored, result-less, and
       // shutdown-interrupted Dreams do not rotate.
-      const dreamRotation = enforceDreamSessionRotation(Boolean(config.isDreamRun), sawResult);
+      const dreamRotation = enforceDreamSessionRotation(
+        Boolean(config.isDreamRun),
+        sawResult && !taskFireContexts.some((ctx) => ctx.errorMessage),
+      );
       if (dreamRotation !== null) {
         const cleared = dreamRotation;
         log(`Dream pass complete — enforced session rotation (${cleared} tracking row(s) cleared)`);
@@ -1086,6 +1093,7 @@ export interface TaskFireContext {
   // path (finally) so a task can never produce two rows.
   dispatched: TaskFireDispatch[];
   assistantText: string | null;
+  errorMessage?: string;
   written: boolean;
 }
 
@@ -1324,9 +1332,10 @@ export async function processQuery(
           id: generateId(),
           seriesId: ctx.seriesId,
           taskId: ctx.taskId,
-          status: ctx.dispatched.length > 0 ? 'completed' : 'silent',
+          status: ctx.errorMessage ? 'error' : ctx.dispatched.length > 0 ? 'completed' : 'silent',
           assistantText: ctx.assistantText,
           dispatched: ctx.dispatched,
+          errorMessage: ctx.errorMessage,
         });
         ctx.written = true;
       } catch (err) {
@@ -1983,6 +1992,13 @@ export async function processQuery(
           // (send_message) mid-turn, or the message may not need a response
           // at all — either way the turn is finished.
           //
+          // Error results are terminal, but never successful/silent fires.
+          // Telegram Dream 2026-08-26 returned a gateway 502 as a result;
+          // telemetry previously labelled it silent and hid the failure.
+          if (event.isError) {
+            const ctx = mostRecentTaskContext();
+            if (ctx) ctx.errorMessage = event.text || 'Provider returned an error result';
+          }
           const resultAddressed = pushAddressed[resultIndex] ?? false;
           const resultSuperseded = pushSuperseded[resultIndex] ?? false;
           resultIndex++;
@@ -2222,6 +2238,15 @@ export async function processQuery(
       }
     } catch (err) {
       streamErrored = true;
+      // Claude can emit a retryable API error and then THROW when its CLI
+      // dies (e.g. exit 137). That bypasses the normal iterator-close check
+      // above. Preserve the retry decision instead of acknowledging a failed
+      // occurrence as complete. Never replay a turn that already had a result.
+      if (retryableErrorWithoutResult && resultIndex === 0) {
+        const detail = err instanceof Error ? err.message : String(err);
+        if (detail.startsWith('retryable provider error, no result:')) throw err;
+        throw new Error(`retryable provider error, no result: ${detail}`, { cause: err });
+      }
       throw err;
     }
   } catch (err) {

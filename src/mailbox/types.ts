@@ -170,8 +170,17 @@ export interface InboundMailbox {
   findTaskBySeriesSlug(slug: string): TaskRecord | undefined;
 }
 
+/** Outcome telemetry without assistant text or raw provider diagnostics. */
+export interface TaskFireOutcome {
+  taskId: string;
+  firedAt: string;
+  status: string;
+  hasOutput: boolean;
+}
+
 /** Host-visible outbound mailbox behavior. Storage layout and lifecycle are implementation-private. */
 export interface OutboundMailbox {
+  getLatestTaskFire(seriesId: string): TaskFireOutcome | undefined;
   getTerminalProcessingAcks(): ProcessingAck[];
   getProcessingClaims(): ProcessingClaim[];
   deleteOrphanProcessingClaims(): number;

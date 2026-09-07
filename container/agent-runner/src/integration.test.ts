@@ -798,6 +798,105 @@ describe('poll loop integration', () => {
     expect(getUndeliveredMessages()).toHaveLength(0);
   });
 
+  it.each([
+    [false, true],
+    [true, true],
+    [false, false],
+  ])('preserves retryability on CLI kill (result=%s retryEvent=%s)', async (resultSeen, retryEvent) => {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, series_id, content)
+       VALUES ('t-killed', 'task', datetime('now'), 'pending', 'dream-test', '{"prompt":"maintenance"}')`,
+      )
+      .run();
+    class KilledProvider extends MockProvider {
+      override query(input: Parameters<MockProvider['query']>[0]) {
+        const query = super.query(input);
+        return {
+          ...query,
+          events: {
+            async *[Symbol.asyncIterator]() {
+              if (retryEvent) yield { type: 'error' as const, message: 'API retry', retryable: true };
+              if (resultSeen) yield { type: 'result' as const, text: '<internal>done</internal>' };
+              throw new Error('Claude Code process exited with code 137. stderr: Killed');
+            },
+          },
+        };
+      }
+    }
+    const controller = new AbortController();
+    const loop = runPollLoopWithTimeout(new KilledProvider(), controller.signal, 2000);
+    if (resultSeen) {
+      await waitFor(
+        () =>
+          (
+            getOutboundDb().prepare("SELECT status FROM processing_ack WHERE message_id = 't-killed'").get() as {
+              status: string;
+            }
+          )?.status === 'completed',
+        1000,
+      );
+      controller.abort();
+    }
+    if (resultSeen) await loop.catch(() => {});
+    else await expect(loop).resolves.toBeUndefined();
+    const ack = getOutboundDb().prepare("SELECT status FROM processing_ack WHERE message_id = 't-killed'").get() as {
+      status: string;
+    };
+    expect(ack.status).toBe(resultSeen ? 'completed' : 'processing');
+    const fires = getOutboundDb().prepare('SELECT status, error_message FROM task_fires').all() as Array<{
+      status: string;
+      error_message: string | null;
+    }>;
+    expect(fires).toHaveLength(1);
+    expect(fires[0].status).toBe(resultSeen ? 'silent' : 'error');
+    if (!resultSeen) expect(fires[0].error_message).toContain('Claude Code process exited with code 137');
+    expect(getUndeliveredMessages().filter((m) => m.kind === 'chat')).toHaveLength(0);
+  });
+
+  it.each(['API Error: 502 gateway failure', null])(
+    'records terminal provider error results as failed fires (%s)',
+    async (text) => {
+      getInboundDb()
+        .prepare(
+          `INSERT INTO messages_in (id, kind, timestamp, status, series_id, content)
+      VALUES ('t-error-result', 'task', datetime('now'), 'pending', 'dream-test', '{"prompt":"maintenance"}')`,
+        )
+        .run();
+      class ErrorResultProvider extends MockProvider {
+        override query(input: Parameters<MockProvider['query']>[0]) {
+          return {
+            ...super.query(input),
+            events: {
+              async *[Symbol.asyncIterator]() {
+                yield { type: 'result' as const, text, isError: true };
+              },
+            },
+          };
+        }
+      }
+      const controller = new AbortController();
+      const loop = runPollLoop({
+        provider: new ErrorResultProvider(),
+        providerName: 'mock',
+        cwd: '/tmp',
+        signal: controller.signal,
+        isDreamRun: true,
+      });
+      await waitFor(
+        () => (getOutboundDb().prepare('SELECT COUNT(*) AS n FROM task_fires').get() as { n: number }).n > 0,
+        2000,
+      );
+      controller.abort();
+      await loop.catch(() => {});
+      expect(getOutboundDb().prepare('SELECT status, error_message FROM task_fires').get()).toEqual({
+        status: 'error',
+        error_message: text ?? 'Provider returned an error result',
+      });
+      expect(getUndeliveredMessages().filter((m) => m.kind === 'chat')).toHaveLength(0);
+    },
+  );
+
   it('retryable provider error with no result leaves chat pending without leaking the error to outbound', async () => {
     insertMessage(
       'm-retry-chat',

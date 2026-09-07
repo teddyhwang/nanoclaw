@@ -11,6 +11,25 @@ describe('SQLite mailbox canonical serialization', () => {
     for (const database of databases.splice(0)) database.close();
   });
 
+  it('reads latest per-series fire telemetry, normalizes UTC and tolerates old mailboxes', () => {
+    const db = new Database(':memory:');
+    databases.push(db);
+    const mailbox = wrapSqliteOutbound(db);
+    expect(mailbox.getLatestTaskFire('dream-test')).toBeUndefined();
+    db.exec(`CREATE TABLE task_fires (task_id TEXT, series_id TEXT, fired_at TEXT, status TEXT, assistant_text TEXT);
+      INSERT INTO task_fires VALUES ('a', 'dream-test', '2026-09-06 08:01:00', 'error', NULL);
+      INSERT INTO task_fires VALUES ('a', 'dream-test', '2026-09-06 08:01:00', 'silent', 'summary');
+      INSERT INTO task_fires VALUES ('b', 'other', '2026-09-06 08:02:00', 'error', NULL);`);
+    expect(mailbox.getLatestTaskFire('dream-test')).toEqual({
+      taskId: 'a',
+      firedAt: '2026-09-06T08:01:00.000Z',
+      status: 'silent',
+      hasOutput: true,
+    });
+    expect(mailbox.getLatestTaskFire('other')?.hasOutput).toBe(false);
+    expect(mailbox.getLatestTaskFire('missing')).toBeUndefined();
+  });
+
   it('round-trips full lifecycle records through the SQLite adapter', async () => {
     const inboundDb = new Database(':memory:');
     const outboundDb = new Database(':memory:');

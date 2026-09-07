@@ -76,6 +76,7 @@ import type {
   ProcessingAck,
   TaskRecord,
   TaskStats,
+  TaskFireOutcome,
 } from '../types.js';
 
 const SQLITE_TIMESTAMP = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/;
@@ -367,6 +368,19 @@ export function wrapSqliteOutbound(
 ): OutboundMailbox {
   const readable = () => (typeof source === 'function' ? source() : source);
   return {
+    getLatestTaskFire: (seriesId) => {
+      const db = readable();
+      // Old mailboxes predate runner-owned telemetry. Missing is not success.
+      if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_fires'").get()) return undefined;
+      const row = db
+        .prepare(
+          `SELECT task_id AS taskId, fired_at AS firedAt, status,
+                length(trim(coalesce(assistant_text, ''))) > 0 AS hasOutput
+           FROM task_fires WHERE series_id = ? ORDER BY fired_at DESC, rowid DESC LIMIT 1`,
+        )
+        .get(seriesId) as (Omit<TaskFireOutcome, 'hasOutput'> & { hasOutput: number }) | undefined;
+      return row && { ...row, firedAt: sqliteTimestamp(row.firedAt), hasOutput: Boolean(row.hasOutput) };
+    },
     getTerminalProcessingAcks: () =>
       (
         readable()

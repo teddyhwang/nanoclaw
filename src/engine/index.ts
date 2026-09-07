@@ -308,3 +308,5 @@ export {
 // precedence that also includes group admins).
 export { getOwners, getGlobalAdmins } from '../modules/permissions/db/user-roles.js';
 export type { UserRole } from '../types.js';
+
+export { addSpawnAdmissionGuard, type SpawnAdmissionGuard } from './spawn-admission.js';
