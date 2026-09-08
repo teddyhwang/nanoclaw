@@ -129,13 +129,29 @@ export function shouldKeepaliveBridge(args: { lastEventAt: number; now: number; 
  * consumed remain deliverable history, while task/system pushes retain their
  * independent delivery semantics.
  */
-export function supersedeCurrentChatPush(superseded: boolean[], resultIndex: number, providerName = 'codex'): void {
+export function supersedeCurrentChatPush(superseded: boolean[], resultIndex: number, providerName = 'codex'): boolean {
   // Codex queues push() as a subsequent turn. Claude's streaming input can
   // instead fold the new user message into the pending result. Suppressing
   // that result drops the fully updated answer and leaves no later result to
   // deliver (Danielle DM, 2026-08-25).
-  if (providerName === 'codex' && resultIndex < superseded.length) superseded[resultIndex] = true;
+  if (providerName !== 'codex' || resultIndex >= superseded.length) return false;
+  superseded[resultIndex] = true;
+  return true;
 }
+
+// Inject at push time, not result time: Codex starts the queued turn as soon
+// as its previous turn completes, before the runner can feed back a receipt.
+// The old answer remains in the provider transcript even though dispatch will
+// withhold it. Without this notice the next turn can say "see above" about an
+// answer the user never received (Teddy Telegram, 2026-09-08).
+const SUPERSEDED_RESPONSE_NOTICE =
+  '<system>An earlier in-flight final response was not delivered: the runner is withholding it because this ' +
+  'follow-up arrived before completion. Its generated text may still appear in your transcript; that is not ' +
+  'proof of delivery. Reconcile the original request with the new information and provide a self-contained ' +
+  'answer, including all still-relevant analysis from the withheld response in <message to="name"> blocks. ' +
+  'Do not refer to the withheld answer as "above", already sent, or received. Separately tool-sent messages ' +
+  'may already have been delivered; this notice applies only to the withheld final response. ' +
+  'Do not repeat completed tool actions or side effects just to resend their explanation.</system>';
 
 /**
  * Pure batch-selection for the initial wake. Decides which rows ride
@@ -1825,7 +1841,7 @@ export async function processQuery(
         }
 
         const keptIds = keep.map((m) => m.id);
-        const prompt = formatMessages(keep);
+        let prompt = formatMessages(keep);
         // Load inbound image attachments for the follow-up batch too —
         // operator can drop a screenshot mid-turn and the agent should see
         // it without waiting for a fresh query. Same /workspace/inbox/ path
@@ -1865,8 +1881,11 @@ export async function processQuery(
           .map((m) => taskFireContexts.find((c) => c.taskId === m.id))
           .filter((c): c is TaskFireContext => c !== undefined);
         registerPushContexts(pushTaskContexts);
-        if (keep.some((m) => m.kind === 'chat' || m.kind === 'chat-sdk')) {
-          supersedeCurrentChatPush(pushSuperseded, resultIndex, providerName);
+        if (
+          keep.some((m) => m.kind === 'chat' || m.kind === 'chat-sdk') &&
+          supersedeCurrentChatPush(pushSuperseded, resultIndex, providerName)
+        ) {
+          prompt += `\n${SUPERSEDED_RESPONSE_NOTICE}`;
         }
         pushAddressed.push(isAddressedTurn(keep, assistantName));
         pushSuperseded.push(false);

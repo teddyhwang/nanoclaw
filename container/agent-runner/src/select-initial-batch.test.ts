@@ -110,19 +110,27 @@ describe('selectInitialBatch', () => {
 describe('supersedeCurrentChatPush', () => {
   it('marks the unresolved provider push stale when a chat follow-up arrives', () => {
     const superseded = [false];
-    supersedeCurrentChatPush(superseded, 0);
+    expect(supersedeCurrentChatPush(superseded, 0)).toBe(true);
     expect(superseded).toEqual([true]);
   });
 
   it('does not rewrite an already-consumed push', () => {
     const superseded = [false];
-    supersedeCurrentChatPush(superseded, 1);
+    expect(supersedeCurrentChatPush(superseded, 1)).toBe(false);
     expect(superseded).toEqual([false]);
+  });
+
+  it('notifies each queued follow-up while the unresolved result is withheld', () => {
+    const superseded = [false];
+    expect(supersedeCurrentChatPush(superseded, 0)).toBe(true);
+    superseded.push(false);
+    expect(supersedeCurrentChatPush(superseded, 0)).toBe(true);
+    expect(superseded).toEqual([true, false]);
   });
 
   it('keeps Claude results deliverable because pushed input can join the pending result', () => {
     const superseded = [false];
-    supersedeCurrentChatPush(superseded, 0, 'claude');
+    expect(supersedeCurrentChatPush(superseded, 0, 'claude')).toBe(false);
     expect(superseded).toEqual([false]);
   });
 });

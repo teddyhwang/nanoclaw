@@ -193,6 +193,7 @@ describe('poll loop integration', () => {
     const chat = getUndeliveredMessages().filter((row) => row.kind === 'chat');
     expect(chat).toHaveLength(1);
     expect(JSON.parse(chat[0].content).text).toBe('3-day meal plan');
+    expect(provider.pushedPrompts[0]).not.toContain('was not delivered');
 
     controller.abort();
     await loopPromise.catch(() => {});
@@ -231,6 +232,88 @@ describe('poll loop integration', () => {
 
     controller.abort();
     await loopPromise.catch(() => {});
+  });
+
+  it('tells a superseding Telegram follow-up to re-emit the withheld multi-block answer, not refer to it as delivered', async () => {
+    // Teddy Telegram 2026-09-08: #996 supplied a sheet; #998 requested Google
+    // while the analysis was running. Both result blocks were suppressed, but
+    // Codex retained them in its transcript and replied "the analysis above".
+    getInboundDb().exec("UPDATE destinations SET channel_type='telegram', platform_id='telegram:123'");
+    insertMessage(
+      'm-sheet',
+      { sender: 'Teddy', text: 'Analyse this rental spreadsheet' },
+      {
+        platformId: 'telegram:123',
+        channelType: 'telegram',
+      },
+    );
+    const blocks =
+      '<message to="discord-test">Property analysis</message>\n' +
+      '<message to="discord-test">Portfolio analysis</message>';
+    const provider = new SupersededResultProvider(blocks, (prompt) =>
+      prompt.includes('was not delivered') && prompt.includes('self-contained')
+        ? blocks
+        : '<message to="discord-test">The analysis above comes from Google.</message>',
+    );
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 3000, 'codex');
+    try {
+      await waitFor(() => provider.queries === 1, 1000);
+      insertMessage(
+        'm-google',
+        { sender: 'Teddy', text: 'Use my Google Drive integration' },
+        {
+          platformId: 'telegram:123',
+          channelType: 'telegram',
+        },
+      );
+      await waitFor(() => provider.pushes === 1, 1500);
+      const prompt = provider.pushedPrompts[0];
+      expect(prompt).toContain('was not delivered');
+      expect(prompt).toContain('Use my Google Drive integration');
+      expect(prompt).toContain('self-contained');
+      expect(prompt).toContain('Do not repeat completed tool actions');
+      provider.releaseResults();
+      await waitFor(() => getUndeliveredMessages().some((row) => row.kind === 'chat'), 1500);
+      const rows = getUndeliveredMessages().filter((row) => row.kind === 'chat');
+      expect(rows.map((row) => JSON.parse(row.content).text)).toEqual(['Property analysis', 'Portfolio analysis']);
+      expect(rows.every((row) => row.channel_type === 'telegram' && row.in_reply_to === 'm-google')).toBe(true);
+      // Outbox persistence is not a platform receipt; never call this delivered.
+      expect(getInboundDb().query('SELECT * FROM delivered').all()).toEqual([]);
+    } finally {
+      controller.abort();
+      await loopPromise.catch(() => {});
+    }
+  });
+
+  it('does not claim a completed Codex answer was withheld when the next chat arrives afterward', async () => {
+    insertMessage(
+      'm-first',
+      { sender: 'Teddy', text: 'First request' },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
+    const prompts: string[] = [];
+    const provider = new MockProvider({}, (prompt) => {
+      prompts.push(prompt);
+      return `<message to="discord-test">Answer ${prompts.length}</message>`;
+    });
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 3000, 'codex');
+    try {
+      await waitFor(() => getUndeliveredMessages().length === 1, 1000);
+      insertMessage(
+        'm-next',
+        { sender: 'Teddy', text: 'Next request' },
+        { platformId: 'chan-1', channelType: 'discord' },
+      );
+      await waitFor(() => getUndeliveredMessages().length === 2, 1500);
+      expect(prompts).toHaveLength(2);
+      expect(prompts[1]).toContain('Next request');
+      expect(prompts[1]).not.toContain('was not delivered');
+    } finally {
+      controller.abort();
+      await loopPromise.catch(() => {});
+    }
   });
 
   it('keeps a wrapping retry open when accumulate-only chat arrives before the retry result', async () => {
@@ -1854,6 +1937,13 @@ class SupersededResultProvider {
   readonly supportsNativeSlashCommands = false;
   queries = 0;
   pushes = 0;
+  pushedPrompts: string[] = [];
+
+  constructor(
+    private readonly firstResponse = '<message to="discord-test">details missing</message>',
+    private readonly followUpResponse = (_prompt: string) =>
+      '<message to="discord-test">labels created from the order details</message>',
+  ) {}
   private released = false;
   private wake: (() => void) | null = null;
 
@@ -1872,7 +1962,8 @@ class SupersededResultProvider {
     let ended = false;
     let aborted = false;
     return {
-      push() {
+      push(prompt: string) {
+        owner.pushedPrompts.push(prompt);
         owner.pushes += 1;
         owner.wake?.();
       },
@@ -1893,10 +1984,10 @@ class SupersededResultProvider {
           owner.wake = null;
         }
         if (ended || aborted) return;
-        yield { type: 'result' as const, text: '<message to="discord-test">details missing</message>' };
+        yield { type: 'result' as const, text: owner.firstResponse };
         yield {
           type: 'result' as const,
-          text: '<message to="discord-test">labels created from the order details</message>',
+          text: owner.followUpResponse(owner.pushedPrompts[0] ?? ''),
         };
         while (!ended && !aborted) {
           await new Promise<void>((resolve) => {
@@ -1913,6 +2004,7 @@ class MergedFollowUpProvider {
   readonly supportsNativeSlashCommands = false;
   queries = 0;
   pushes = 0;
+  pushedPrompts: string[] = [];
   private released = false;
   private wake: (() => void) | null = null;
 
@@ -1931,7 +2023,8 @@ class MergedFollowUpProvider {
     let ended = false;
     let aborted = false;
     return {
-      push() {
+      push(prompt: string) {
+        owner.pushedPrompts.push(prompt);
         owner.pushes += 1;
       },
       end() {
