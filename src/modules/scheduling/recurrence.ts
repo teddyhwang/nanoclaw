@@ -10,6 +10,7 @@ import type Database from 'better-sqlite3';
 
 import { resolveGroupTimezone } from '../../container-config.js';
 import { log } from '../../log.js';
+import { mayMaterializeTask } from '../../engine/task-materialization.js';
 import type { InboundMailbox } from '../../mailbox/index.js';
 import type { Session } from '../../types.js';
 import { advanceRecurrence, getDueSeries, openScheduleDb, type TaskSeriesRow } from './schedule-store.js';
@@ -51,6 +52,20 @@ export async function handleRecurrence(
         if (expiresAt !== null && firedAt >= expiresAt) {
           advanceRecurrence(schedule, series.series_id, null, firedAt);
           log.info('Expired scheduled series', { seriesId: series.series_id, expiresAt });
+          continue;
+        }
+
+        if (!alreadyLive && !(await mayMaterializeTask(series, session))) {
+          // A deliberate no-op is not a fire: preserve last_fired_at and write
+          // neither an occurrence nor task telemetry/logs. Re-evaluate next tick.
+          const nextRun = await computeNextRun(series.recurrence, session.agent_group_id);
+          const retired = nextRun === null || (expiresAt !== null && nextRun >= expiresAt);
+          schedule
+            .prepare(
+              `UPDATE task_series SET process_after = ?, status = ?, updated_at = ?
+            WHERE series_id = ?`,
+            )
+            .run(retired ? null : nextRun, retired ? 'cancelled' : 'pending', firedAt, series.series_id);
           continue;
         }
 

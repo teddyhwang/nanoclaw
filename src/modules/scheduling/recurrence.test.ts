@@ -14,6 +14,8 @@ vi.mock('../../log.js', () => ({
 import { wrapSqliteInbound } from '../../mailbox/sqlite/index.js';
 import { ensureSchema, openInboundDb } from '../../mailbox/sqlite/session-db.js';
 import type { Session } from '../../types.js';
+import { addTaskMaterializationGuard } from '../../engine/task-materialization.js';
+import { log } from '../../log.js';
 import { handleRecurrence } from './recurrence.js';
 import { listLiveSeries, openScheduleDbAt, updateSeries, upsertSeries } from './schedule-store.js';
 
@@ -257,6 +259,55 @@ describe('S405 task-series projection', () => {
     } finally {
       schedule.close();
       inbound.close();
+    }
+  });
+});
+
+describe('host eligibility guard', () => {
+  it('skips silently before materialization, preserves the last real fire, and rechecks after activity', async () => {
+    seedSeries('dream-test', '0 4 * * *', '2020-01-01T00:00:00Z');
+    const schedule = openSchedule();
+    schedule.prepare("UPDATE task_series SET last_fired_at = '2020-01-01T00:00:00Z'").run();
+    let eligible = false;
+    const remove = addTaskMaterializationGuard(() => eligible);
+    try {
+      vi.mocked(log.info).mockClear();
+      vi.mocked(log.debug).mockClear();
+      await sweep();
+      const inbound = openInboundDb(IN_DB);
+      expect(inbound.prepare('SELECT count(*) AS n FROM messages_in').get()).toEqual({ n: 0 });
+      expect(log.info).not.toHaveBeenCalled();
+      expect(log.debug).not.toHaveBeenCalled();
+      expect(schedule.prepare('SELECT status, last_fired_at FROM task_series').get()).toEqual({
+        status: 'pending',
+        last_fired_at: '2020-01-01T00:00:00Z',
+      });
+      eligible = true;
+      schedule.prepare("UPDATE task_series SET process_after = '2020-01-01T00:00:00Z'").run();
+      await sweep();
+      expect(inbound.prepare('SELECT count(*) AS n FROM messages_in').get()).toEqual({ n: 1 });
+      inbound.close();
+    } finally {
+      remove();
+      schedule.close();
+    }
+  });
+
+  it('does not swallow lookup errors or consume their due occurrence', async () => {
+    seedSeries('guard-failure', '0 4 * * *', '2020-01-01T00:00:00Z');
+    const remove = addTaskMaterializationGuard(() => {
+      throw new Error('history unavailable');
+    });
+    try {
+      await sweep();
+      const schedule = openSchedule();
+      expect(schedule.prepare('SELECT process_after, last_fired_at FROM task_series').get()).toEqual({
+        process_after: '2020-01-01T00:00:00Z',
+        last_fired_at: null,
+      });
+      schedule.close();
+    } finally {
+      remove();
     }
   });
 });

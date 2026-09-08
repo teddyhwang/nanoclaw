@@ -310,3 +310,5 @@ export { getOwners, getGlobalAdmins } from '../modules/permissions/db/user-roles
 export type { UserRole } from '../types.js';
 
 export { addSpawnAdmissionGuard, type SpawnAdmissionGuard } from './spawn-admission.js';
+
+export { addTaskMaterializationGuard, type TaskMaterializationGuard } from './task-materialization.js';
