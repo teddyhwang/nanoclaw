@@ -201,6 +201,15 @@ export interface McpHttpServerConfig {
 
 export interface AgentQuery {
   /**
+   * Optional live delivery contract for a query that switches harnesses.
+   * Read at dispatch/push time, not once at query creation: quota failover can
+   * change both the text delivery door and queued-vs-merged follow-up semantics.
+   * This names the active harness only; continuation storage remains owned by
+   * the standing provider. Not a delivery receipt or permission to send text.
+   */
+  readonly delivery?: { providerName: string; emitsMidTurnText: boolean };
+
+  /**
    * Push a follow-up message into the active query. The poll loop supplies
    * `ImageContentBlock[]`; providers may narrow this to their native attachment
    * view (OpenCode uses local file descriptors). Initial-query images remain

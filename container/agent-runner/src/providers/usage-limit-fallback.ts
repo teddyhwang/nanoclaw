@@ -97,6 +97,8 @@ export class UsageLimitFallbackProvider implements AgentProvider {
     let activeProvider = this.preferFallback ? this.fallback : this.primary;
     let activeQuery = activeProvider.query(activeProvider === this.fallback ? fallbackInput() : input);
     const fallbackProvider = this.fallback;
+    const primaryName = this.primaryName;
+    const fallbackName = this.fallbackName;
     const dualLimitText =
       `Both ${this.primaryName} and ${this.fallbackName} have reached their usage limits. ` +
       'Please try again after one of the limits resets.';
@@ -162,6 +164,18 @@ export class UsageLimitFallbackProvider implements AgentProvider {
     }
 
     return {
+      // A static capability on the wrapper loses one side of Claude↔Codex:
+      // Claude must stream pre-tool replies, while Codex's text events must
+      // remain inert until its final result. Forward the active query's
+      // contract (including nested wrappers) without leaking its continuation.
+      get delivery() {
+        return (
+          activeQuery.delivery ?? {
+            providerName: activeProvider === fallbackProvider ? fallbackName : primaryName,
+            emitsMidTurnText: activeProvider.emitsMidTurnText === true,
+          }
+        );
+      },
       push: (message, imageBlocks) => {
         followups.push({ message, imageBlocks });
         activeQuery.push(message, imageBlocks);

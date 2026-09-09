@@ -1208,7 +1208,9 @@ export async function processQuery(
     : onExchangeCompleteArg;
   const initialPrompt = upstreamCallShape ? (addressedOrPrompt as string) : initialPromptArg;
   const initialContinuation = upstreamCallShape ? assistantNameOrContinuation : initialContinuationArg;
-  const emitsMidTurnText = upstreamCallShape ? taskFireContextsOrCapability === true : emitsMidTurnTextArg;
+  const defaultMidTurnText = upstreamCallShape ? taskFireContextsOrCapability === true : emitsMidTurnTextArg;
+  const activeProviderName = (): string => query.delivery?.providerName ?? providerName;
+  let textProviderName = activeProviderName();
   let queryContinuation: string | undefined;
   let done = false;
   let unwrappedNudged = false;
@@ -1883,7 +1885,7 @@ export async function processQuery(
         registerPushContexts(pushTaskContexts);
         if (
           keep.some((m) => m.kind === 'chat' || m.kind === 'chat-sdk') &&
-          supersedeCurrentChatPush(pushSuperseded, resultIndex, providerName)
+          supersedeCurrentChatPush(pushSuperseded, resultIndex, activeProviderName())
         ) {
           prompt += `\n${SUPERSEDED_RESPONSE_NOTICE}`;
         }
@@ -1972,6 +1974,16 @@ export async function processQuery(
       // in the finally below AND an 'error' row in the outer caller's
       // catch, double-counting the fire.
       for await (const event of query.events) {
+        // Failover may switch harnesses inside the same query. Do not cache
+        // the standing provider's delivery mode or assemble a partial tag
+        // across two independent harness attempts. Keep successful sends for
+        // dedup/fallback accounting; switching is not a new user turn.
+        const deliveryProviderName = activeProviderName();
+        const emitsMidTurnText = query.delivery?.emitsMidTurnText ?? defaultMidTurnText;
+        if (deliveryProviderName !== textProviderName) {
+          midTurnTail = '';
+          textProviderName = deliveryProviderName;
+        }
         await handleEvent(event, routing);
         touchHeartbeat();
         lastEventAt = Date.now();
@@ -2019,7 +2031,9 @@ export async function processQuery(
             if (ctx) ctx.errorMessage = event.text || 'Provider returned an error result';
           }
           const resultAddressed = pushAddressed[resultIndex] ?? false;
-          const resultSuperseded = pushSuperseded[resultIndex] ?? false;
+          // A queued Codex push may have been replayed into Claude during
+          // failover; Claude can merge it into this very result.
+          const resultSuperseded = deliveryProviderName === 'codex' && (pushSuperseded[resultIndex] ?? false);
           resultIndex++;
           markCompleted(initialBatchIds);
           if (resultSuperseded) {
