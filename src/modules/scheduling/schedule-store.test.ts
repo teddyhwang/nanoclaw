@@ -196,3 +196,82 @@ describe('schedule-store — series lifecycle (S405 structural fix)', () => {
     db.close();
   });
 });
+
+describe('schedule-store timestamp boundaries', () => {
+  const instant = '2026-09-10T17:20:00.000Z';
+  const equivalents = ['2026-09-10T13:20:00-04:00', '2026-09-10T22:50:00+05:30', '2026-09-10T17:20:00Z', instant];
+
+  it.each(equivalents)('canonicalizes writes without changing the instant: %s', (value) => {
+    const db = freshDb();
+    try {
+      schedule(db, 'task', { processAfter: value });
+      expect(db.prepare('SELECT process_after FROM task_series').get()).toEqual({ process_after: instant });
+      updateSeries(db, 'task', { processAfter: value });
+      expect(db.prepare('SELECT process_after FROM task_series').get()).toEqual({ process_after: instant });
+    } finally {
+      db.close();
+    }
+  });
+
+  it.each(equivalents)('reads legacy rows as canonical snapshots and fires at the exact instant: %s', (value) => {
+    const db = freshDb();
+    try {
+      schedule(db, 'task', { processAfter: instant });
+      db.prepare('UPDATE task_series SET process_after = ?').run(value);
+      expect(listLiveSeries(db)[0].process_after).toBe(instant);
+      expect(getDueSeries(db, '2026-09-10T17:19:59.999Z')).toEqual([]);
+      expect(getDueSeries(db, instant).map((row) => row.series_id)).toEqual(['task']);
+      expect(getDueSeries(db, instant)[0].process_after).toBe(instant);
+      // Projection/selection must not rewrite the source schedule or advance it.
+      expect(db.prepare('SELECT process_after, status, last_fired_at FROM task_series').get()).toEqual({
+        process_after: value,
+        status: 'pending',
+        last_fired_at: null,
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it.each(['garbage', '', '2026-09-10', '2026-09-10T13:20:00', '2026-02-30T13:20:00Z'])(
+    'rejects invalid/ambiguous timestamps before any write: %s',
+    (value) => {
+      const db = freshDb();
+      try {
+        expect(() => schedule(db, 'invalid', { processAfter: value })).toThrow();
+        expect(hasSeries(db, 'invalid')).toBe(false);
+        schedule(db, 'valid', { processAfter: instant, prompt: 'original' });
+        expect(() => updateSeries(db, 'valid', { processAfter: value, prompt: 'changed' })).toThrow();
+        expect(JSON.parse(listLiveSeries(db)[0].content).prompt).toBe('original');
+        expect(listLiveSeries(db)[0].process_after).toBe(instant);
+      } finally {
+        db.close();
+      }
+    },
+  );
+
+  it('orders legacy offsets chronologically and preserves null/paused semantics', () => {
+    const db = freshDb();
+    try {
+      schedule(db, 'later', { processAfter: instant });
+      schedule(db, 'earlier', { processAfter: instant });
+      schedule(db, 'paused', { processAfter: instant });
+      schedule(db, 'null', { processAfter: instant });
+      db.prepare('UPDATE task_series SET process_after = ? WHERE series_id = ?').run(
+        '2026-09-10T13:20:00-04:00',
+        'later',
+      );
+      db.prepare('UPDATE task_series SET process_after = ? WHERE series_id = ?').run(
+        '2026-09-10T19:00:00+05:30',
+        'earlier',
+      );
+      pauseSeries(db, 'paused');
+      db.prepare("UPDATE task_series SET process_after = NULL WHERE series_id = 'null'").run();
+      expect(getDueSeries(db, '2026-09-10T18:00:00Z').map((r) => r.series_id)).toEqual(['earlier', 'later']);
+      expect(listLiveSeries(db).find((r) => r.series_id === 'null')?.process_after).toBeNull();
+      expect(listLiveSeries(db).find((r) => r.series_id === 'paused')?.status).toBe('paused');
+    } finally {
+      db.close();
+    }
+  });
+});

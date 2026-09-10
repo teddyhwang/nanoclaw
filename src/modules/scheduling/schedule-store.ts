@@ -39,6 +39,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { sessionsBaseDir } from '../../session-manager.js';
+import { parseIsoTimestamp, type IsoTimestamp } from '../../mailbox/model.js';
 
 export type SeriesStatus = 'pending' | 'paused' | 'cancelled';
 
@@ -122,6 +123,23 @@ export function openScheduleDb(agentGroupId: string): Database.Database {
   return openScheduleDbAt(sessionsBaseDir(), agentGroupId);
 }
 
+/** Accept zoned ISO input, but persist/project the mailbox's exact UTC shape.
+ * Reject naive dates and calendar rollovers rather than guessing a timezone. */
+function scheduleTimestamp(value: string): IsoTimestamp {
+  const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d{1,3}))?(Z|[+-]\d{2}:\d{2})$/.exec(value);
+  if (!match) throw new Error('invalid scheduled timestamp: expected zoned ISO-8601 timestamp');
+  // Date.parse silently rolls February 30 into March. Validate the local
+  // calendar portion independently before converting its explicit offset.
+  parseIsoTimestamp(`${match[1]}.${(match[2] ?? '').padEnd(3, '0')}Z`);
+  const milliseconds = Date.parse(value);
+  if (!Number.isFinite(milliseconds)) throw new Error('invalid scheduled timestamp');
+  return parseIsoTimestamp(new Date(milliseconds).toISOString());
+}
+
+function canonicalSeries(row: TaskSeriesRow): TaskSeriesRow {
+  return { ...row, process_after: row.process_after === null ? null : scheduleTimestamp(row.process_after) };
+}
+
 /** Schedule a new (or replace an existing) task series. */
 export function upsertSeries(
   db: Database.Database,
@@ -160,7 +178,7 @@ export function upsertSeries(
     agentGroupId: s.agentGroupId,
     kind: s.kind ?? 'task',
     recurrence: s.recurrence,
-    processAfter: s.processAfter,
+    processAfter: s.processAfter === null ? null : scheduleTimestamp(s.processAfter),
     content: s.content,
     platformId: s.platformId,
     channelType: s.channelType,
@@ -173,19 +191,20 @@ export function upsertSeries(
 /**
  * Series that are due to fire as of `now` (ISO-Z): pending status with a
  * non-null process_after that has elapsed. Paused/cancelled never fire.
- * Lexical `<=` on ISO-Z strings is a correct chronological comparison
- * (same convention as strand-detect / countDueMessages).
+ * Legacy rows may contain offsets or omit milliseconds. Compare instants,
+ * not strings; normalize only the returned view without rewriting schedules.
  */
 export function getDueSeries(db: Database.Database, now: string): TaskSeriesRow[] {
-  return db
+  const rows = db
     .prepare(
       `SELECT * FROM task_series
         WHERE status = 'pending'
           AND process_after IS NOT NULL
-          AND process_after <= @now
-        ORDER BY process_after ASC`,
+          AND julianday(process_after) <= julianday(@now)
+        ORDER BY julianday(process_after) ASC`,
     )
-    .all({ now }) as TaskSeriesRow[];
+    .all({ now: scheduleTimestamp(now) }) as TaskSeriesRow[];
+  return rows.map(canonicalSeries);
 }
 
 /**
@@ -201,6 +220,8 @@ export function advanceRecurrence(
   nextRun: string | null,
   firedAt: string,
 ): void {
+  firedAt = scheduleTimestamp(firedAt);
+  nextRun = nextRun === null ? null : scheduleTimestamp(nextRun);
   if (nextRun === null) {
     db.prepare(
       `UPDATE task_series
@@ -285,7 +306,7 @@ export function updateSeries(db: Database.Database, seriesId: string, update: Se
   }
   if (update.processAfter !== undefined) {
     sets.push('process_after = @processAfter');
-    params.processAfter = update.processAfter;
+    params.processAfter = scheduleTimestamp(update.processAfter);
   }
   if (update.recurrence !== undefined) {
     sets.push('recurrence = @recurrence');
@@ -302,13 +323,14 @@ export function updateSeries(db: Database.Database, seriesId: string, update: Se
  * locally without ever touching schedule.db.
  */
 export function listLiveSeries(db: Database.Database): TaskSeriesRow[] {
-  return db
+  const rows = db
     .prepare(
       `SELECT * FROM task_series
         WHERE status IN ('pending', 'paused')
-        ORDER BY process_after ASC`,
+        ORDER BY julianday(process_after) ASC`,
     )
     .all() as TaskSeriesRow[];
+  return rows.map(canonicalSeries);
 }
 
 /** True iff this series already exists (any status). Migration idempotency. */

@@ -217,14 +217,18 @@ export function shouldCloseTaskSession(
   return isTaskThread(threadId) && !containerRunning && liveTaskCount === 0;
 }
 
-async function maintainScheduling(mailbox: InboundMailbox, session: Session): Promise<void> {
+async function maintainScheduling(
+  mailbox: InboundMailbox,
+  session: Session,
+  openSchedule?: typeof import('./modules/scheduling/schedule-store.js').openScheduleDb,
+): Promise<void> {
   // MODULE-HOOK:scheduling-recurrence:start
   const { handleRecurrence } = await import('./modules/scheduling/recurrence.js');
-  await handleRecurrence(mailbox, session);
+  await handleRecurrence(mailbox, session, openSchedule);
 
   try {
     const { listLiveSeries, openScheduleDb } = await import('./modules/scheduling/schedule-store.js');
-    const schedule = openScheduleDb(session.agent_group_id);
+    const schedule = (openSchedule ?? openScheduleDb)(session.agent_group_id);
     try {
       mailbox.replaceTaskSeriesSnapshot(
         listLiveSeries(schedule).map((row) => ({
@@ -244,6 +248,8 @@ async function maintainScheduling(mailbox: InboundMailbox, session: Session): Pr
   }
   // MODULE-HOOK:scheduling-recurrence:end
 }
+
+export const _maintainSchedulingForTesting = maintainScheduling;
 
 async function sweepSession(session: Session): Promise<void> {
   const agentGroup = await getAgentGroup(session.agent_group_id);

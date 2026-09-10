@@ -3,6 +3,8 @@ import fs from 'fs';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+vi.mock('../../delivery.js', () => ({ getDeliveryAdapter: vi.fn(() => null) }));
+vi.mock('../typing/index.js', () => ({ stopTypingRefresh: vi.fn() }));
 const timezone = vi.hoisted(() => ({ value: 'UTC' }));
 vi.mock('../../container-config.js', () => ({
   resolveGroupTimezone: vi.fn(async () => timezone.value),
@@ -17,6 +19,7 @@ import type { Session } from '../../types.js';
 import { addTaskMaterializationGuard } from '../../engine/task-materialization.js';
 import { log } from '../../log.js';
 import { handleRecurrence } from './recurrence.js';
+import { _maintainSchedulingForTesting } from '../../host-sweep.js';
 import { listLiveSeries, openScheduleDbAt, updateSeries, upsertSeries } from './schedule-store.js';
 
 const TEST_ROOT = '/tmp/nanoclaw-recurrence-test';
@@ -302,12 +305,52 @@ describe('host eligibility guard', () => {
       await sweep();
       const schedule = openSchedule();
       expect(schedule.prepare('SELECT process_after, last_fired_at FROM task_series').get()).toEqual({
-        process_after: '2020-01-01T00:00:00Z',
+        process_after: '2020-01-01T00:00:00.000Z',
         last_fired_at: null,
       });
       schedule.close();
     } finally {
       remove();
+    }
+  });
+});
+
+describe('production sweep snapshot timestamp regression', () => {
+  it('projects mixed legacy offsets atomically without firing early or changing source rows', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-10T13:21:00.000Z'));
+    seedSeries('offset-reminder', null, '2026-09-10T17:20:00.000Z');
+    seedSeries('paused', null, null);
+    seedSeries('dream', '0 4 * * *', '2026-09-11T08:00:00.000Z');
+    const schedule = openSchedule();
+    const inbound = openInboundDb(IN_DB);
+    const legacy = '2026-09-10T13:20:00-04:00';
+    try {
+      schedule.prepare('UPDATE task_series SET process_after = ? WHERE series_id = ?').run(legacy, 'offset-reminder');
+      schedule.prepare("UPDATE task_series SET status = 'paused' WHERE series_id = 'paused'").run();
+      vi.mocked(log.error).mockClear();
+      const mailbox = wrapSqliteInbound(inbound);
+      await _maintainSchedulingForTesting(mailbox, session(), openSchedule);
+      expect(log.error).not.toHaveBeenCalled();
+      expect(
+        inbound.prepare('SELECT series_id, process_after, status FROM task_series ORDER BY series_id').all(),
+      ).toEqual([
+        { series_id: 'dream', process_after: '2026-09-11T08:00:00.000Z', status: 'pending' },
+        { series_id: 'offset-reminder', process_after: '2026-09-10T17:20:00.000Z', status: 'pending' },
+        { series_id: 'paused', process_after: null, status: 'paused' },
+      ]);
+      expect(inboundTaskRows()).toEqual([]);
+      expect(seriesRow('offset-reminder').process_after).toBe(legacy);
+      vi.setSystemTime(new Date('2026-09-10T17:20:00.000Z'));
+      await _maintainSchedulingForTesting(mailbox, session(), openSchedule);
+      await _maintainSchedulingForTesting(mailbox, session(), openSchedule);
+      expect(inboundTaskRows()).toHaveLength(1);
+      expect(seriesRow('offset-reminder').status).toBe('cancelled');
+      expect(log.error).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      schedule.close();
+      inbound.close();
     }
   });
 });
