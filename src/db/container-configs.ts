@@ -16,6 +16,7 @@ const SCALAR_COLUMNS = new Set([
   // Optimus fork patch (migration 017).
   'sensitive_gate_mode',
   'timezone',
+  'speed',
 ]);
 const JSON_COLUMNS = new Set(['skills', 'mcp_servers', 'packages_apt', 'packages_npm', 'additional_mounts']);
 
@@ -47,12 +48,12 @@ export async function createContainerConfig(config: ContainerConfigRow): Promise
         agent_group_id, provider, model, effort, image_tag, assistant_name,
         max_messages_per_prompt, skills, mcp_servers, packages_apt, packages_npm,
         additional_mounts, cli_scope, suppress_embeds, assistant_prefix_separator,
-        timezone, updated_at
+        timezone, speed, updated_at
       ) VALUES (
         @agent_group_id, @provider, @model, @effort, @image_tag, @assistant_name,
         @max_messages_per_prompt, @skills, @mcp_servers, @packages_apt, @packages_npm,
         @additional_mounts, @cli_scope, @suppress_embeds, @assistant_prefix_separator,
-        @timezone, @updated_at
+        @timezone, @speed, @updated_at
       )`,
     config,
   );
@@ -104,6 +105,7 @@ export async function updateContainerConfigScalars(
       | 'assistant_prefix_separator'
       | 'sensitive_gate_mode'
       | 'timezone'
+      | 'speed'
     >
   >,
 ): Promise<void> {

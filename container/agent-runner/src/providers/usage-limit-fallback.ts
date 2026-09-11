@@ -1,3 +1,4 @@
+import { getProviderRuntimeContract } from './provider-registry.js';
 import type { MemorySessionHookRegistration } from '../memory/session-hook.js';
 import type { AgentProvider, AgentQuery, ImageContentBlock, ProviderEvent, QueryInput } from './types.js';
 
@@ -74,7 +75,11 @@ export class UsageLimitFallbackProvider implements AgentProvider {
     this.fallbackModel = config.fallbackModel;
     this.primary = config.primary;
     this.fallback = config.fallback;
-    this.supportsNativeSlashCommands = config.primary.supportsNativeSlashCommands;
+    const contract = getProviderRuntimeContract(config.primaryName);
+    this.supportsNativeSlashCommands = contract
+      ? contract.commands.formatting === 'native'
+      : (config.primary as AgentProvider & { supportsNativeSlashCommands?: boolean }).supportsNativeSlashCommands ===
+        true;
   }
 
   registerMemorySessionHook(hook: MemorySessionHookRegistration): void {
@@ -169,10 +174,14 @@ export class UsageLimitFallbackProvider implements AgentProvider {
       // remain inert until its final result. Forward the active query's
       // contract (including nested wrappers) without leaking its continuation.
       get delivery() {
+        const name = activeProvider === fallbackProvider ? fallbackName : primaryName;
+        const contract = getProviderRuntimeContract(name);
         return (
           activeQuery.delivery ?? {
-            providerName: activeProvider === fallbackProvider ? fallbackName : primaryName,
-            emitsMidTurnText: activeProvider.emitsMidTurnText === true,
+            providerName: name,
+            emitsMidTurnText: contract
+              ? contract.textDelivery === 'mid-turn-complete'
+              : (activeProvider as AgentProvider & { emitsMidTurnText?: boolean }).emitsMidTurnText === true,
           }
         );
       },

@@ -5,6 +5,10 @@ import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryIn
 /**
  * Mock provider for testing. Returns canned responses.
  * Supports push() — queued messages produce additional results.
+ *
+ * Its runtime contract lives in provider-contracts/mock.ts and attaches via
+ * registerProviderContract, the same two-step path every provider uses; this
+ * module does not import it.
  */
 export interface MockProviderBehavior {
   /**
@@ -78,8 +82,7 @@ export class MockProvider implements AgentProvider {
     // Mid-turn text segments (if configured) followed by the turn's result —
     // mirrors the SDK's assistant-message → result ordering. The result text
     // itself streams as the LAST text event first: the real SDK's result only
-    // repeats the final assistant text, which already streamed — that is the
-    // emitsMidTurnText contract this mock declares.
+    // repeats the final assistant text, which already streamed.
     function* turnEvents(prompt: string): Generator<ProviderEvent> {
       for (const text of textFactory?.(prompt) ?? []) {
         yield { type: 'text', text };

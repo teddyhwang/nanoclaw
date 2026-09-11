@@ -147,6 +147,20 @@ function buildDestinationsSection(): string {
 
   lines.push('');
 
+  {
+    // Task routing guidance also applies to tasks pushed into a warm chat query.
+    lines.push(
+      'For scheduled work, only notify someone when the task asks you to. Always pass the explicit named destination.',
+    );
+    const channelDestinations = all.filter((destination) => destination.type === 'channel');
+    if (channelDestinations.length > 0) {
+      const channelNames = channelDestinations.map((destination) => `\`${destination.name}\``).join(', ');
+      lines.push(
+        `For user-visible escalation output, default to your own channel destination(s): ${channelNames} — that's the operator's actual conversation with you. Use an agent-type destination like \`parent\` only when the task explicitly calls for routing through another agent, not as your default escalation path.`,
+      );
+    }
+  }
+
   lines.push(
     '**All output must be wrapped.** Use `<message to="name">...</message>` for content to send, or `<internal>...</internal>` for scratchpad.',
   );

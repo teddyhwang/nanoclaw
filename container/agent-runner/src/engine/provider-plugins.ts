@@ -30,6 +30,7 @@
  * by setting `NANOCLAW_PROVIDER_PLUGINS_MANIFEST` in the container env.
  */
 import fs from 'fs';
+import { requireProviderName } from '../providers/provider-registry.js';
 
 interface ProviderPluginManifest {
   providers?: { module: string }[];
@@ -61,4 +62,10 @@ export async function loadProviderPlugins(): Promise<void> {
       log(`failed to load provider plugin ${entry.module}: ${String(err)}`);
     }
   }
+}
+
+/** Validate only after host plugins have registered their factories. */
+export async function loadConfiguredProvider(name: string): Promise<string> {
+  await loadProviderPlugins();
+  return requireProviderName(name);
 }

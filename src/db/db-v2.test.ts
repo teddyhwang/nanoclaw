@@ -40,6 +40,8 @@ import {
   deletePendingQuestion,
   getContainerConfig,
   createContainerConfig,
+  ensureContainerConfig,
+  updateContainerConfigScalars,
 } from './index.js';
 import { _resetPluginMigrationsForTests, registerPluginMigrations } from '../engine/db-extensions.js';
 
@@ -573,10 +575,22 @@ describe('container configs', () => {
       suppress_embeds: 1,
       assistant_prefix_separator: null,
       sensitive_gate_mode: null,
+      speed: null,
       updated_at: now(),
     });
     const row = await getContainerConfig('ag-full');
     expect(row).toBeDefined();
     expect(row!.cli_scope).toBe('global');
+  });
+
+  it('round-trips the speed scalar', async () => {
+    await createAgentGroup({ id: 'ag-speed', name: 'Speed', folder: 'speed', agent_provider: null, created_at: now() });
+    await ensureContainerConfig('ag-speed');
+    await updateContainerConfigScalars('ag-speed', { speed: 'fast' });
+    const row = await getContainerConfig('ag-speed');
+    expect(row!.speed).toBe('fast');
+    await updateContainerConfigScalars('ag-speed', { speed: null });
+    const cleared = await getContainerConfig('ag-speed');
+    expect(cleared!.speed).toBeNull();
   });
 });

@@ -35,12 +35,18 @@ import { getAgentMailbox, readMailboxContext } from './mailbox/index.js';
 // providers from outside the submodule register them via
 // `loadProviderPlugins()` (awaited in main() before createProvider).
 import './providers/index.js';
-import { createProvider, type ProviderName } from './providers/factory.js';
+// Provider-contracts barrel — each provider's runtime contract attaches to its
+// registration on import. Provider skills append imports to
+// provider-contracts/index.ts alongside the providers barrel line.
+import './provider-contracts/index.js';
+import { createProvider } from './providers/factory.js';
+import { getProviderRuntimeContract } from './providers/provider-registry.js';
 import { resolvePluginServer } from './plugin-mcp.js';
 import type { AgentProvider, McpServerConfig, ProviderOptions } from './providers/types.js';
 import { resolveUsageLimitFallback, UsageLimitFallbackProvider } from './providers/usage-limit-fallback.js';
-import { loadProviderPlugins } from './engine/provider-plugins.js';
+import { loadConfiguredProvider } from './engine/provider-plugins.js';
 import { runPollLoop, requestGracefulShutdown } from './poll-loop.js';
+import { registerProviderMemorySessionHook } from './provider-contracts/realize.js';
 
 function log(msg: string): void {
   console.error(`[agent-runner] ${msg}`);
@@ -64,7 +70,7 @@ process.on('SIGTERM', () => {
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const providerName = config.provider.toLowerCase() as ProviderName;
+  const providerName = await loadConfiguredProvider(config.provider);
   const mailbox = getAgentMailbox();
 
   log(`Starting v2 agent-runner (provider: ${providerName})`);
@@ -150,11 +156,6 @@ async function main(): Promise<void> {
       log(`Additional MCP server: ${name} (${detail})`);
     }
 
-    // Host-shipped providers (pi_rpc, codex, etc.) register here via the
-    // /agent/provider-plugins.json manifest. Awaited so the registry is
-    // populated before createProvider() looks the name up.
-    await loadProviderPlugins();
-
     const providerOptions: ProviderOptions = {
       assistantName: config.assistantName || undefined,
       mcpServers,
@@ -162,8 +163,10 @@ async function main(): Promise<void> {
       additionalDirectories: additionalDirectories.length > 0 ? additionalDirectories : undefined,
       model: config.model,
       effort: config.effort,
+      speed: config.speed,
     };
     const standingProvider = createProvider(providerName, providerOptions);
+    registerProviderMemorySessionHook(providerName, standingProvider, MEMORY_SESSION_HOOK);
     let provider: AgentProvider = standingProvider;
 
     // Optional transparent account-quota failover. The host enables this and
@@ -177,6 +180,7 @@ async function main(): Promise<void> {
         ...providerOptions,
         model: fallback.model,
       });
+      registerProviderMemorySessionHook(fallback.providerName, alternate, MEMORY_SESSION_HOOK);
       provider = new UsageLimitFallbackProvider({
         primaryName: providerName,
         fallbackName: fallback.providerName,
@@ -190,12 +194,9 @@ async function main(): Promise<void> {
       );
     }
 
-    // Every provider receives the shared memory lifecycle hook. Wrapper
-    // providers forward registration to their active provider implementation.
-    provider.registerMemorySessionHook(MEMORY_SESSION_HOOK);
-
     await runPollLoop({
       provider,
+      providerContract: getProviderRuntimeContract(providerName),
       providerName,
       cwd: CWD,
       systemContext: { instructions },

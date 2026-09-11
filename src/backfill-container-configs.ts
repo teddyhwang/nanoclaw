@@ -86,6 +86,7 @@ export async function backfillContainerConfigs(): Promise<void> {
       // 'off' is distinguishable from "never configured" in audits.
       sensitive_gate_mode: null,
       timezone: null,
+      speed: null,
       updated_at: new Date().toISOString(),
     };
 

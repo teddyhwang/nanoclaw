@@ -22,6 +22,8 @@ You are a stateful agent. You don't have intrinsic memory between sessions — d
 
 Your memory layer has two parts: the **agent kernel** (structured, operator-curated) and **CLAUDE.local.md** (your own scratch). The kernel takes priority. When a kernel file exists, treat it as authoritative; only fall back to `CLAUDE.local.md` for things that don't fit the kernel shape.
 
+{{provider-memory-note}}
+
 ### Agent kernel (eagerly loaded when present)
 
 The composed `CLAUDE.md` flatly inlines these at session start if they exist on disk. You don't need to re-read them — they're already in context. Maintain them as you work:

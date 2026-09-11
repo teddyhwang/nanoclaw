@@ -26,7 +26,8 @@ import { initChannelAdapters, teardownChannelAdapters, getChannelAdapter } from 
 import type { ChannelAdapter, ChannelSetup } from '../channels/adapter.js';
 import { handleChatMigrated } from '../channels/chat-migration.js';
 import { getResponseHandlers, type ResponsePayload } from '../response-registry.js';
-import { stopHostModules } from '../host-lifecycle.js';
+import { startHostModules, stopHostModules } from '../host-lifecycle.js';
+import { startHostInstanceLease, stopHostInstanceLease } from '../host-instance.js';
 
 // Channel barrel — each enabled channel self-registers on import.
 import '../channels/index.js';
@@ -35,6 +36,7 @@ import '../modules/index.js';
 
 let booted = false;
 let signalsInstalled = false;
+const hostAbortController = new AbortController();
 
 async function dispatchResponse(payload: ResponsePayload): Promise<void> {
   for (const handler of getResponseHandlers()) {
@@ -78,6 +80,7 @@ export async function _bootForHost(opts: { managedSignals: boolean }): Promise<v
   // 2. Selected session driver: fail startup if unavailable, then adopt
   // install-owned live sessions and reap only terminal residue.
   await getSessionDriver().ensureReady?.();
+  await startHostInstanceLease();
   await adoptRunningSessions();
 
   // 3. Channel adapters
@@ -201,6 +204,8 @@ export async function _bootForHost(opts: { managedSignals: boolean }): Promise<v
   };
   setDeliveryAdapter(deliveryAdapter);
 
+  await startHostModules({ db, signal: hostAbortController.signal });
+
   // 5. Start delivery polls
   startActiveDeliveryPoll();
   startSweepDeliveryPoll();
@@ -239,12 +244,14 @@ export async function _bootForHost(opts: { managedSignals: boolean }): Promise<v
 
 export async function _shutdownForHost(reason: string): Promise<void> {
   log.info('Shutdown requested', { reason });
+  hostAbortController.abort();
   // Unified lifecycle registry (upstream v2.2.0 replaced response-registry's
   // onShutdown/getShutdownCallbacks). Runs callbacks LIFO with per-callback
   // error isolation — same guarantee the inline loop here used to give.
   await stopHostModules();
   stopDeliveryPolls();
   stopHostSweep();
+  await stopHostInstanceLease();
   try {
     await teardownChannelAdapters();
   } finally {

@@ -285,6 +285,13 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
     hasLiveTaskOccurrence: (seriesId) => hasLiveTaskOccurrence(db, seriesId),
     materializeTaskOccurrence: async (occurrence) => materializeTaskOccurrence(db, occurrence),
     replaceTaskSeriesSnapshot: (series) => replaceTaskSeriesSnapshot(db, series),
+    armNextTask: async (originalId, task) => {
+      const sequence = nextSequence();
+      db.transaction(() => {
+        insertTaskRow(db, task, sequence);
+        clearRecurrence(db, originalId);
+      })();
+    },
     cancelTask: (taskId) => (taskId === undefined ? cancelAllTasks(db) : cancelTask(db, taskId)),
     pauseTask: (taskId) => pauseTask(db, taskId),
     resumeTask: (taskId) => resumeTask(db, taskId),

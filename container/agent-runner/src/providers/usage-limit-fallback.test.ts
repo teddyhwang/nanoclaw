@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 
+import { registerProvider, registerProviderContract } from './provider-registry.js';
+import { mockRuntimeContract } from '../provider-contracts/mock.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, QueryInput } from './types.js';
 import { UsageLimitFallbackProvider, isUsageLimitEvent, resolveUsageLimitFallback } from './usage-limit-fallback.js';
 
@@ -192,4 +194,35 @@ describe('UsageLimitFallbackProvider', () => {
     ]);
     expect(fallback.inputs).toHaveLength(0);
   });
+});
+
+it('quota wrappers use the active runtime contract instead of stale legacy delivery flags', async () => {
+  const primary = new StubProvider([[{ type: 'error', message: 'quota', retryable: true, classification: 'quota' }]]);
+  const fallback = new StubProvider([
+    [
+      { type: 'text', text: 'stream' },
+      { type: 'result', text: 'final' },
+    ],
+  ]);
+  Object.assign(primary, { emitsMidTurnText: true, supportsNativeSlashCommands: true });
+  const primaryName = 'fallback-contract-primary';
+  const fallbackName = 'fallback-contract-alternate';
+  registerProvider(primaryName, () => primary);
+  registerProviderContract(primaryName, {
+    ...mockRuntimeContract,
+    textDelivery: 'result-only',
+    commands: { formatting: 'xml' },
+  });
+  registerProvider(fallbackName, () => fallback);
+  registerProviderContract(fallbackName, mockRuntimeContract);
+  const provider = new UsageLimitFallbackProvider({ primaryName, fallbackName, primary, fallback });
+  expect(provider.supportsNativeSlashCommands).toBe(false);
+  const query = provider.query({ prompt: 'hello', cwd: '/tmp' });
+  expect(query.delivery).toEqual({ providerName: primaryName, emitsMidTurnText: false });
+  const modes: unknown[] = [];
+  for await (const _event of query.events) modes.push(query.delivery);
+  expect(modes).toEqual([
+    { providerName: fallbackName, emitsMidTurnText: true },
+    { providerName: fallbackName, emitsMidTurnText: true },
+  ]);
 });

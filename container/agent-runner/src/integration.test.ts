@@ -16,6 +16,11 @@ import { MockProvider } from './providers/mock.js';
 import type { ProviderExchange } from './providers/types.js';
 import { runPollLoop, requestGracefulShutdown, _resetShutdownStateForTests } from './poll-loop.js';
 
+const MOCK_PROVIDER_CONTRACT = {
+  textDelivery: 'mid-turn-complete',
+  commands: { formatting: 'xml' },
+} as const;
+
 beforeEach(() => {
   // Clear any shutdown latch leaked by a prior test whose loop hadn't fully
   // unwound (the abort()+catch pattern leaves runPollLoop running until a DB
@@ -1780,7 +1785,6 @@ class EndingProvider {
 }
 
 class ThrowingProvider {
-  readonly supportsNativeSlashCommands = false;
   private errorMessage: string;
 
   constructor(errorMessage: string) {
@@ -1809,8 +1813,6 @@ class ThrowingProvider {
  * First emits an init event (setting continuation), then throws.
  */
 class InvalidSessionProvider {
-  readonly supportsNativeSlashCommands = false;
-
   isSessionInvalid(): boolean {
     return true;
   }
@@ -2117,7 +2119,6 @@ class DelayedResultProvider {
 }
 
 class BlockingProvider {
-  readonly supportsNativeSlashCommands = false;
   queries = 0;
   aborts = 0;
   ends = 0;
