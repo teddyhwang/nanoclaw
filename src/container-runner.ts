@@ -361,8 +361,9 @@ async function spawnContainer(session: Session): Promise<void> {
     session,
     containerConfig,
     provider,
-    surfaces ? { ...contribution, mounts: spawnContribution.mounts } : contribution,
+    providerContribution,
     surfaces,
+    spawnContribution.mounts,
   );
   const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
   const mailboxEnvironment = await mailbox.runnerEnvironment(mailboxKey);
@@ -899,6 +900,9 @@ export async function buildMounts(
   provider: string,
   providerContribution: ProviderContainerContribution,
   providerSurfaces?: ProviderSpawnRealization,
+  // Host plugins are independent of provider contracts. Keep this lane separate
+  // so dropping a declared provider's legacy mounts cannot drop host mounts too.
+  hostMounts: readonly VolumeMount[] = [],
 ): Promise<VolumeMount[]> {
   const paths = getEnginePaths();
   const projectRoot = path.resolve(process.env.NANOCLAW_PROJECT_ROOT || paths.projectRoot);
@@ -1103,15 +1107,14 @@ export async function buildMounts(
   // in-tree provider registration, which is exactly the 'allowlisted-extra'
   // contract — classing them group-state would deny any provider whose state
   // root sits outside the group subtree.
-  if (providerContribution.mounts) {
-    mounts.push(
-      ...providerContribution.mounts.map((mount) => ({
-        ...mount,
-        mountClass: mount.mountClass ?? ('allowlisted-extra' as const),
-        scope: mount.scope ?? scope,
-      })),
-    );
-  }
+  const contributedMounts = [...(contract ? [] : (providerContribution.mounts ?? [])), ...hostMounts];
+  mounts.push(
+    ...contributedMounts.map((mount) => ({
+      ...mount,
+      mountClass: mount.mountClass ?? ('allowlisted-extra' as const),
+      scope: mount.scope ?? scope,
+    })),
+  );
 
   // Host-registered skill roots are trusted release/plugin surfaces. Resolve
   // symlinks before bind mounting because Docker Desktop does not follow host

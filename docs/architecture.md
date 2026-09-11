@@ -991,6 +991,8 @@ Rules:
 - Contracts name only container paths and directory *names*; host paths are resolved by core. Every declared item is acted on — nothing is descriptive only.
 - The shape is validated when the contract registers, so a malformed provider skill fails when the host loads, not at first spawn.
 - A provider that also has a legacy host adapter (`src/providers/`) still gets that adapter's env passed through; its mounts are ignored because core now realizes the declared surfaces.
+- Embedded-host spawn-plugin mounts use a separate `buildMounts(..., hostMounts)` lane. They remain additive for declared and legacy providers; do not mix them into the legacy provider contribution or re-apply that contribution after contract realization.
+- Fork test fixtures align mocked `config.DATA_DIR`/`GROUPS_DIR` with the engine path registry in `src/test-setup.ts`. This is test-only compatibility for unmodified registry payload tests; production workspace-path precedence is unchanged.
 - Mount order is fixed by core, not by the provider: state volumes, then skill views, then the project document.
 - The shipped base document (`container/CLAUDE.md`) is protected from operator mounts by core itself, not by any contract field.
 - A provider name with neither a contract nor an adapter spawns with the default (Claude) surfaces, plus a warning in the host log.

@@ -685,7 +685,56 @@ it('declared Claude surfaces keep embedded skill targets and plugin mounts acros
   await resolveProviderContribution(sess, ag, config);
   expect(fs.readlinkSync(path.join(skills, 'browser'))).toBe('/plugins/host-skills/browser');
   const pluginMount = { hostPath: root, containerPath: '/plugins/provider-code', readonly: true };
-  const mounts = await buildMounts(ag, sess, config, 'claude', { mounts: [pluginMount] }, resolved.surfaces);
+  const mounts = await buildMounts(ag, sess, config, 'claude', resolved.contribution, resolved.surfaces, [pluginMount]);
   expect(mounts.find((mount) => mount.containerPath === pluginMount.containerPath)).toMatchObject(pluginMount);
   expect(mounts.filter((mount) => mount.containerPath === '/home/node/.claude')).toHaveLength(1);
+});
+
+it('drops legacy provider mounts for declared surfaces without losing the independent host mount lane', async () => {
+  const ag = group('ag-declared-legacy-mounts', 'declared-legacy-mounts');
+  await createAgentGroup(ag);
+  await ensureContainerConfig(ag.id);
+  await initGroupFilesystem(ag, { provider: 'ordered-mount-provider' });
+  const groupDir = fs.realpathSync(path.join(GROUPS_DIR, ag.folder));
+  const legacy = {
+    mounts: [{ hostPath: groupDir, containerPath: '/home/node/.codex', readonly: false }],
+  };
+  const hostMount = { hostPath: groupDir, containerPath: '/plugins/host-only', readonly: true };
+  const mounts = await buildMounts(
+    ag,
+    session('declared-session', ag.id),
+    containerConfig(),
+    'ordered-mount-provider',
+    legacy,
+    undefined,
+    [hostMount],
+  );
+  expect(mounts.find((mount) => mount.containerPath === '/home/node/.codex')?.hostPath).toBe(
+    path.join(DATA_DIR, 'v2-sessions', ag.id, '.ordered-state'),
+  );
+  expect(mounts.find((mount) => mount.containerPath === hostMount.containerPath)).toMatchObject(hostMount);
+  expect(mounts.filter((mount) => mount.containerPath === '/home/node/.codex')).toHaveLength(1);
+  const paths = mounts.map((mount) => mount.containerPath);
+  expect(paths.indexOf('/workspace/agent/.agents')).toBeLessThan(paths.indexOf('/workspace/agent/AGENTS.md'));
+});
+
+it('keeps both legacy provider mounts and host mounts when no host contract exists', async () => {
+  const ag = group('ag-legacy-host-mounts', 'legacy-host-mounts');
+  await createAgentGroup(ag);
+  await ensureContainerConfig(ag.id);
+  await initGroupFilesystem(ag, { provider: 'surfaces-test-provider' });
+  const groupDir = path.join(GROUPS_DIR, ag.folder);
+  const providerMount = { hostPath: groupDir, containerPath: '/plugins/legacy-provider', readonly: false };
+  const hostMount = { hostPath: groupDir, containerPath: '/plugins/host-only', readonly: true };
+  const mounts = await buildMounts(
+    ag,
+    session('legacy-session', ag.id),
+    containerConfig(),
+    'surfaces-test-provider',
+    { mounts: [providerMount] },
+    undefined,
+    [hostMount],
+  );
+  expect(mounts.find((mount) => mount.containerPath === providerMount.containerPath)).toMatchObject(providerMount);
+  expect(mounts.find((mount) => mount.containerPath === hostMount.containerPath)).toMatchObject(hostMount);
 });
