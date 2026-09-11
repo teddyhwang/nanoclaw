@@ -175,15 +175,16 @@ describe('shouldDeferTaskFromChatTurn', () => {
 // unwind the stream so the outer loop can process the deferred work.
 describe('mayEndQueryForDeferredFollowUps', () => {
   it('does NOT allow ending while the active turn awaits its first result', () => {
-    expect(mayEndQueryForDeferredFollowUps(false)).toBe(false);
+    expect(mayEndQueryForDeferredFollowUps(1)).toBe(false);
+    expect(mayEndQueryForDeferredFollowUps(2)).toBe(false);
   });
 
   it('allows ending after the active turn produced a result', () => {
-    expect(mayEndQueryForDeferredFollowUps(true)).toBe(true);
+    expect(mayEndQueryForDeferredFollowUps(0)).toBe(true);
   });
 
-  it('does NOT allow ending while a wrapping retry is still in flight', () => {
-    expect(mayEndQueryForDeferredFollowUps(true, true)).toBe(false);
+  it('does NOT allow ending during asynchronous result dispatch', () => {
+    expect(mayEndQueryForDeferredFollowUps(0, true)).toBe(false);
   });
 });
 

@@ -291,20 +291,12 @@ export function shouldDeferTaskFromChatTurn(activeSender: string | null, followu
 }
 
 /**
- * Whether a deferred-follow-up gate may END the active query.
- *
- * Deferring accumulate-only rows or chat that arrived during a task turn is
- * safe immediately, but ending the stream is safe only after the active turn
- * has emitted a result. Before the first result, `query.end()` tears down the
- * provider subprocess while it is still initializing or generating, so the
- * trigger remains pending and every host retry repeats identically.
- *
- * This first surfaced for task turns (Degenerates Dream, 2026-06-06), then a
- * normal chat turn (Fasting, 2026-07-13), and finally task-turn chat deferral
- * (AI Friends recap + queued mentions, 2026-07-18).
+ * Deferred work may end a query only after EVERY pending input is answered
+ * and its result dispatch finishes. A warm query's earlier result says nothing
+ * about a later push (AI Friends, 2026-09-11). Acknowledgments are not results.
  */
-export function mayEndQueryForDeferredFollowUps(firstResultSeen: boolean, wrappingRetryInFlight = false): boolean {
-  return firstResultSeen && !wrappingRetryInFlight;
+export function mayEndQueryForDeferredFollowUps(pendingResults: number, dispatchingResult = false): boolean {
+  return pendingResults === 0 && !dispatchingResult;
 }
 
 /**
@@ -1253,6 +1245,16 @@ export async function processQuery(
   // follow-up as the next turn, so the current turn cannot know its contents.
   const pushSuperseded: boolean[] = [false];
   let resultIndex = 0;
+  // Lifecycle accounting is separate from per-push delivery attribution:
+  // Codex queues one result per input; Claude may merge pushed inputs into
+  // one result. Never use the lifetime resultIndex as an idle signal.
+  let pendingResults = 1;
+  let dispatchingResult = false;
+  const mayEndDeferredQuery = (): boolean => mayEndQueryForDeferredFollowUps(pendingResults, dispatchingResult);
+  const noteInput = (): void => {
+    pendingResults++;
+    loggedHoldingForFirstResult = false;
+  };
   // Pressure-rotation state machine: 'idle' until a result reports context
   // tokens above the threshold → push ONE handoff turn ('handoff-requested')
   // → when that turn's result arrives, clear the persisted continuation
@@ -1419,6 +1421,7 @@ export async function processQuery(
   // A retry is another provider input, behind any follow-ups already pushed.
   // Preserve its original route, prompt and retry guards until it is answered.
   const pushRetry = (prompt: string): void => {
+    noteInput();
     query.push(prompt);
     queuedTurns.push({ routing: { ...routing }, unwrappedNudged });
     archivePrompts.push(archivePrompts[0] ?? initialPrompt);
@@ -1436,9 +1439,7 @@ export async function processQuery(
   let pollInFlight = false;
   let endedForCommand = false;
   // One-shot: log a first-result hold once per turn, not on every poll tick
-  // (it would
-  // otherwise spam ~once/second for the whole dream — 255 lines observed
-  // 2026-06-06). Reset implicitly by the query ending (the closure dies).
+  // (otherwise it spams once per poll). Reset for every pushed input.
   let loggedHoldingForFirstResult = false;
   // Wall-clock of the last SDK event consumed on the events for-await
   // below. Initialized at stream open (a half-open stream that never
@@ -1536,7 +1537,7 @@ export async function processQuery(
           // and then a normal chat turn (Fasting, 2026-07-13). Leave the
           // accumulate-only rows pending and let the addressed turn finish;
           // after its result, this same gate can unwind the stream cleanly.
-          if (!mayEndQueryForDeferredFollowUps(resultIndex > 0, wrappingRetryInFlight)) {
+          if (!mayEndDeferredQuery()) {
             if (!loggedHoldingForFirstResult) {
               loggedHoldingForFirstResult = true;
               const holdReason = wrappingRetryInFlight
@@ -1620,7 +1621,7 @@ export async function processQuery(
           }
           newMessages = sameSender;
           if (newMessages.length === 0) {
-            if (deferred.length > 0 && !endedForCommand) {
+            if (deferred.length > 0 && !endedForCommand && mayEndDeferredQuery()) {
               log(
                 `All pending messages are cross-sender — ending active query so outer loop can re-query for deferred sender`,
               );
@@ -1668,7 +1669,7 @@ export async function processQuery(
             // the promised work and lets the silent reflection replace it
             // (New York Crew, twice on 2026-08-29). Defer immediately, but
             // hold the active query until its result is safely delivered.
-            if (!mayEndQueryForDeferredFollowUps(resultIndex > 0, wrappingRetryInFlight)) {
+            if (!mayEndDeferredQuery()) {
               if (!loggedHoldingForFirstResult) {
                 loggedHoldingForFirstResult = true;
                 const holdReason = wrappingRetryInFlight
@@ -1695,12 +1696,9 @@ export async function processQuery(
             // burst at 23:09, then RSS + reflection task rows arrived and
             // were deferred every 500ms for 20+ min).
             //
-            // `query.end()` only signals "no more inputs from us" — pending
-            // SDK output events still drain through the for-await loop, so
-            // an in-flight Result: lands cleanly. Same shape as the
-            // accumulate-only end above, which has been proven not to
-            // truncate output. Outer loop picks up the deferred task on
-            // the next iteration.
+            // end() may terminate the provider immediately (Codex). The
+            // pending-input/dispatch guard above, not end() itself, makes
+            // this safe. Deferred tasks stay pending for the next query.
             if (!endedForCommand) {
               const reason = crossSenderDeferred ? `re-query for deferred sender` : `re-query for deferred task`;
               log(`Remaining pending are only deferred — ending active query so outer loop can ${reason}`);
@@ -1738,7 +1736,7 @@ export async function processQuery(
               // stream is not. If the task has not produced a result yet,
               // query.end() kills Codex during init/generation and leaves the
               // same task + chat triggers pending for an identical retry loop.
-              if (!mayEndQueryForDeferredFollowUps(resultIndex > 0, wrappingRetryInFlight)) {
+              if (!mayEndDeferredQuery()) {
                 if (!loggedHoldingForFirstResult) {
                   loggedHoldingForFirstResult = true;
                   const holdReason = wrappingRetryInFlight
@@ -1778,6 +1776,7 @@ export async function processQuery(
         // here), so they're not lost. `activeSender` truthy === a chat turn
         // is active (it's the chat sender; null for task-only turns).
         if (shouldDeferTaskFromChatTurn(activeSender, newMessages) && !endedForCommand) {
+          if (!mayEndDeferredQuery()) return;
           const taskCount = newMessages.filter((m) => m.kind === 'task' && m.trigger === 1).length;
           log(
             `Task trigger (${taskCount}) arrived during an active chat turn — ending stream so the task gets an isolated turn`,
@@ -1942,6 +1941,7 @@ export async function processQuery(
         }
         pushAddressed.push(isAddressedTurn(keep, assistantName));
         pushSuperseded.push(false);
+        noteInput();
         query.push(prompt, followupImageBlocks.length > 0 ? followupImageBlocks : undefined);
         archivePrompts.push(prompt);
         const next: QueuedTurn = {
@@ -2000,6 +2000,12 @@ export async function processQuery(
         if (deliveryProviderName !== textProviderName) {
           midTurnTail = '';
           textProviderName = deliveryProviderName;
+        }
+        if (event.type === 'result') {
+          // Consume inputs before any awaited dispatch; a push during dispatch
+          // belongs to the next result. Read the wrapped query's ACTIVE harness.
+          dispatchingResult = true;
+          pendingResults = deliveryProviderName === 'claude' ? 0 : Math.max(0, pendingResults - 1);
         }
         await handleEvent(event, routing);
         touchHeartbeat();
@@ -2070,6 +2076,7 @@ export async function processQuery(
             const next = queuedTurns.shift();
             if (next) adoptTurn(next);
             else answering = false;
+            dispatchingResult = false;
             continue;
           }
           if (event.text) {
@@ -2261,7 +2268,8 @@ export async function processQuery(
             !activeSender &&
             taskFireContexts.length > 0 &&
             !endedForCommand &&
-            pressureState !== 'handoff-requested'
+            pressureState !== 'handoff-requested' &&
+            pendingResults === 0
           ) {
             log('Task-only turn complete — ending stream so the container can idle-kill');
             endedForCommand = true;
@@ -2275,6 +2283,7 @@ export async function processQuery(
           const next = queuedTurns.shift();
           if (next) adoptTurn(next);
           else answering = false;
+          dispatchingResult = false;
         } else if (event.type === 'progress' && event.message.startsWith('Context compacted')) {
           compactedSinceLastResult = true;
         } else if (event.type === 'error' && event.retryable && resultIndex === 0) {
