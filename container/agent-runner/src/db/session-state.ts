@@ -256,7 +256,12 @@ export function getCurrentReplyRoute(): ReplyRoute | null {
 }
 
 export function getCurrentInReplyTo(): string | null {
-  return currentInReplyTo ?? getCurrentReplyRoute()?.inReplyTo ?? null;
+  // Persisted state is authoritative across the runner/MCP process boundary.
+  // In particular, an explicit no-reply batch must suppress any older local
+  // compatibility stamp rather than resurrecting a previous chat's reply pill.
+  const published = getCurrentBatchReplyTarget();
+  if (published !== undefined) return published;
+  return getCurrentReplyRoute()?.inReplyTo ?? currentInReplyTo;
 }
 
 // Compatibility for older plugins; persisted routes remain the cross-process transport.

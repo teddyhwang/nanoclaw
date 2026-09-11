@@ -117,6 +117,17 @@ afterEach(() => {
 });
 
 describe('send_message MCP tool — in_reply_to plumbing', () => {
+  it.each(['route', 'batch', 'silent'] as const)(
+    'persisted %s reply state overrides stale legacy module state',
+    async (source) => {
+      setCurrentInReplyTo('stale-prior-turn');
+      if (source === 'route') publishInReplyTo('current-turn');
+      else setCurrentBatchReplyTarget(source === 'silent' ? null : 'current-turn');
+      await sendMessage.handler({ to: 'peer', text: 'current outcome' });
+      expect(getUndeliveredMessages()[0].in_reply_to).toBe(source === 'silent' ? null : 'current-turn');
+    },
+  );
+
   it('stamps the batch in_reply_to (published via the DB) on outbound rows', async () => {
     publishInReplyTo('inbound-msg-1');
 
