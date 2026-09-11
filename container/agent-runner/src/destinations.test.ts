@@ -154,6 +154,9 @@ describe('buildSystemPromptAddendum — runtime model identity', () => {
     expect(prompt).toContain('An acknowledgment is only an acknowledgment if it arrives BEFORE the slow work');
     expect(prompt).toContain('A `<message>` block in your final response is NOT an acknowledgment');
     expect(prompt).toContain('send the acknowledgment with `send_message` FIRST');
+    expect(prompt).toContain('Every action acknowledgment must be followed by a success, failure, or blocked outcome');
+    expect(prompt).toContain('scheduled tasks and co-batched work');
+    expect(prompt).toContain('do not repeat or paraphrase it');
     // The old wording framed mid-turn send_message as a mere convenience
     // ("handy for"), which is what let the habit win.
     expect(prompt).not.toContain('handy for a quick acknowledgment');

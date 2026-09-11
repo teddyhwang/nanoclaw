@@ -505,7 +505,7 @@ describe('mock provider', () => {
   });
 });
 
-describe('streamed task delivery keeps the Optimus sole-send contract', () => {
+describe('streamed task delivery keeps the one-door echo contract', () => {
   it('delivers a task mid-turn/final block exactly once and records that dispatch', async () => {
     getInboundDb()
       .prepare(
@@ -1127,56 +1127,73 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(out.filter((row) => JSON.parse(row.content).action === 'silent_turn_complete')).toHaveLength(1);
   });
 
-  it('task turn: suppresses a final <message> summary to a destination already delivered mid-turn (2026-06-10 AI Friends recap double-post)', async () => {
-    // Daily-recap shape: the task agent sent the recap mid-turn via
-    // send_message (a kind='chat' row to ai-friends), then appended a final
-    // <message to="ai-friends">Recap sent (#29021).</message>. The body text
-    // differs from the recap, so the exact-text dedup (hasChatMessageTextSince)
-    // misses it and the channel gets a SECOND message. On a task turn we
-    // suppress any final block to a destination that already received a
-    // tool-sent chat row this turn (one-message task contract).
-    insertChannelDestination('ai-friends');
+  it.each([
+    ['Checking availability now.', 'No morning slots were available. Nothing booked.'],
+    ['Finance report: new transactions.', 'No morning slots were available. Nothing booked.'],
+    ['Daily recap: lots happened today.', 'Recap sent (#29021).'],
+  ])('task turn preserves distinct result after earlier send: %s', async (earlier, final) => {
+    // A destination is not a task/result identity. Even a receipt-looking
+    // summary cannot prove that a co-batched request has been answered.
+    insertChannelDestination('boys-night');
     const { writeMessageOut } = await import('./db/messages-out.js');
-    const turnStartedAt = '2026-06-10T00:00:00';
-    // Simulate send_message's outbound row — the actual recap, written mid-turn.
     await writeMessageOut({
-      id: 'recap-out-1',
+      id: 'earlier-task-send',
       kind: 'chat',
       channel_type: ROUTING.channelType,
       platform_id: ROUTING.platformId,
-      content: JSON.stringify({ text: 'Daily recap: lots happened today across the channels.' }),
+      content: JSON.stringify({ text: earlier }),
     });
-
-    // Final response: a DIFFERENT-text summary block to the same destination.
     await dispatchResultText(
-      '<message to="ai-friends">Recap sent (#29021).</message>',
+      `<message to="boys-night">${final}</message>`,
       ROUTING,
-      /* addressed */ false,
-      turnStartedAt,
-      /* compactedDuringTurn */ false,
-      /* taskTurn */ true,
+      false,
+      '2026-06-10T00:00:00',
+      false,
+      true,
     );
+    const rows = getUndeliveredMessages().filter((m) => m.kind === 'chat');
+    expect(rows.map((m) => JSON.parse(m.content).text)).toEqual([earlier, final]);
+  });
 
-    const out = getUndeliveredMessages();
-    // The mid-turn recap row, plus a silent_turn_complete control row — and
-    // crucially NO second 'Recap sent' chat row to the channel.
-    const summaryRows = out.filter((m) => {
-      try {
-        return JSON.parse(m.content).text?.includes?.('Recap sent');
-      } catch {
-        return false;
-      }
+  it('task turn still suppresses the same recap already sent via tool', async () => {
+    insertChannelDestination('boys-night');
+    const { writeMessageOut } = await import('./db/messages-out.js');
+    await writeMessageOut({
+      id: 'recap-task-send',
+      kind: 'chat',
+      channel_type: ROUTING.channelType,
+      platform_id: ROUTING.platformId,
+      content: JSON.stringify({ text: 'Daily recap: lots happened today.' }),
     });
-    expect(summaryRows).toHaveLength(0);
-    const control = out.filter((m) => JSON.parse(m.content).action === 'silent_turn_complete');
-    expect(control).toHaveLength(1);
+    await dispatchResultText(
+      '<message to="boys-night">Daily recap: lots happened today.</message>',
+      ROUTING,
+      false,
+      '2026-06-10T00:00:00',
+      false,
+      true,
+    );
+    expect(getUndeliveredMessages().filter((m) => m.kind === 'chat')).toHaveLength(1);
+  });
+
+  it('task turn permits multiple different final blocks to one destination', async () => {
+    insertChannelDestination('boys-night');
+    await dispatchResultText(
+      '<message to="boys-night">First task result.</message><message to="boys-night">Second task result.</message>',
+      ROUTING,
+      false,
+      '2026-06-10T00:00:00',
+      false,
+      true,
+    );
+    expect(getUndeliveredMessages().filter((m) => m.kind === 'chat')).toHaveLength(2);
   });
 
   it('chat turn (not task): a final <message> after a mid-turn tool send to the same destination is NOT suppressed', async () => {
     // The task-turn suppression must NOT bleed into chat turns: an addressed
     // chat turn may legitimately send a file/message via a tool and then a
-    // separate follow-up <message> to the same channel. Only task turns owe
-    // "exactly one message".
+    // separate follow-up <message> to the same channel. Task turns now use
+    // the same destination-and-body dedup, not an exactly-one-message cap.
     insertChannelDestination('boys-night');
     const { writeMessageOut } = await import('./db/messages-out.js');
     const turnStartedAt = '2026-06-10T00:00:00';
@@ -1672,4 +1689,66 @@ describe('dispatchResultText — local-file-link salvage', () => {
     expect(content.text).toBe('See [the docs](https://example.com/x).');
     expect(content.files).toBeUndefined();
   });
+});
+
+// September 10 Tico: two scheduled jobs shared one provider turn. Both the
+// acknowledgment and the unrelated finance send arrived, but golf's final did not.
+describe('co-batched task result delivery', () => {
+  it.each([false, true])(
+    'keeps final outcome after tool acknowledgment and unrelated task (streamed=%s)',
+    async (streamed) => {
+      getInboundDb()
+        .prepare(
+          `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id) VALUES ('tico', 'Tico', 'channel', 'whatsapp', 'tico-chat', NULL)`,
+        )
+        .run();
+      const { writeMessageOut } = await import('./db/messages-out.js');
+      const final = '<message to="tico">No morning slots were available. Nothing booked.</message>';
+      async function* events(): AsyncGenerator<ProviderEvent> {
+        yield { type: 'init', continuation: 'task-session' };
+        for (const [id, text] of [
+          ['golf-ack', 'Checking availability now.'],
+          ['finance-report', 'Finance report: new transactions.'],
+        ]) {
+          await writeMessageOut({
+            id,
+            kind: 'chat',
+            channel_type: 'whatsapp',
+            platform_id: 'tico-chat',
+            content: JSON.stringify({ text }),
+          });
+        }
+        if (streamed) yield { type: 'text', text: final };
+        yield { type: 'result', text: final };
+      }
+      const query: AgentQuery = { push: () => {}, end: () => {}, abort: () => {}, events: events() };
+      await processQuery(
+        query,
+        { platformId: null, channelType: null, threadId: 'system:tasks:golf', inReplyTo: null, taskFire: true },
+        ['golf-task', 'finance-task'],
+        streamed ? 'claude' : 'codex',
+        null,
+        false,
+        'TestBot',
+        [
+          { seriesId: 'golf', taskId: 'golf-task', dispatched: [], assistantText: null, written: false },
+          { seriesId: 'finance', taskId: 'finance-task', dispatched: [], assistantText: null, written: false },
+        ],
+        null,
+        undefined,
+        'Check golf and report finance',
+        undefined,
+        streamed,
+      );
+      expect(
+        getUndeliveredMessages()
+          .filter((m) => m.kind === 'chat')
+          .map((m) => JSON.parse(m.content).text),
+      ).toEqual([
+        'Checking availability now.',
+        'Finance report: new transactions.',
+        'No morning slots were available. Nothing booked.',
+      ]);
+    },
+  );
 });

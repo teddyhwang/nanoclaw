@@ -1319,7 +1319,7 @@ export async function processQuery(
   registerPushContexts([...taskFireContexts]);
   const mostRecentTaskContext = (): TaskFireContext | null => pickPushScopedContext(pushes);
   let streamErrored = false;
-  // Lower bound for the task-turn destination dedup, advanced after each
+  // Lower bound for the task-turn destination/body dedup, advanced after each
   // result so the dedup only ever sees tool-sends from the CURRENT result's
   // turn — never an earlier turn's legitimate send in the same processQuery.
   // See dispatchResultText's `taskTurnDedupSince` param.
@@ -2168,7 +2168,7 @@ export async function processQuery(
           // EARLIER push's legit send to a destination suppress a LATER,
           // distinct push's message to the same destination (cross-turn
           // bleed — broke `mixed task + chat batch` integration test).
-          // Scoping the task-turn destination dedup to "since the previous
+          // Scoping the task-turn destination/body dedup to "since the previous
           // result boundary" confines it to this push's own mid-turn sends.
           resultBoundaryAt = outboundDbNow();
           // Eager flush: a `result` means the turn finished. Write the
@@ -2602,29 +2602,10 @@ function wasWrittenInSeqWindow(dest: DestinationEntry, body: string, afterSeq: n
   }
 }
 
-function destinationAlreadyReceivedTaskSend(
-  dest: DestinationEntry,
-  taskTurn: boolean,
-  taskTurnDedupSince: string | undefined,
-): boolean {
-  if (!taskTurn || !taskTurnDedupSince) return false;
-  const channelType = dest.type === 'channel' ? dest.channelType : 'agent';
-  const platformId = dest.type === 'channel' ? dest.platformId : dest.agentGroupId;
-  return !!(
-    channelType &&
-    platformId &&
-    hasChatMessageToDestinationSince(taskTurnDedupSince, {
-      channel_type: channelType,
-      platform_id: platformId,
-    })
-  );
-}
-
 /**
- * Deliver closed message blocks from the streamed-text door. Unlike upstream's
- * task one-door contract, Optimus permits a task's wrapped block when it is the
- * task's only deliberate send; the same destination/tool-send dedupe used by
- * the final dispatcher is applied here.
+ * Deliver closed message blocks from the streamed-text door. Tool/result echo
+ * suppression requires the same destination AND body. A prior acknowledgment
+ * or another co-batched task's send is not evidence this result was delivered.
  */
 export async function deliverMidTurnBlocks(
   text: string,
@@ -2674,12 +2655,9 @@ export async function deliverMidTurnBlocks(
     }
     seen.add(dedupKey);
 
-    if (options.turnStartedAt && wasTextWrittenToDestinationSince(destination, body, options.turnStartedAt)) {
+    const dedupSince = options.taskTurn ? (options.taskTurnDedupSince ?? options.turnStartedAt) : options.turnStartedAt;
+    if (dedupSince && wasTextWrittenToDestinationSince(destination, body, dedupSince)) {
       log(`Suppressing duplicate mid-turn <message to="${block.to}"> already delivered via MCP tool`);
-      continue;
-    }
-    if (destinationAlreadyReceivedTaskSend(destination, options.taskTurn === true, options.taskTurnDedupSince)) {
-      log(`Suppressing mid-turn task message to "${block.to}" — destination already received this task's send`);
       continue;
     }
     if (turnStartSeq !== undefined && wasWrittenInSeqWindow(destination, body, turnStartSeq, segmentStartSeq)) {
@@ -2782,12 +2760,9 @@ export async function dispatchResultText(
     }
     seen.add(dedupKey);
 
-    if (turnStartedAt && wasTextWrittenToDestinationSince(destination, body, turnStartedAt)) {
+    const dedupSince = taskTurn ? taskTurnDedupSince : turnStartedAt;
+    if (dedupSince && wasTextWrittenToDestinationSince(destination, body, dedupSince)) {
       log(`Suppressing duplicate final <message to="${block.to}"> already delivered via MCP tool`);
-      continue;
-    }
-    if (destinationAlreadyReceivedTaskSend(destination, taskTurn, taskTurnDedupSince)) {
-      log(`Suppressing final task message to "${block.to}" — destination already received this task's send`);
       continue;
     }
 

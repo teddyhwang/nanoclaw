@@ -4,7 +4,7 @@
  *
  * - render as <cross-session-context> blocks, never as <message> blocks;
  * - never provide reply routing;
- * - never change a task batch's local sole-send semantics;
+ * - never change a task batch's local delivery semantics;
  * - never count as commands (a copied "/clear" is inert);
  * - never trigger on their own (accumulate gate regression).
  */

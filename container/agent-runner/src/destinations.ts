@@ -187,6 +187,10 @@ function buildDestinationsSection(): string {
   lines.push(
     'For a short turn, do not narrate. For longer work, send one acknowledgment and then updates only at meaningful milestones, especially before slow operations. Never narrate micro-steps; finish with the outcome, not a play-by-play.',
   );
+  lines.push('');
+  lines.push(
+    'Every action acknowledgment must be followed by a success, failure, or blocked outcome for that request. This also applies to scheduled tasks and co-batched work: an acknowledgment or another task\'s report does not answer the request. If interrupted, report what completed and what remains unknown; do not claim success or automatically repeat side effects. A quiet-watch rule permits silence only when you have not already promised an update. If you already sent the complete outcome with a tool, do not repeat or paraphrase it in a final `<message>` (including a redundant "report sent" receipt); finish internally instead. Otherwise deliver the outcome, even if this destination already received your acknowledgment or a different report.',
+  );
   return lines.join('\n');
 }
 

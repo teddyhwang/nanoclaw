@@ -113,6 +113,21 @@ type ProviderEvent =
 - **`progress`** — optional, for logging. The agent-runner logs these but doesn't act on them.
 - **`activity`** — a liveness signal. Providers MUST yield it on every underlying SDK event (tool call, thinking, partial message) so the poll-loop's idle timer stays honest during long tool runs.
 
+## Fork delivery invariant: an acknowledgment is not a result
+
+Task turns, including co-batched jobs, may send an acknowledgment and a distinct
+outcome to the same destination. The streamed and final dispatchers deduplicate
+matching destination + normalized body within the current result boundary; they
+must not suppress a different result merely because that destination has any
+prior outbound row. The former destination-only task guard could drop a golf
+outcome after an acknowledgment or unrelated finance report.
+
+Exact tool/final echoes and streaming/result duplicate doors remain suppressed.
+Different-body summaries are not assumed to be duplicates: the agent is instructed
+to finish internally when a tool already sent the complete outcome, and otherwise
+to report success/failure/blocked status after every acknowledgment. Outbox
+persistence is not proof of platform delivery; verify the host receipt separately.
+
 ## Provider Implementations
 
 Only the `claude` provider ships in trunk. The Codex and OpenCode sections below document the provider interface for reference and for skills that install additional providers — they are not baked into the core image.
