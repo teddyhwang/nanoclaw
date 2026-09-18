@@ -135,6 +135,65 @@ export function registerMessageInterceptor(fn: MessageInterceptorFn): void {
 }
 
 /**
+ * Engage-decision observer. Fires once per (event, wiring) pair immediately
+ * after `evaluateEngage` has decided, carrying the inputs AND the verdict.
+ *
+ * This is deliberately an OBSERVER, not a gate: the return value is ignored
+ * and observers are invoked fire-and-forget, so nothing here can change
+ * whether a message engages or add latency to routing. It exists so a host
+ * can evaluate an alternative engage strategy (e.g. a classifier) against
+ * the live regex/mention verdict on real traffic before anything is allowed
+ * to act on it. A gate would conflate measurement with control; the point of
+ * this seam is to measure first.
+ *
+ * Why here and not in a message interceptor: interceptors run at the top of
+ * `routeInbound`, before messaging-group resolution, so they cannot see the
+ * per-wiring `engage_mode` or the verdict this hook reports.
+ *
+ * Observers MUST NOT throw. Errors are caught and dropped to a debug log;
+ * an observer is never allowed to break delivery.
+ */
+export interface EngageObservation {
+  event: InboundEvent;
+  agent: MessagingGroupAgent;
+  messagingGroup: MessagingGroup;
+  /** Plain text extracted from the inbound, as `evaluateEngage` saw it. */
+  text: string;
+  isMention: boolean;
+  isReplyToBot: boolean;
+  isReaction: boolean;
+  /** What the live engage logic decided. The ground truth to compare against. */
+  engaged: boolean;
+}
+
+export type EngageObserverFn = (obs: EngageObservation) => void | Promise<void>;
+
+const engageObservers: EngageObserverFn[] = [];
+
+export function registerEngageObserver(fn: EngageObserverFn): () => void {
+  engageObservers.push(fn);
+  return () => {
+    const i = engageObservers.indexOf(fn);
+    if (i >= 0) engageObservers.splice(i, 1);
+  };
+}
+
+function notifyEngageObservers(obs: EngageObservation): void {
+  if (engageObservers.length === 0) return;
+  for (const observe of engageObservers) {
+    // Fire-and-forget by design: routing must not await an observer. Both
+    // the sync throw and the async rejection are swallowed.
+    try {
+      void Promise.resolve(observe(obs)).catch((err) => {
+        log.debug('engage observer failed', { err });
+      });
+    } catch (err) {
+      log.debug('engage observer threw synchronously', { err });
+    }
+  }
+}
+
+/**
  * Channel-registration hook. Runs when the router sees a mention/DM on a
  * messaging group that has no wirings AND hasn't been denied. The hook is
  * expected to escalate to an owner (card, etc.) and arrange for future
@@ -420,6 +479,22 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
         : isReaction
           ? evaluateReactionEngage(isReplyToBotOutbound)
           : evaluateEngage(agent, messageText, isMention, isReplyToBot);
+
+    // Report the decision to observers (non-vetoing, fire-and-forget). Skips
+    // loopback/backfill: those are forced non-engage for mechanical reasons
+    // and carry no signal about whether a real message deserved a reply.
+    if (!isBotLoopback && !isBackfill) {
+      notifyEngageObservers({
+        event,
+        agent,
+        messagingGroup: mg,
+        text: messageText,
+        isMention,
+        isReplyToBot,
+        isReaction,
+        engaged: engages,
+      });
+    }
 
     const accessOk = engages && (!accessGate || (await accessGate(event, userId, mg, agent.agent_group_id)).allowed);
     const scopeOk = engages && (!senderScopeGate || (await senderScopeGate(event, userId, mg, agent)).allowed);

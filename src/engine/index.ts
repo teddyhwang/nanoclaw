@@ -66,6 +66,11 @@ export {
   addChannelRequestGate,
 } from './router-hooks.js';
 
+// Engage-decision observer. Re-exported straight from the router (no
+// router-hooks wrapper) because the registry is already multi-subscriber
+// with unsubscribe semantics — there is no singleton setter to compose.
+export { registerEngageObserver, type EngageObservation, type EngageObserverFn } from '../router.js';
+
 export {
   addDestinationGuard,
   type DestinationGuardFn,
