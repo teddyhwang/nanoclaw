@@ -20,6 +20,7 @@ import {
 import { getSessionRouting } from '../db/session-routing.js';
 import { getCurrentBatchReplyTarget, getCurrentInReplyTo, getCurrentReplyRoute } from '../db/session-state.js';
 import { getAgentMailbox } from '../mailbox/index.js';
+import { findQueuedGeneratedImage } from '../generated-image-delivery.js';
 import { attachLocalFileLinks, outboxDirFor, sweepLocalFileLinks } from '../local-file-links.js';
 import { resolveDestinationThread } from '../db/session-routing.js';
 import { registerTools } from './server.js';
@@ -263,7 +264,7 @@ export const sendFile: McpToolDefinition = {
   tool: {
     name: 'send_file',
     description:
-      "Send a file to a named destination. If you have only one destination, you can omit `to`. The `text` argument IS the chat message posted alongside the file — do NOT follow up with a separate `<message>` repeating or paraphrasing it; the turn is complete from the user's perspective once this returns.",
+      "Send a file to a named destination. If you have only one destination, you can omit `to`. The `text` argument IS the chat message posted alongside the file — do NOT follow up with a separate `<message>` repeating or paraphrasing it; the turn is complete from the user's perspective once this returns. Codex native image_gen images are automatically forwarded: do not send_file the same image again. NanoClaw generate_image and ordinary artifacts still require send_file.",
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -289,12 +290,21 @@ export const sendFile: McpToolDefinition = {
     const resolvedPath = path.isAbsolute(filePath) ? filePath : path.resolve('/workspace/agent', filePath);
     if (!fs.existsSync(resolvedPath)) return err(`File not found: ${filePath}`);
 
+    const inReplyTo = resolveInReplyTo(routing.channel_type, routing.platform_id);
+    const alreadyQueued = findQueuedGeneratedImage(resolvedPath, {
+      channelType: routing.channel_type,
+      platformId: routing.platform_id,
+      threadId: routing.thread_id,
+      inReplyTo,
+    });
     const id = generateId();
     const filename = (args.filename as string) || path.basename(resolvedPath);
 
-    const outboxDir = outboxDirFor(id);
-    fs.mkdirSync(outboxDir, { recursive: true });
-    fs.copyFileSync(resolvedPath, path.join(outboxDir, filename));
+    if (!alreadyQueued) {
+      const outboxDir = outboxDirFor(id);
+      fs.mkdirSync(outboxDir, { recursive: true });
+      fs.copyFileSync(resolvedPath, path.join(outboxDir, filename));
+    }
 
     // A caption often re-links the very file being sent (and sometimes a
     // sibling the model meant to send too). Strip the unusable markup; attach
@@ -305,22 +315,33 @@ export const sendFile: McpToolDefinition = {
       skipPaths: [resolvedPath],
       reservedNames: [filename],
     });
+    const files = alreadyQueued ? extraFiles : [filename, ...extraFiles];
+    if (alreadyQueued && !swept.text.trim() && files.length === 0) {
+      return ok(
+        `Image already queued for ${routing.resolvedName} (id: ${alreadyQueued}); duplicate attachment skipped. Do not resend it.`,
+      );
+    }
 
     await writeMessageOut({
       id,
-      in_reply_to: resolveInReplyTo(routing.channel_type, routing.platform_id),
+      in_reply_to: inReplyTo,
       kind: 'chat',
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,
       thread_id: routing.thread_id,
-      content: JSON.stringify({ text: swept.text, files: [filename, ...extraFiles] }),
+      content: JSON.stringify({ text: swept.text, ...(files.length ? { files } : {}) }),
     });
 
-    log(`send_file: ${id} → ${routing.resolvedName} (${[filename, ...extraFiles].join(', ')})`);
+    log(`send_file: ${id} → ${routing.resolvedName} (${files.join(', ')})`);
     const caption = swept.text;
     const captionLine = caption
       ? ` Caption already posted to chat: ${JSON.stringify(caption.length > 80 ? caption.slice(0, 80) + '…' : caption)}. Do not re-send this content in a follow-up <message>.`
       : '';
+    if (alreadyQueued) {
+      return ok(
+        `Image already queued for ${routing.resolvedName} (id: ${alreadyQueued}); duplicate attachment skipped. Additional text/files queued as ${id}.${captionLine}`,
+      );
+    }
     return ok(`File sent to ${routing.resolvedName} (id: ${id}, filename: ${filename}).${captionLine}`);
   },
 };

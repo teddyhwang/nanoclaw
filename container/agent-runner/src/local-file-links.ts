@@ -14,8 +14,8 @@
  * Nicole replied "Cannot access these photos" and both files had to be
  * hand-resent through `send_file`.
  *
- * The only way a file reaches a user is `send_file` — an outbox copy plus a
- * `files` array on the outbound row. A prompt rule saying so is worth having
+ * Ordinary artifacts use `send_file` — an outbox copy plus a `files` array
+ * on the outbound row. Native Codex images have a separate automatic bridge. A prompt rule saying so is worth having
  * (see `mcp-tools/core.instructions.md`) but is not a guarantee: this is a
  * strong pretrained habit, and the failure is silent and user-visible. So the
  * runner sweeps every agent-authored outbound body here. A link that points at

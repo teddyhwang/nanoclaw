@@ -51,13 +51,13 @@ import {
 import { computeRotationDate } from './session-rotation.js';
 import { attachLocalFileLinks, outboxDirFor, sweepLocalFileLinks, type DetectedFileLink } from './local-file-links.js';
 import { TIMEZONE } from './timezone.js';
+import { findQueuedGeneratedImage, recordQueuedGeneratedImage } from './generated-image-delivery.js';
 import fs from 'fs';
 import path from 'path';
 import {
   formatMessages,
   extractRouting,
   isAddressedTurn,
-  pickInReplyToMessage,
   extractMessageSender,
   extractImageAttachments,
   categorizeMessage,
@@ -2405,6 +2405,10 @@ export async function deliverGeneratedImage(
     throw new Error(`Refusing invalid generated image: ${generatedPath}`);
   }
 
+  if (findQueuedGeneratedImage(resolved, routing)) {
+    log('Skipping already queued generated image for this request');
+    return;
+  }
   const id = generateId();
   const filename = path.basename(resolved);
   const outboxDir = outboxDirFor(id);
@@ -2419,6 +2423,7 @@ export async function deliverGeneratedImage(
     thread_id: routing.threadId,
     content: JSON.stringify({ text: '', files: [filename] }),
   });
+  recordQueuedGeneratedImage(path.join(outboxDir, filename), routing, id);
   log(`Generated image staged for automatic delivery: ${filename}`);
 }
 
