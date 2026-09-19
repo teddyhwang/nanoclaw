@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { isDeepStrictEqual } from 'node:util';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import {
   DEVICE_PROOF_HEADER,
@@ -103,9 +104,9 @@ async function serve(req: IncomingMessage, res: ServerResponse): Promise<void> {
   res.writeHead(404);
   res.end(JSON.stringify({ error: 'not_found' }));
 }
-async function until(check: () => boolean, timeout = 5_000): Promise<void> {
+async function until(check: () => boolean | Promise<boolean>, timeout = 5_000): Promise<void> {
   const deadline = Date.now() + timeout;
-  while (!check()) {
+  while (!(await check())) {
     if (Date.now() > deadline) throw new Error('timed out');
     await sleep(10);
   }
@@ -200,8 +201,17 @@ it('reports sign_in_required and clears local credentials when the portal refuse
   ticketStatus = 401;
   const runtime = startPortalRuntime({ root, homeDir: home, log, intervalMs: 50, Socket: FakeSocket });
   await until(() => log.mock.calls.some(([event]) => event.event === 'sign_in_required'));
-  await sleep(200);
-  const journal = JSON.parse(await readFile(journalFile(), 'utf8')) as { credentials: object; operations: object };
+  // `sign_in_required` is logged synchronously by rejectIdentity(), but the
+  // journal is only cleared on a LATER check() pass (process lock + HTTP +
+  // client.initialize()). Poll for the actual post-condition instead of
+  // sleeping a fixed interval, which raced on slow CI runners.
+  const readJournal = async (): Promise<{ credentials: object; operations: object }> =>
+    JSON.parse(await readFile(journalFile(), 'utf8')) as { credentials: object; operations: object };
+  await until(async () => {
+    const j = await readJournal();
+    return isDeepStrictEqual(j.credentials, {}) && isDeepStrictEqual(j.operations, {});
+  });
+  const journal = await readJournal();
   expect(journal.credentials).toEqual({});
   expect(journal.operations).toEqual({});
   expect(FakeSocket.instances).toEqual([]);
