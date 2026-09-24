@@ -12,6 +12,8 @@ import type {
   OutboundWrite,
   SessionRouting,
   StateValue,
+  TaskFireRecord,
+  TaskFireStatus,
   TaskFireWrite,
   TaskSeriesSnapshot,
 } from '../types.js';
@@ -282,6 +284,18 @@ export function sqliteWriteTaskFire(fire: TaskFireWrite): void {
          )`,
     ).run({ $series_id: fire.seriesId });
   })();
+}
+
+/** Latest recorded fire of a series; `fired_at` is SQLite UTC `YYYY-MM-DD HH:MM:SS`. */
+export function sqliteGetLatestTaskFire(seriesId: string): TaskFireRecord | undefined {
+  const row = getOutboundDb()
+    .prepare(
+      `SELECT fired_at, status, error_message FROM task_fires
+        WHERE series_id = ? ORDER BY fired_at DESC, rowid DESC LIMIT 1`,
+    )
+    .get(seriesId) as { fired_at: string; status: TaskFireStatus; error_message: string | null } | null;
+  if (!row) return undefined;
+  return { firedAt: `${row.fired_at.replace(' ', 'T')}Z`, status: row.status, errorMessage: row.error_message };
 }
 
 export function sqliteWriteMessageOut(message: OutboundWrite): number {

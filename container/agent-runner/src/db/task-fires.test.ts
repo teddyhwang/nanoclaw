@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
 
 import { getOutboundDb, initTestSessionDb } from '../mailbox/sqlite/connection.js';
-import { writeTaskFire } from './task-fires.js';
+import { readLatestTaskFire, writeTaskFire } from './task-fires.js';
 
 interface TaskFireRow {
   id: string;
@@ -204,5 +204,31 @@ describe('task_fires writer', () => {
 
     expect(slowCount).toBe(1);
     expect(chattyCount).toBe(100);
+  });
+});
+
+describe('readLatestTaskFire', () => {
+  test('returns undefined for a series with no fires', () => {
+    expect(readLatestTaskFire('series-none')).toBeUndefined();
+  });
+
+  test('returns the newest fire as ISO-Z with its error', () => {
+    writeTaskFire({ id: 'a', seriesId: 's', taskId: 't1', status: 'silent', assistantText: 'ok', dispatched: [] });
+    writeTaskFire({
+      id: 'b',
+      seriesId: 's',
+      taskId: 't2',
+      status: 'error',
+      assistantText: null,
+      dispatched: [],
+      errorMessage: 'API Error: 401 OAuth access token has been revoked.',
+    });
+    writeTaskFire({ id: 'c', seriesId: 'other', taskId: 't3', status: 'silent', assistantText: 'x', dispatched: [] });
+
+    const fire = readLatestTaskFire('s');
+    expect(fire?.status).toBe('error');
+    expect(fire?.errorMessage).toBe('API Error: 401 OAuth access token has been revoked.');
+    expect(fire?.firedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+    expect(Number.isNaN(Date.parse(fire!.firedAt))).toBe(false);
   });
 });

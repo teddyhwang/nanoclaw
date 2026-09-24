@@ -59,6 +59,13 @@ export interface TaskFireWrite {
   errorMessage?: string | null;
 }
 
+/** The most recent recorded fire of a series, read before its next fire runs. */
+export interface TaskFireRecord {
+  firedAt: string;
+  status: TaskFireStatus;
+  errorMessage: string | null;
+}
+
 export interface TaskSeriesSnapshot {
   id: string;
   status: string;
@@ -80,6 +87,7 @@ export interface MailboxOperations {
   isTaskOnlyTurn(): boolean;
   listTaskSeries(status?: string): TaskSeriesSnapshot[];
   writeTaskFire(fire: TaskFireWrite): void;
+  getLatestTaskFire(seriesId: string): TaskFireRecord | undefined;
   writeMessageOut(message: OutboundMessageDraft): Promise<number>;
   getMessageIdBySeq(sequence: number): string | null;
   getReplyTargetMessageIdBySeq(sequence: number): string | null;

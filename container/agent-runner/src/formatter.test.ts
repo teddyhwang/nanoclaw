@@ -27,7 +27,7 @@ import {
   stripInternalTags,
   stripLegacyTaskContract,
 } from './formatter.js';
-import { initTestSessionDb, closeSessionDb, getInboundDb } from './mailbox/sqlite/connection.js';
+import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './mailbox/sqlite/connection.js';
 import { TIMEZONE, formatLocalTime } from './timezone.js';
 
 // Production always assigns seq (the host writer); a NULL seq makes both the
@@ -55,14 +55,15 @@ function insertMessage(
     platformId?: string | null;
     channelType?: string | null;
     threadId?: string | null;
+    seriesId?: string | null;
   },
 ) {
   const timestamp = opts?.timestamp ?? new Date().toISOString();
   getInboundDb()
     .prepare(
       `INSERT INTO messages_in
-         (id, kind, timestamp, status, process_after, content, seq, "trigger", platform_id, channel_type, thread_id)
-       VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)`,
+         (id, kind, timestamp, status, process_after, content, seq, "trigger", platform_id, channel_type, thread_id, series_id)
+       VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -75,6 +76,7 @@ function insertMessage(
       opts?.platformId ?? null,
       opts?.channelType ?? null,
       opts?.threadId ?? null,
+      opts?.seriesId ?? null,
     );
 }
 
@@ -319,6 +321,59 @@ describe('task timestamps', () => {
     expect(result).toContain(`time="${formatLocalTime(scheduled, TIMEZONE)}"`);
     expect(result).not.toContain(`time="${formatLocalTime(created, TIMEZONE)}"`);
     expect(result).toMatch(/current_time="(?:Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday), [^"]+"/);
+  });
+});
+
+describe('task after a failed fire', () => {
+  function recordFire(seriesId: string, status: string, firedAt: string, errorMessage: string | null) {
+    getOutboundDb()
+      .prepare(
+        `INSERT INTO task_fires (id, series_id, task_id, fired_at, status, assistant_text, dispatched, error_message)
+         VALUES (?, ?, ?, ?, ?, NULL, '[]', ?)`,
+      )
+      .run(`${seriesId}-${firedAt}`, seriesId, 'prior-task', firedAt, status, errorMessage);
+  }
+
+  it('tells the agent the previous run failed so a re-fire is not read as scheduler lag', () => {
+    recordFire('dup-scan', 'silent', '2026-09-23 13:01:10', null);
+    recordFire(
+      'dup-scan',
+      'error',
+      '2026-09-24 13:03:15',
+      'Failed to authenticate. API Error: 401 OAuth access token has been revoked.',
+    );
+    insertMessage('t1', 'task', { prompt: 'scan for duplicate charges' }, { seriesId: 'dup-scan' });
+
+    const result = formatMessages(getPendingMessages());
+
+    expect(result).toContain("Previous run: this task's last run");
+    expect(result).toContain('401 OAuth access token has been revoked');
+    expect(result).toContain('not scheduler lag');
+    expect(result.indexOf('Previous run:')).toBeLessThan(result.indexOf('Instructions:'));
+  });
+
+  it('says nothing when the previous run succeeded', () => {
+    recordFire('dup-scan', 'error', '2026-09-23 13:01:10', 'boom');
+    recordFire('dup-scan', 'silent', '2026-09-24 13:03:15', null);
+    insertMessage('t1', 'task', { prompt: 'scan' }, { seriesId: 'dup-scan' });
+
+    expect(formatMessages(getPendingMessages())).not.toContain('Previous run:');
+  });
+
+  it('says nothing for a first fire or a series-less task', () => {
+    insertMessage('t1', 'task', { prompt: 'first' }, { seriesId: 'fresh' });
+    insertMessage('t2', 'task', { prompt: 'legacy' });
+
+    expect(formatMessages(getPendingMessages())).not.toContain('Previous run:');
+  });
+
+  it('escapes the error text', () => {
+    recordFire('s', 'error', '2026-09-24 13:03:15', '<boom> & "quotes"');
+    insertMessage('t1', 'task', { prompt: 'x' }, { seriesId: 's' });
+
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain('&lt;boom&gt; &amp;');
+    expect(result).not.toContain('<boom>');
   });
 });
 

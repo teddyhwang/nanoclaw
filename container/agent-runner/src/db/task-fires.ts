@@ -13,9 +13,9 @@
  * grouping by series_id reconstructs the per-task fire history.
  */
 import { getAgentMailbox } from '../mailbox/index.js';
-import type { TaskFireDispatch, TaskFireStatus, TaskFireWrite } from '../mailbox/types.js';
+import type { TaskFireDispatch, TaskFireRecord, TaskFireStatus, TaskFireWrite } from '../mailbox/types.js';
 
-export type { TaskFireDispatch, TaskFireStatus };
+export type { TaskFireDispatch, TaskFireRecord, TaskFireStatus };
 export type WriteTaskFire = TaskFireWrite;
 
 /**
@@ -24,4 +24,9 @@ export type WriteTaskFire = TaskFireWrite;
  */
 export function writeTaskFire(fire: WriteTaskFire): void {
   getAgentMailbox().operations.writeTaskFire(fire);
+}
+
+/** Latest recorded fire of a series. Read at format time, before this fire's own row exists. */
+export function readLatestTaskFire(seriesId: string): TaskFireRecord | undefined {
+  return getAgentMailbox().operations.getLatestTaskFire(seriesId);
 }

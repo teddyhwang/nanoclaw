@@ -39,6 +39,7 @@ import {
   sqliteTimestamp,
   sqliteWriteMessageOut,
   sqliteWriteTaskFire,
+  sqliteGetLatestTaskFire,
 } from './operations.js';
 import type { MessageInRow } from '../../db/messages-in.js';
 import type { MessageOutRow } from '../../db/messages-out.js';
@@ -167,6 +168,10 @@ export class SqliteAgentMailbox implements AgentMailbox {
 
   writeTaskFire(fire: Parameters<MailboxOperations['writeTaskFire']>[0]): void {
     sqliteWriteTaskFire(fire);
+  }
+
+  getLatestTaskFire(seriesId: string) {
+    return sqliteGetLatestTaskFire(seriesId);
   }
 
   async writeMessageOut(message: Parameters<MailboxOperations['writeMessageOut']>[0]): Promise<number> {

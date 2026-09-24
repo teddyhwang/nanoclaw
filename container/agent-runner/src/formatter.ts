@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { findByRouting } from './destinations.js';
+import { readLatestTaskFire } from './db/task-fires.js';
 import type { MessageInRow } from './db/messages-in.js';
 import { TIMEZONE, formatLocalTime, formatLocalStamp } from './timezone.js';
 import './providers/index.js';
@@ -509,11 +510,38 @@ function formatTaskMessage(msg: MessageInRow): string {
     timeStyle: 'short',
   });
   const parts: string[] = [];
+  const previousFailure = describePreviousTaskFailure(msg.series_id);
+  if (previousFailure) parts.push(previousFailure, '');
   if (content.scriptOutput) {
     parts.push('Script output:', JSON.stringify(content.scriptOutput, null, 2), '');
   }
   parts.push('Instructions:', stripLegacyTaskContract(content.prompt || ''));
   return `<task${from} time="${escapeXml(time)}" current_time="${escapeXml(currentTime)}">${parts.join('\n')}</task>`;
+}
+
+/**
+ * A run that follows a failed fire must know it. Without this, a recovery
+ * re-fire (operator sets process_after=now after an auth outage) renders with
+ * `time` = the recovery time, and the agent — which cannot see task_fires —
+ * reported "scheduled tasks fire hours late" as a scheduler gap (Tico Dream,
+ * 2026-09-24: both 04:00 and 09:00 fires had 401'd on time).
+ */
+function describePreviousTaskFailure(seriesId: string | null): string | null {
+  if (!seriesId) return null;
+  let fire;
+  try {
+    fire = readLatestTaskFire(seriesId);
+  } catch {
+    return null;
+  }
+  if (!fire || fire.status !== 'error') return null;
+  const when = formatLocalStamp(new Date(fire.firedAt), TIMEZONE);
+  const error = (fire.errorMessage || 'unknown error').replace(/\s+/g, ' ').trim().slice(0, 200);
+  return (
+    `Previous run: this task's last run (${escapeXml(when)}) failed before finishing — ${escapeXml(error)}. ` +
+    'This run is the next attempt; if it starts later than the schedule, that is a recovery re-run, ' +
+    'not scheduler lag. Cover anything the failed run should have handled.'
+  );
 }
 
 const LEGACY_TASK_CONTRACT_MARKERS = [
