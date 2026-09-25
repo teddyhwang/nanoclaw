@@ -432,3 +432,15 @@ it('awaits and contains async observer failures', async () => {
   });
   expect(await collect(provider.query({ prompt: 'q', cwd: '/tmp' }))).toEqual([{ type: 'result', text: 'ok' }]);
 });
+
+it('recognizes upstream dedicated credential errors without leaking alternate continuations', async () => {
+  const primary = new StubProvider([[{ type: 'result', text: null, error: REVOKED, isError: true }]]);
+  const fallback = new StubProvider([
+    [
+      { type: 'init', continuation: 'alternate-secret' },
+      { type: 'result', text: 'ok' },
+    ],
+  ]);
+  const provider = new UsageLimitFallbackProvider({ primaryName: 'claude', fallbackName: 'codex', primary, fallback });
+  expect(await collect(provider.query({ prompt: 'q', cwd: '/tmp' }))).toEqual([{ type: 'result', text: 'ok' }]);
+});

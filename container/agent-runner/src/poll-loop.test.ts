@@ -1733,6 +1733,51 @@ describe('error result with no <message> envelope', () => {
     expect(pushes).toHaveLength(0);
   });
 
+  it('delivers completed wrapped output and one safe notice while archiving failure exactly once', async () => {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+      VALUES ('main', 'main', 'channel', 'discord', 'chan-1', NULL)`,
+      )
+      .run();
+    const text = '<message to="main">Completed before failure.</message>\n\nBackend failed.';
+    const { query, pushes } = makeResultQuery({ type: 'result', text, isError: true });
+    const exchanges: ProviderExchange[] = [];
+    await processQuery(query, ERR_ROUTING, ['m1'], 'mock', (exchange) => exchanges.push(exchange), 'prompt', undefined);
+    expect(
+      getUndeliveredMessages()
+        .filter((row) => row.kind === 'chat')
+        .map((row) => JSON.parse(row.content).text),
+    ).toEqual(['Completed before failure.', 'The agent run failed. Check the logs for details.']);
+    expect(exchanges).toEqual([{ prompt: 'prompt', result: text, continuation: 'sess-1', status: 'error' }]);
+    expect(pushes).toHaveLength(0);
+  });
+
+  it('sanitizes the upstream dedicated auth-error field and emits metadata-only alerting', async () => {
+    const { query } = makeResultQuery({ type: 'result', text: null, error: REVOKED, isError: true });
+    await processQuery(
+      query,
+      ERR_ROUTING,
+      ['m1'],
+      'claude',
+      null,
+      false,
+      'TestBot',
+      [],
+      null,
+      undefined,
+      'prompt',
+      undefined,
+    );
+    expect(
+      getUndeliveredMessages()
+        .filter((row) => row.kind === 'chat')
+        .map((row) => JSON.parse(row.content).text),
+    ).toEqual([AUTH_FAILURE_USER_TEXT]);
+    expect(systemActions().filter((a) => a.action === 'provider_auth_failure')).toHaveLength(1);
+    expect(JSON.stringify(systemActions())).not.toContain(REVOKED);
+  });
+
   it('still nudges (and does not deliver) a normal unwrapped result', async () => {
     const { query, pushes } = makeResultQuery({ type: 'result', text: 'bare text, no envelope' });
 
