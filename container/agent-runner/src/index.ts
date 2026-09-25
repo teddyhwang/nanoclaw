@@ -44,6 +44,7 @@ import { getProviderRuntimeContract } from './providers/provider-registry.js';
 import { resolvePluginServer } from './plugin-mcp.js';
 import type { AgentProvider, McpServerConfig, ProviderOptions } from './providers/types.js';
 import { resolveUsageLimitFallback, UsageLimitFallbackProvider } from './providers/usage-limit-fallback.js';
+import { emitProviderAuthFailureAlert } from './provider-auth-failure.js';
 import { loadConfiguredProvider } from './engine/provider-plugins.js';
 import { runPollLoop, requestGracefulShutdown } from './poll-loop.js';
 import { registerProviderMemorySessionHook } from './provider-contracts/realize.js';
@@ -171,8 +172,9 @@ async function main(): Promise<void> {
 
     // Optional transparent account-quota failover. The host enables this and
     // supplies the alternate family model through spawn env. Only explicit
-    // classification:'quota' events trigger it; transport failures keep their
-    // normal retry behavior. The alternate continuation is ephemeral, so a
+    // classification:'quota' events and credential (auth) failure results
+    // trigger it; transport failures keep their normal retry behavior.
+    // The alternate continuation is ephemeral, so a
     // Claude thread id can never be persisted under Codex (or vice versa).
     const fallback = resolveUsageLimitFallback(providerName);
     if (fallback) {
@@ -187,6 +189,16 @@ async function main(): Promise<void> {
         fallbackModel: fallback.model,
         primary: standingProvider,
         fallback: alternate,
+        // A rejected credential stays broken until the operator rotates it,
+        // even when the alternate harness answered this turn — tell the host.
+        onFailover: async (info) => {
+          if (info.reason !== 'auth') return;
+          await emitProviderAuthFailureAlert({
+            provider: info.from,
+            failedOverTo: info.to,
+            turnKind: 'unknown',
+          });
+        },
       });
       log(
         `Usage-limit failover armed: ${providerName} → ${fallback.providerName}` +

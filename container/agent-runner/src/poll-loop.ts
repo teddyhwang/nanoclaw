@@ -70,6 +70,11 @@ import {
 } from './formatter.js';
 import { getConfig } from './config.js';
 import { stripHarnessTagArtifacts } from './harness-tag-strip.js';
+import {
+  AUTH_FAILURE_USER_TEXT,
+  emitProviderAuthFailureAlert,
+  isProviderAuthFailureText,
+} from './provider-auth-failure.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
 import type {
   AgentProvider,
@@ -932,19 +937,29 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         clearContinuationStartedAt(config.providerName);
       }
 
+      const authFailure = isProviderAuthFailureText(errMsg);
+      if (authFailure) {
+        await emitProviderAuthFailureAlert({
+          provider: query.delivery?.providerName ?? config.providerName,
+          failedOverTo: null,
+          turnKind: shouldSendErrorResponseForBatch(keep) ? 'chat' : 'task',
+        });
+      }
       if (retryableBatchFailure) {
         log(`Suppressing user-visible retryable provider error for pending retry: ${errMsg}`);
       } else if (shouldSendErrorResponseForBatch(keep)) {
         // Write error response so the user knows something went wrong.
         // Task-only failures stay in logs: scheduled maintenance prompts are
         // often explicitly silent and should not leak raw runtime errors to chat.
+        // A rejected provider credential is an operator problem: the user gets
+        // a plain notice, never the raw 401 text.
         await writeMessageOut({
           id: generateId(),
           kind: 'chat',
           platform_id: routing.platformId,
           channel_type: routing.channelType,
           thread_id: routing.threadId,
-          content: JSON.stringify({ text: `Error: ${errMsg}` }),
+          content: JSON.stringify({ text: authFailure ? AUTH_FAILURE_USER_TEXT : `Error: ${errMsg}` }),
         });
       } else {
         log(`Suppressing user-visible error for task-only batch: ${errMsg}`);
@@ -1245,6 +1260,11 @@ export async function processQuery(
   // follow-up as the next turn, so the current turn cannot know its contents.
   const pushSuperseded: boolean[] = [false];
   let resultIndex = 0;
+  // Text of the most recent isError result this stream already handled
+  // (delivered to chat or recorded on the task fire). The Claude SDK re-throws
+  // that same failure as "Claude Code returned an error result: <text>" when
+  // the query is later ended; see isHandledErrorResultEcho.
+  let lastHandledErrorResult: string | null = null;
   // Lifecycle accounting is separate from per-push delivery attribution:
   // Codex queues one result per input; Claude may merge pushed inputs into
   // one result. Never use the lifetime resultIndex as an idle signal.
@@ -2049,6 +2069,7 @@ export async function processQuery(
           // Error results are terminal, but never successful/silent fires.
           // Telegram Dream 2026-08-26 returned a gateway 502 as a result;
           // telemetry previously labelled it silent and hid the failure.
+          lastHandledErrorResult = event.isError ? event.text : null;
           if (event.isError) {
             const ctx = mostRecentTaskContext();
             if (ctx) ctx.errorMessage = event.text || 'Provider returned an error result';
@@ -2093,7 +2114,7 @@ export async function processQuery(
             // already delivered to mid-turn via send_message/send_file.
             const isTaskTurn = !!fireCtx && !resultAddressed;
             const { hasUnwrapped, dispatched, resultBlocks } = await dispatchResultText(
-              event.text,
+              event.isError && isProviderAuthFailureText(event.text) ? AUTH_FAILURE_USER_TEXT : event.text,
               routing,
               resultAddressed,
               resultBoundaryAt,
@@ -2116,6 +2137,13 @@ export async function processQuery(
               // interactive chat instead of dropping it as scratchpad. Task-
               // only failures remain silent in-channel, matching the outer
               // provider-throw path and scheduled-maintenance contract.
+              if (isProviderAuthFailureText(event.text)) {
+                await emitProviderAuthFailureAlert({
+                  provider: deliveryProviderName,
+                  failedOverTo: null,
+                  turnKind: isTaskTurn ? 'task' : 'chat',
+                });
+              }
               if (!isTaskTurn) {
                 await deliverErrorResult(event.text, routing);
               } else {
@@ -2302,6 +2330,15 @@ export async function processQuery(
         throw new Error(`retryable provider error, no result: ${retryableErrorWithoutResult}`);
       }
     } catch (err) {
+      if (isHandledErrorResultEcho(err, lastHandledErrorResult, resultIndex, answering)) {
+        // The error result was already delivered/recorded when it arrived;
+        // the SDK is only repeating it at teardown. Rethrowing posted a second
+        // "Error: Claude Code returned an error result: …" to the user
+        // (Danielle DM, 2026-09-24, 13 minutes after the first) and lost
+        // sawResult, so the outer loop misreported the turn as cut short.
+        log(`Ignoring teardown echo of an already-handled error result: ${lastHandledErrorResult}`);
+        return { continuation: queryContinuation, sawResult: true, pressureRotated };
+      }
       streamErrored = true;
       // Claude can emit a retryable API error and then THROW when its CLI
       // dies (e.g. exit 137). That bypasses the normal iterator-close check
@@ -2458,6 +2495,10 @@ async function deliverProviderFile(providerPath: string, routing: RoutingContext
  */
 async function deliverErrorResult(text: string, routing: RoutingContext): Promise<void> {
   log('Error result with no <message> envelope — delivering to channel');
+  // A rejected credential's raw text ("Failed to authenticate. API Error: 401
+  // OAuth access token has been revoked.") means nothing to a user and hides
+  // that the operator must act; send the plain notice instead.
+  const userText = isProviderAuthFailureText(text) ? AUTH_FAILURE_USER_TEXT : stripHarnessTagArtifacts(text);
   await writeMessageOut({
     id: generateId(),
     in_reply_to: routing.inReplyTo,
@@ -2465,8 +2506,25 @@ async function deliverErrorResult(text: string, routing: RoutingContext): Promis
     platform_id: routing.platformId,
     channel_type: routing.channelType,
     thread_id: routing.threadId,
-    content: JSON.stringify({ text: stripHarnessTagArtifacts(text) }),
+    content: JSON.stringify({ text: userText }),
   });
+}
+
+/**
+ * True when a stream throw merely repeats an error result this stream already
+ * handled. Requires that no later turn is in flight, so a genuinely new
+ * failure on a follow-up push still surfaces. Exported for tests.
+ */
+export function isHandledErrorResultEcho(
+  err: unknown,
+  lastHandledErrorResult: string | null,
+  resultIndex: number,
+  answering: boolean,
+): boolean {
+  if (resultIndex === 0 || answering || !lastHandledErrorResult) return false;
+  const message = err instanceof Error ? err.message : String(err);
+  const handled = lastHandledErrorResult.trim();
+  return handled.length > 0 && message === `Claude Code returned an error result: ${handled}`;
 }
 
 /**

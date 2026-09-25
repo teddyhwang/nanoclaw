@@ -7,7 +7,8 @@ import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
-import { processQuery } from './poll-loop.js';
+import { isHandledErrorResultEcho, processQuery } from './poll-loop.js';
+import { AUTH_FAILURE_USER_TEXT } from './provider-auth-failure.js';
 import { confirmationGatePaused, noteToolResult, resetConfirmationGateState } from './confirmation-gate-state.js';
 import { MockProvider } from './providers/mock.js';
 import {
@@ -1571,6 +1572,150 @@ describe('error result with no <message> envelope', () => {
     expect(pushes).toHaveLength(0);
   });
 
+  // Danielle DM, 2026-09-24: the revoked OneCLI Claude token produced this
+  // exact result text, which was posted verbatim to a user.
+  const REVOKED = 'Failed to authenticate. API Error: 401 OAuth access token has been revoked.';
+
+  function systemActions(): Array<Record<string, unknown>> {
+    return getUndeliveredMessages()
+      .filter((row) => row.kind === 'system')
+      .map((row) => JSON.parse(row.content) as Record<string, unknown>);
+  }
+
+  it('replaces a revoked-credential error with a plain notice and alerts the host', async () => {
+    const { query, pushes } = makeResultQuery({ type: 'result', text: REVOKED, isError: true });
+
+    await processQuery(
+      query,
+      ERR_ROUTING,
+      ['m1'],
+      'claude',
+      null,
+      false,
+      'TestBot',
+      [],
+      null,
+      undefined,
+      'prompt',
+      undefined,
+    );
+
+    const chats = getUndeliveredMessages().filter((row) => row.kind === 'chat');
+    expect(chats).toHaveLength(1);
+    expect(JSON.parse(chats[0].content).text).toBe(AUTH_FAILURE_USER_TEXT);
+    expect(chats[0].content).not.toContain('401');
+    const alerts = systemActions().filter((a) => a.action === 'provider_auth_failure');
+    expect(alerts).toEqual([
+      { action: 'provider_auth_failure', provider: 'claude', failedOverTo: null, turnKind: 'chat' },
+    ]);
+    expect(pushes).toHaveLength(0);
+  });
+
+  it('does not dispatch raw credential errors hidden inside a message envelope', async () => {
+    const { query } = makeResultQuery({
+      type: 'result',
+      text: `<message to="current">${REVOKED}</message>`,
+      isError: true,
+    });
+    await processQuery(
+      query,
+      ERR_ROUTING,
+      ['m1'],
+      'claude',
+      null,
+      false,
+      'TestBot',
+      [],
+      null,
+      undefined,
+      'prompt',
+      undefined,
+    );
+    const chats = getUndeliveredMessages().filter((row) => row.kind === 'chat');
+    expect(chats).toHaveLength(1);
+    expect(JSON.parse(chats[0].content).text).toBe(AUTH_FAILURE_USER_TEXT);
+    expect(JSON.stringify(systemActions())).not.toContain(REVOKED);
+  });
+
+  it('alerts the host but stays silent in-channel for a task-only auth failure', async () => {
+    const { query } = makeResultQuery({ type: 'result', text: REVOKED, isError: true });
+
+    await processQuery(
+      query,
+      ERR_ROUTING,
+      ['task-1'],
+      'claude',
+      null,
+      false,
+      'TestBot',
+      [{ seriesId: 'series-1', taskId: 'task-1', dispatched: [], assistantText: null, written: false }],
+      null,
+      undefined,
+      'task prompt',
+      undefined,
+    );
+
+    expect(getUndeliveredMessages().filter((row) => row.kind === 'chat')).toHaveLength(0);
+    const alerts = systemActions().filter((a) => a.action === 'provider_auth_failure');
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].turnKind).toBe('task');
+  });
+
+  it('swallows the SDK teardown echo of an already-handled error result (no second post)', async () => {
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 'sess-1' };
+      yield { type: 'result', text: REVOKED, isError: true };
+      throw new Error(`Claude Code returned an error result: ${REVOKED}`);
+    }
+    const query: AgentQuery = { push: () => {}, end: () => {}, events: events(), abort: () => {} };
+
+    const result = await processQuery(
+      query,
+      ERR_ROUTING,
+      ['m1'],
+      'claude',
+      null,
+      false,
+      'TestBot',
+      [],
+      null,
+      undefined,
+      'prompt',
+      undefined,
+    );
+
+    expect(result.sawResult).toBe(true);
+    const chats = getUndeliveredMessages().filter((row) => row.kind === 'chat');
+    expect(chats).toHaveLength(1);
+    expect(JSON.parse(chats[0].content).text).toBe(AUTH_FAILURE_USER_TEXT);
+  });
+
+  it('still throws a different failure that follows an error result', async () => {
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 'sess-1' };
+      yield { type: 'result', text: REVOKED, isError: true };
+      throw new Error('Claude Code process exited with code 1');
+    }
+    const query: AgentQuery = { push: () => {}, end: () => {}, events: events(), abort: () => {} };
+
+    await expect(
+      processQuery(
+        query,
+        ERR_ROUTING,
+        ['m1'],
+        'claude',
+        null,
+        false,
+        'TestBot',
+        [],
+        null,
+        undefined,
+        'prompt',
+        undefined,
+      ),
+    ).rejects.toThrow('exited with code 1');
+  });
+
   it('still nudges (and does not deliver) a normal unwrapped result', async () => {
     const { query, pushes } = makeResultQuery({ type: 'result', text: 'bare text, no envelope' });
 
@@ -1750,4 +1895,25 @@ describe('co-batched task result delivery', () => {
       ]);
     },
   );
+});
+
+describe('isHandledErrorResultEcho', () => {
+  const text = 'Failed to authenticate. API Error: 401 OAuth access token has been revoked.';
+  const echo = new Error(`Claude Code returned an error result: ${text}`);
+
+  it('matches the SDK re-throw of the last handled error result', () => {
+    expect(isHandledErrorResultEcho(echo, text, 1, false)).toBe(true);
+  });
+
+  it('never matches before any result, while a later turn is in flight, or without a handled error', () => {
+    expect(isHandledErrorResultEcho(echo, text, 0, false)).toBe(false);
+    expect(isHandledErrorResultEcho(echo, text, 1, true)).toBe(false);
+    expect(isHandledErrorResultEcho(echo, null, 1, false)).toBe(false);
+    expect(isHandledErrorResultEcho(echo, '   ', 1, false)).toBe(false);
+    expect(isHandledErrorResultEcho(new Error(`different error containing ${text}`), text, 1, false)).toBe(false);
+  });
+
+  it('does not match an unrelated failure', () => {
+    expect(isHandledErrorResultEcho(new Error('Claude Code process exited with code 137'), text, 1, false)).toBe(false);
+  });
 });

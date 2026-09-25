@@ -3,7 +3,13 @@ import { describe, expect, it } from 'bun:test';
 import { registerProvider, registerProviderContract } from './provider-registry.js';
 import { mockRuntimeContract } from '../provider-contracts/mock.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, QueryInput } from './types.js';
-import { UsageLimitFallbackProvider, isUsageLimitEvent, resolveUsageLimitFallback } from './usage-limit-fallback.js';
+import {
+  UsageLimitFallbackProvider,
+  isAuthFailureEvent,
+  isUsageLimitEvent,
+  resolveUsageLimitFallback,
+  type FailoverInfo,
+} from './usage-limit-fallback.js';
 
 class StubProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = false;
@@ -47,6 +53,17 @@ describe('isUsageLimitEvent', () => {
     expect(isUsageLimitEvent({ type: 'error', message: 'limit', retryable: true, classification: 'quota' })).toBe(true);
     expect(isUsageLimitEvent({ type: 'error', message: 'network', retryable: true })).toBe(false);
     expect(isUsageLimitEvent({ type: 'result', text: 'quota' })).toBe(false);
+  });
+});
+
+const REVOKED = 'Failed to authenticate. API Error: 401 OAuth access token has been revoked.';
+
+describe('isAuthFailureEvent', () => {
+  it('matches only terminal error results carrying a credential failure', () => {
+    expect(isAuthFailureEvent({ type: 'result', text: REVOKED, isError: true })).toBe(true);
+    expect(isAuthFailureEvent({ type: 'result', text: REVOKED })).toBe(false);
+    expect(isAuthFailureEvent({ type: 'result', text: 'API Error: 500 Internal', isError: true })).toBe(false);
+    expect(isAuthFailureEvent({ type: 'error', message: REVOKED, retryable: false })).toBe(false);
   });
 });
 
@@ -225,4 +242,191 @@ it('quota wrappers use the active runtime contract instead of stale legacy deliv
     { providerName: fallbackName, emitsMidTurnText: true },
     { providerName: fallbackName, emitsMidTurnText: true },
   ]);
+});
+
+describe('UsageLimitFallbackProvider — credential failures', () => {
+  function build(primary: StubProvider, fallback: StubProvider, seen: FailoverInfo[] = []) {
+    return new UsageLimitFallbackProvider({
+      primaryName: 'claude',
+      fallbackName: 'codex',
+      fallbackModel: 'gpt-6-astra',
+      primary,
+      fallback,
+      onFailover: (info) => {
+        seen.push(info);
+      },
+    });
+  }
+
+  // Danielle DM, 2026-09-24: the revoked Claude token returned this result
+  // after ten API retries while Codex was healthy; nobody answered her.
+  it('replays a revoked-credential turn on the alternate and reports the failover', async () => {
+    const primary = new StubProvider([
+      [
+        { type: 'init', continuation: 'claude-thread' },
+        { type: 'error', message: 'API retry', retryable: true },
+        { type: 'result', text: REVOKED, isError: true },
+      ],
+    ]);
+    const fallback = new StubProvider([
+      [
+        { type: 'init', continuation: 'codex-thread' },
+        { type: 'result', text: '<message to="current">answer</message>' },
+      ],
+    ]);
+    const seen: FailoverInfo[] = [];
+
+    const events = await collect(build(primary, fallback, seen).query({ prompt: 'q', cwd: '/workspace/agent' }));
+
+    expect(events).toEqual([
+      { type: 'init', continuation: 'claude-thread' },
+      { type: 'error', message: 'API retry', retryable: true },
+      { type: 'result', text: '<message to="current">answer</message>' },
+    ]);
+    expect(primary.aborts).toBe(1);
+    expect(seen).toEqual([{ reason: 'auth', from: 'claude', to: 'codex', detail: REVOKED }]);
+  });
+
+  it('fails over when the primary SDK throws the credential failure instead of yielding it', async () => {
+    const primary: StubProvider = new StubProvider([]);
+    primary.query = (input) => {
+      primary.inputs.push(input);
+      return {
+        push: () => {},
+        end: () => {},
+        abort: () => {
+          primary.aborts++;
+        },
+        events: (async function* (): AsyncGenerator<ProviderEvent> {
+          throw new Error(`Claude Code returned an error result: ${REVOKED}`);
+        })(),
+      };
+    };
+    const fallback = new StubProvider([[{ type: 'result', text: 'ok' }]]);
+    const seen: FailoverInfo[] = [];
+
+    const events = await collect(build(primary, fallback, seen).query({ prompt: 'q', cwd: '/workspace/agent' }));
+
+    expect(events).toEqual([{ type: 'result', text: 'ok' }]);
+    expect(seen.map((i) => i.reason)).toEqual(['auth']);
+  });
+
+  it('still throws non-credential primary failures', async () => {
+    const primary: StubProvider = new StubProvider([]);
+    primary.query = () => ({
+      push: () => {},
+      end: () => {},
+      abort: () => {},
+      events: (async function* (): AsyncGenerator<ProviderEvent> {
+        throw new Error('Claude Code process exited with code 137');
+      })(),
+    });
+    const fallback = new StubProvider([[{ type: 'result', text: 'unused' }]]);
+
+    await expect(collect(build(primary, fallback).query({ prompt: 'q', cwd: '/workspace/agent' }))).rejects.toThrow(
+      'code 137',
+    );
+    expect(fallback.inputs).toHaveLength(0);
+  });
+
+  it('does not fail over on a non-credential error result', async () => {
+    const primary = new StubProvider([
+      [{ type: 'result', text: 'API Error: 500 Internal server error', isError: true }],
+    ]);
+    const fallback = new StubProvider([[{ type: 'result', text: 'unused' }]]);
+    const seen: FailoverInfo[] = [];
+
+    const events = await collect(build(primary, fallback, seen).query({ prompt: 'q', cwd: '/workspace/agent' }));
+
+    expect(events).toEqual([{ type: 'result', text: 'API Error: 500 Internal server error', isError: true }]);
+    expect(fallback.inputs).toHaveLength(0);
+    expect(seen).toHaveLength(0);
+  });
+
+  it('passes an alternate credential failure through unchanged', async () => {
+    const primary = new StubProvider([[{ type: 'result', text: REVOKED, isError: true }]]);
+    const codexAuth = 'unexpected status 401 Unauthorized: Missing bearer or basic authentication in header';
+    const fallback = new StubProvider([[{ type: 'result', text: codexAuth, isError: true }]]);
+
+    const events = await collect(build(primary, fallback).query({ prompt: 'q', cwd: '/workspace/agent' }));
+
+    expect(events).toEqual([{ type: 'result', text: codexAuth, isError: true }]);
+  });
+
+  it('reports the primary credential failure, not "both limits", when the alternate is then limited', async () => {
+    const primary = new StubProvider([[{ type: 'result', text: REVOKED, isError: true }]]);
+    const fallback = new StubProvider([
+      [{ type: 'error', message: 'usage limit', retryable: true, classification: 'quota' }],
+    ]);
+
+    const events = await collect(build(primary, fallback).query({ prompt: 'q', cwd: '/workspace/agent' }));
+
+    expect(events).toEqual([{ type: 'result', text: REVOKED, isError: true }]);
+  });
+
+  it('keeps preferring the alternate for later turns after a credential failure', async () => {
+    const primary = new StubProvider([[{ type: 'result', text: REVOKED, isError: true }]]);
+    const fallback = new StubProvider([[{ type: 'result', text: 'first' }], [{ type: 'result', text: 'second' }]]);
+    const provider = build(primary, fallback);
+
+    await collect(provider.query({ prompt: 'one', cwd: '/workspace/agent' }));
+    const events = await collect(provider.query({ prompt: 'two', cwd: '/workspace/agent' }));
+
+    expect(events).toEqual([{ type: 'result', text: 'second' }]);
+    expect(primary.inputs).toHaveLength(1);
+  });
+
+  it('never lets a throwing observer break the failover', async () => {
+    const primary = new StubProvider([[{ type: 'result', text: REVOKED, isError: true }]]);
+    const fallback = new StubProvider([[{ type: 'result', text: 'ok' }]]);
+    const provider = new UsageLimitFallbackProvider({
+      primaryName: 'claude',
+      fallbackName: 'codex',
+      primary,
+      fallback,
+      onFailover: () => {
+        throw new Error('observer boom');
+      },
+    });
+
+    const events = await collect(provider.query({ prompt: 'q', cwd: '/workspace/agent' }));
+
+    expect(events).toEqual([{ type: 'result', text: 'ok' }]);
+  });
+});
+
+for (const event of [
+  { type: 'result', text: 'already answered' },
+  { type: 'text', text: '<message to="current">already sent</message>' },
+] satisfies ProviderEvent[]) {
+  it(`does not replay completed work after ${event.type} then credential failure`, async () => {
+    const primary = new StubProvider([[event, { type: 'result', text: REVOKED, isError: true }]]);
+    const fallback = new StubProvider([[{ type: 'result', text: 'duplicate' }]]);
+    const provider = new UsageLimitFallbackProvider({
+      primaryName: 'claude',
+      fallbackName: 'codex',
+      primary,
+      fallback,
+    });
+    expect(await collect(provider.query({ prompt: 'q', cwd: '/tmp' }))).toEqual([
+      event,
+      { type: 'result', text: REVOKED, isError: true },
+    ]);
+    expect(fallback.inputs).toHaveLength(0);
+  });
+}
+it('awaits and contains async observer failures', async () => {
+  const primary = new StubProvider([[{ type: 'result', text: REVOKED, isError: true }]]);
+  const fallback = new StubProvider([[{ type: 'result', text: 'ok' }]]);
+  const provider = new UsageLimitFallbackProvider({
+    primaryName: 'claude',
+    fallbackName: 'codex',
+    primary,
+    fallback,
+    onFailover: async () => {
+      await Promise.resolve();
+      throw new Error('async observer');
+    },
+  });
+  expect(await collect(provider.query({ prompt: 'q', cwd: '/tmp' }))).toEqual([{ type: 'result', text: 'ok' }]);
 });
