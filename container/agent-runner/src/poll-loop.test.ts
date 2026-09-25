@@ -25,7 +25,7 @@ import {
   setContinuationStartedAt,
 } from './db/session-state.js';
 import type { RoutingContext } from './formatter.js';
-import type { AgentQuery, ProviderEvent } from './providers/types.js';
+import type { AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
 
 beforeEach(() => {
   initTestSessionDb();
@@ -1509,7 +1509,7 @@ it('does not push accumulated-only follow-ups into an active query', async () =>
 });
 
 describe('error result with no <message> envelope', () => {
-  it('delivers a budget/billing error to the triggering channel and does not nudge', async () => {
+  it('delivers a safe failure notice to the triggering channel and does not nudge', async () => {
     const budgetText = 'Spending limit reached. Add your own key at https://example.com/keys';
     const { query, pushes } = makeResultQuery({ type: 'result', text: budgetText, isError: true });
 
@@ -1531,7 +1531,7 @@ describe('error result with no <message> envelope', () => {
     const out = getUndeliveredMessages();
     const delivered = out.filter((row) => row.kind === 'chat');
     expect(delivered).toHaveLength(1);
-    expect(JSON.parse(delivered[0].content).text).toBe(budgetText);
+    expect(JSON.parse(delivered[0].content).text).toBe('The agent run failed. Check the logs for details.');
     expect(delivered[0].platform_id).toBe('chan-1');
     expect(delivered[0].channel_type).toBe('discord');
     // No re-wrap nudge — an error result must not re-hammer the gateway.
@@ -1714,6 +1714,23 @@ describe('error result with no <message> envelope', () => {
         undefined,
       ),
     ).rejects.toThrow('exited with code 1');
+  });
+
+  it.each([
+    '<internal>PRIVATE THOUGHTS</internal>\n\nOpenCode prompt failed: {"responseHeaders":{"authorization":"fixture-secret"}}',
+    'Unwrapped private reasoning\n\n{"responseBody":"fixture-secret"}',
+    '',
+  ])('keeps failed-turn scratchpad and diagnostics out of chat: %s', async (text) => {
+    const { query, pushes } = makeResultQuery({ type: 'result', text, isError: true });
+    const exchanges: ProviderExchange[] = [];
+    await processQuery(query, ERR_ROUTING, ['m1'], 'mock', (exchange) => exchanges.push(exchange), 'prompt', undefined);
+    expect(getUndeliveredMessages().map((row) => JSON.parse(row.content).text)).toEqual([
+      'The agent run failed. Check the logs for details.',
+    ]);
+    expect(exchanges).toHaveLength(1);
+    expect(exchanges[0].status).toBe('error');
+    expect(exchanges[0].result).toBe(text);
+    expect(pushes).toHaveLength(0);
   });
 
   it('still nudges (and does not deliver) a normal unwrapped result', async () => {

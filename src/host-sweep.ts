@@ -3,12 +3,13 @@
  *
  * The per-session body lives in src/reconcile-session.ts (`reconcileSession`,
  * the ReconcileFn shape from src/reconcile.ts); execution runs through the
- * keyed workqueue (src/reconcile-queue.ts). This module owns the resync
- * floor: every 60s it enqueues the singleton duties and every active
- * session, then re-arms once the tick's work has drained — so queue loss
- * costs latency, never correctness, and an explicit enqueue between ticks
- * can never be lost to a concurrent sweep. The re-exports below keep the
- * long-standing import surface of this module stable.
+ * keyed workqueue (src/reconcile-queue.ts), RECONCILE_CONCURRENCY sessions
+ * at a time. This module owns the resync floor: every 60s it enqueues the
+ * singleton duties and every active session, then re-arms once the tick's
+ * work has drained — so queue loss costs latency, never correctness, and an
+ * explicit enqueue between ticks can never be lost to a concurrent sweep.
+ * The re-exports below keep the long-standing import surface of this module
+ * stable.
  */
 import { INSTALL_SLUG } from './config.js';
 import { ensureEgressNetwork } from './egress-lockdown.js';
@@ -61,6 +62,19 @@ function withTimeout<T>(promise: Promise<T>, ms: number, sessionId: string): Pro
 export const _withTimeoutForTesting = withTimeout;
 export { SweepTimeoutError as _SweepTimeoutErrorForTesting };
 
+/**
+ * Sessions reconciled in parallel. Each reconcile is one session's mailbox
+ * round trip plus a few central reads; on a remote mailbox that is network
+ * latency, and serially it made a tick scale as sessions × latency (300
+ * sessions × 40 ms/hop ≈ 25 s per tick). Keys never overlap with themselves
+ * (the queue serializes per key), sessions are independent by the mailbox
+ * contract, and the two singleton duties tolerate running alongside sessions
+ * (spawn re-heals the egress network itself; the approvals scan is a central
+ * query). 8 is a modest fan-out for a remote store; local SQLite is
+ * synchronous IO and neither gains nor loses.
+ */
+export const RECONCILE_CONCURRENCY = 8;
+
 let running = false;
 let lastSweepCompletedAt = Date.now();
 let sweepGeneration = 0;
@@ -110,6 +124,7 @@ export function startHostSweep(): void {
   startSweepWatchdog();
   queue = createReconcileQueue({
     reconcile: (id) => withTimeout(reconcileSession(id), SWEEP_SESSION_TIMEOUT_MS, id),
+    concurrency: RECONCILE_CONCURRENCY,
     singletons: {
       // Re-heal the egress network so already-running agents keep their
       // gateway hop if it was detached out-of-band. Best-effort: a heal
@@ -190,8 +205,9 @@ async function sweep(generation: number): Promise<void> {
   const tickQueue = queue;
   if (!running || !tickQueue || generation !== sweepGeneration) return;
 
-  // Tick order matches the loop this replaces: egress re-heal, then every
-  // active session, then the approvals scan — serial through the queue.
+  // Enqueue order matches the loop this replaces: egress re-heal, then every
+  // active session, then the approvals scan. Keys START in that order; up to
+  // RECONCILE_CONCURRENCY of them run at once.
   tickQueue.add('singleton:egress-reheal');
   try {
     const sessions = await getActiveSessions();

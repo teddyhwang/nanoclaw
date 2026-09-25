@@ -194,7 +194,9 @@ describe('getSessionDriver', () => {
 
 describe('Docker host gateway', () => {
   it('adds host.docker.internal explicitly when egress lockdown is off', () => {
-    expect(dockerNetworkArgs(fixtureSpec())).toEqual(['--add-host=host.docker.internal:host-gateway']);
+    expect(
+      dockerNetworkArgs(fixtureSpec({ networkAccess: { endpoint: 'host.docker.internal', target: { kind: 'host' } } })),
+    ).toEqual(['--add-host=host.docker.internal:host-gateway']);
   });
 });
 

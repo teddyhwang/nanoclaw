@@ -186,6 +186,8 @@ describe('UsageLimitFallbackProvider', () => {
         text:
           'Both codex and claude have reached their usage limits. ' +
           'Please try again after one of the limits resets.',
+        error:
+          'Both codex and claude have reached their usage limits. Please try again after one of the limits resets.',
         isError: true,
       },
     ]);

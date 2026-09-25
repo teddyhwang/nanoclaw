@@ -33,7 +33,7 @@ export function buildDeliverySentences(names: string[], taskId: string | null): 
 
 /**
  * Reminder a provider injects on the first prompt AFTER its runtime
- * auto-compacted the session, for runtimes (e.g. OpenCode) that expose no
+ * auto-compacted the session, for runtimes that expose no
  * pre-compaction instruction hook: the summary can silently drop the delivery
  * discipline, so it is re-stated — in the same canonical wording as the
  * pre-compaction path — before the next turn.
@@ -48,8 +48,7 @@ export function buildPostCompactionReminder(names: string[], taskId: string | nu
 export function buildCompactInstructions(names: string[], taskId: string | null): string {
   const sentences = buildDeliverySentences(names, taskId);
   const deliveryReminder = sentences.map(
-    (sentence, index) =>
-      `   ${index === 0 ? '"' : ''}${sentence}${index === sentences.length - 1 ? '"' : ''}`,
+    (sentence, index) => `   ${index === 0 ? '"' : ''}${sentence}${index === sentences.length - 1 ? '"' : ''}`,
   );
 
   return [

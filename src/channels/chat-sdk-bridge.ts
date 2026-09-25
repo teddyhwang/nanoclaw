@@ -28,7 +28,7 @@ import { registerWebhookAdapter } from '../webhook-server.js';
 import { normalizeOptions, type NormalizedOption } from './ask-question.js';
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage } from './adapter.js';
 import { INSTANCE_KEY_RE } from './channel-registry.js';
-import { resolveQuestionRender } from './question-render-registry.js';
+import { resolveQuestionRender, dispatchQuestionAction } from './question-render-registry.js';
 
 /** Adapter with optional gateway support (e.g., Discord). */
 interface GatewayAdapter extends Adapter {
@@ -38,6 +38,11 @@ interface GatewayAdapter extends Adapter {
     abortSignal?: AbortSignal,
     webhookUrl?: string,
   ): Promise<Response>;
+}
+
+/** Adapter that can expose authenticated transport liveness to host status. */
+interface ConnectionAwareAdapter extends Adapter {
+  isConnected?(): boolean;
 }
 
 /** Reply context extracted from a platform's raw message. */
@@ -1401,6 +1406,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
 
       // Handle button clicks (ask_user_question)
       chat.onAction(async (event) => {
+        if (await dispatchQuestionAction(event, adapter, instanceKey)) return;
         if (!event.actionId.startsWith('ncq:')) return;
         const parts = event.actionId.split(':');
         if (parts.length < 3) return;
@@ -1414,6 +1420,14 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         // short to fit Telegram's 64-byte callback_data cap). Old format:
         // the full value is embedded in actionId/value directly.
         const selectedOption = resolveSelectedOption(render, event.value, tail);
+        if (render?.deferResolution) {
+          setupConfig.onAction(questionId, selectedOption, userId, {
+            instance: instanceKey,
+            messageId: event.messageId,
+            platformId: adapter.channelIdFromThreadId(event.threadId),
+          });
+          return;
+        }
         const title = render?.title ?? '❓ Question';
         const matched = render?.options.find((o) => o.value === selectedOption);
         const selectedLabel = matched?.selectedLabel ?? selectedOption ?? '(clicked)';
@@ -1434,7 +1448,11 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           log.warn('Failed to update card after action', { err });
         }
 
-        setupConfig.onAction(questionId, selectedOption, userId);
+        setupConfig.onAction(questionId, selectedOption, userId, {
+          instance: instanceKey,
+          messageId: event.messageId,
+          platformId: adapter.channelIdFromThreadId(event.threadId),
+        });
       });
 
       await chat.initialize();
@@ -1561,6 +1579,13 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       const replyTo = replyToRaw ? replyToRaw.split(':')[0] || null : null;
 
       if (content.operation === 'edit' && content.messageId) {
+        const render =
+          typeof content.questionId === 'string' ? await resolveQuestionRender(content.questionId) : undefined;
+        if (render?.renderTerminal && content.terminalCard) {
+          const terminal = content.terminalCard as { resolution: string };
+          await adapter.editMessage(tid, content.messageId as string, render.renderTerminal(terminal.resolution));
+          return;
+        }
         const terminalCard = content.terminalCard as Partial<TerminalApprovalCard> | undefined;
         if (
           terminalCard &&
@@ -1605,6 +1630,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           log.error('ask_question missing required title — skipping delivery', { questionId });
           return;
         }
+        const render = content.requirePresentation ? await resolveQuestionRender(questionId) : undefined;
+        if (render?.renderMessage) {
+          const result = await adapter.postMessage(tid, render.renderMessage(questionId));
+          return result?.id;
+        }
+        if (content.requirePresentation) throw new Error('Approval presentation adapter is unavailable');
         const options: NormalizedOption[] = normalizeOptions(content.options as never);
         const card = Card({
           title,
@@ -1752,7 +1783,8 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     },
 
     isConnected() {
-      return true;
+      const probe = (adapter as ConnectionAwareAdapter).isConnected;
+      return probe ? probe.call(adapter) : true;
     },
 
     async subscribe(_platformId: string, threadId: string) {
@@ -2112,6 +2144,18 @@ async function handleForwardedEvent(
       // Discord custom_id mirrors the new index-based encoding (see Button
       // construction). Decode back to the real option value for downstream.
       const selectedOption = resolveSelectedOption(render, decodedCustomId.value, tail);
+      if (render?.deferResolution && questionId) {
+        await fetch(`https://discord.com/api/v10/interactions/${interactionId}/${interactionToken}/callback`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type: 6 }),
+        });
+        setupConfig.onAction(questionId, selectedOption, user?.id || '', {
+          messageId: (interaction.message as Record<string, unknown> | undefined)?.id as string | undefined,
+          platformId: interaction.channel_id as string | undefined,
+        });
+        return;
+      }
       const cardTitle = render?.title ?? ((originalEmbeds[0]?.title as string) || '❓ Question');
       const matchedOpt = render?.options.find((o) => o.value === selectedOption);
       const selectedLabel = matchedOpt?.selectedLabel ?? selectedOption ?? customId;
@@ -2141,7 +2185,10 @@ async function handleForwardedEvent(
 
       // Dispatch to host
       if (questionId && selectedOption) {
-        setupConfig.onAction(questionId, selectedOption, user?.id || '');
+        setupConfig.onAction(questionId, selectedOption, user?.id || '', {
+          messageId: (interaction.message as Record<string, unknown> | undefined)?.id as string | undefined,
+          platformId: interaction.channel_id as string | undefined,
+        });
       }
       return;
     }

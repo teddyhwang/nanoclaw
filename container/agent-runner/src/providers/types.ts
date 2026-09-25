@@ -234,15 +234,13 @@ export type ProviderEvent =
   /** A provider-native image generator completed and saved this image. */
   | { type: 'generated_image'; path: string }
   /**
-   * Turn finished. `tokensUsed`, when the provider can supply it, is the
-   * total context size (input + cache + output tokens of the turn's last
-   * model call) — the signal the poll-loop's pressure-rotation check reads.
-   * `isError` is set when the underlying SDK flagged the turn as an error
-   * (e.g. a non-retryable Anthropic 403 billing_error). The poll-loop uses
-   * it to surface the result text to the user instead of dropping it as
-   * un-wrapped scratchpad, and to skip the re-wrap nudge.
+   * A completed turn. `isError` marks a failed turn and prevents retries.
+   * `text` is model output; `error` is an optional user-facing provider error
+   * (e.g. a billing/quota notice), kept separate from model scratchpad and
+   * raw diagnostics. Failures without `error` receive a generic notice.
+   * `tokensUsed` reports live context size for proactive pressure rotation.
    */
-  | { type: 'result'; text: string | null; tokensUsed?: number; isError?: boolean }
+  | { type: 'result'; text: string | null; tokensUsed?: number; isError?: boolean; error?: string }
   /**
    * An assistant text segment emitted mid-turn (e.g. between tool calls).
    * The SDK's final `result` carries only the LAST assistant text, so a

@@ -506,8 +506,13 @@ export class ClaudeProvider implements AgentProvider {
         additionalDirectories: this.additionalDirectories,
         resume: input.continuation,
         pathToClaudeCodeExecutable: '/pnpm/claude',
+        // The append (agent name + destinations) is rebuilt at every container
+        // start. Left to the SDK default, Claude Code records the prompt on a
+        // session's first request and resends that record on every resume, so
+        // a resumed agent would keep its old name and destination list until
+        // compaction. snapshot: false renders it fresh each time.
         systemPrompt: instructions
-          ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions }
+          ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions, snapshot: false }
           : undefined,
         allowedTools: [...this.mcp.allowedTools],
         disallowedTools: [...this.executionPolicy.disallowedTools],
@@ -518,10 +523,11 @@ export class ClaudeProvider implements AgentProvider {
         permissionMode: this.executionPolicy.permissionMode,
         allowDangerouslySkipPermissions: this.executionPolicy.allowDangerouslySkipPermissions,
         settingSources: ['project', 'user', 'local'],
-        // Only sent when enabled, so an install that never turns it on passes
-        // exactly the options it always did. `fastMode` is a Settings member
-        // rather than a query option, which is why it rides `settings`.
-        ...(this.inference.settings ? { settings: this.inference.settings } : {}),
+        // Flag-level settings: `fastMode` only when the install turns it on,
+        // then the execution policy's fixed keys, spread last so per-group
+        // input can never override them. Both are Settings members rather
+        // than query options, which is why they ride `settings`.
+        settings: { ...this.inference.settings, ...this.executionPolicy.settings },
         mcpServers: this.mcp.mcpServers,
         hooks: {
           PreToolUse: [{ hooks: [preToolUseHook] }],
@@ -571,8 +577,8 @@ export class ClaudeProvider implements AgentProvider {
         } else if (message.type === 'result') {
           // `result` text exists only on subtype:"success"; error subtypes
           // (e.g. a non-retryable 403 billing_error) carry their message in
-          // `errors[]` instead. Surface either so the poll-loop can deliver a
-          // billing/quota notice to the user rather than dropping the turn.
+          // `errors[]` instead. Keep that actionable notice separate from
+          // model output so the poll-loop can deliver it without scratchpad.
           const m = message as { result?: string; is_error?: boolean; errors?: string[] };
           const rawText = m.result ?? (m.errors && m.errors.length > 0 ? m.errors.join('\n') : null);
           const hadAssistantMessageBlock = MESSAGE_BLOCK_RE.test(assistantTextThisTurn);
@@ -598,7 +604,13 @@ export class ClaudeProvider implements AgentProvider {
           // Assistant text has already gone through the single mid-turn door.
           // Keep the SDK result verbatim for status/error accounting, but never
           // replay an earlier assistant <message> from this result branch.
-          yield { type: 'result', text: rawText, tokensUsed: lastContextTokens, isError: m.is_error === true };
+          yield {
+            type: 'result',
+            text: m.result ?? null,
+            tokensUsed: lastContextTokens,
+            isError: m.is_error === true,
+            error: m.errors?.length ? m.errors.join('\n') : undefined,
+          };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };
         } else if (message.type === 'rate_limit_event') {

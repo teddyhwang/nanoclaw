@@ -80,16 +80,24 @@ export function readSetting(key: (typeof SETTINGS)[number], env: NodeJS.ProcessE
  * states the intent, this realizes it, and nothing rides between them.
  */
 export function dockerNetworkArgs(spec: SessionSpec): string[] {
-  if (ensureEgressNetwork()) {
+  if (spec.networkAccess.target.kind === 'session-container') return [];
+  if (ensureEgressNetwork(spec.networkAccess)) {
     log.info('Egress lockdown active', { containerName: agentContainerName(spec), network: EGRESS_NETWORK });
     return egressNetworkArgs();
   }
-  return ['--add-host=host.docker.internal:host-gateway'];
+  return [`--add-host=${spec.networkAccess.endpoint}:host-gateway`];
 }
 
 registerSessionDriver(
   DEFAULT_DRIVER_KIND,
-  (policy) => new DockerSessionDriver({ ...policy, networkArgsFor: dockerNetworkArgs }),
+  (policy) =>
+    new DockerSessionDriver({
+      ...policy,
+      networkArgsFor: dockerNetworkArgs,
+      reconcileNetworkAccess: (access) => {
+        if (access.target.kind !== 'session-container') ensureEgressNetwork(access);
+      },
+    }),
 );
 
 export function configuredDriverKind(env: NodeJS.ProcessEnv = process.env): DriverKind {
@@ -127,6 +135,7 @@ export function mountPolicy(env: NodeJS.ProcessEnv = process.env): MountPolicy {
     // identity-material mount is denied by a policy naming a path that looks
     // correct.
     materialsRoot: readSetting('NANOCLAW_SESSION_MATERIAL_ROOT', env) || path.join(DATA_DIR, 'session-materials'),
+    gatewayTrustRoot: path.join(DATA_DIR, 'gateway-trust'),
   };
 }
 

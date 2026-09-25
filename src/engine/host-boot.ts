@@ -16,13 +16,21 @@ import { enforceStartupBackoff, resetCircuitBreaker } from '../circuit-breaker.j
 import { initDb } from '../db/connection.js';
 import { backfillContainerConfigs } from '../backfill-container-configs.js';
 import { runMigrations } from '../db/migrations/index.js';
-import { adoptRunningSessions } from '../container-runner.js';
+import {
+  abortGatewaySessionObservers,
+  adoptRunningSessions,
+  resumeGatewaySessionAdmission,
+  stopGatewaySessionsForUnavailability,
+} from '../container-runner.js';
+import { startGatewayApprovalCoordinator, stopGatewayApprovalCoordinator } from '../gateway-approval-coordinator.js';
+import { startGatewayAvailabilityMonitor } from '../gateway-availability.js';
+import { getGatewayProvider } from '../gateway-providers/index.js';
 import { getSessionDriver } from '../drivers/index.js';
 import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, stopDeliveryPolls } from '../delivery.js';
 import { startHostSweep, stopHostSweep } from '../host-sweep.js';
 import { routeInbound } from '../router.js';
 import { log } from '../log.js';
-import { initChannelAdapters, teardownChannelAdapters, getChannelAdapter } from '../channels/channel-registry.js';
+import { initChannelAdapters, teardownChannelAdapters, getChannelAdapterExact } from '../channels/channel-registry.js';
 import type { ChannelAdapter, ChannelSetup } from '../channels/adapter.js';
 import { handleChatMigrated } from '../channels/chat-migration.js';
 import { getResponseHandlers, type ResponsePayload } from '../response-registry.js';
@@ -36,6 +44,7 @@ import '../modules/index.js';
 
 let booted = false;
 let signalsInstalled = false;
+let stopGatewayMonitor: (() => void) | undefined;
 const hostAbortController = new AbortController();
 
 async function dispatchResponse(payload: ResponsePayload): Promise<void> {
@@ -81,43 +90,55 @@ export async function _bootForHost(opts: { managedSignals: boolean }): Promise<v
   // install-owned live sessions and reap only terminal residue.
   await getSessionDriver().ensureReady?.();
   await startHostInstanceLease();
-  await adoptRunningSessions();
+  const gatewayProvider = getGatewayProvider();
+  let releaseInbound!: () => void;
+  const inboundReady = new Promise<void>((resolve) => {
+    releaseInbound = resolve;
+  });
 
   // 3. Channel adapters
   await initChannelAdapters((adapter: ChannelAdapter): ChannelSetup => {
     return {
       onInbound(platformId, threadId, message) {
-        routeInbound({
-          channelType: adapter.channelType,
-          platformId,
-          threadId,
-          message: {
-            id: message.id,
-            kind: message.kind,
-            content: JSON.stringify(message.content),
-            timestamp: message.timestamp,
-            isMention: message.isMention,
-            isGroup: message.isGroup,
-            isBotMessage: message.isBotMessage,
-            isSelfMessage: message.isSelfMessage,
-            isBackfill: message.isBackfill,
-          },
-        }).catch((err) => {
-          log.error('Failed to route inbound message', { channelType: adapter.channelType, err });
-        });
+        inboundReady
+          .then(() =>
+            routeInbound({
+              channelType: adapter.channelType,
+              instance: adapter.instance ?? adapter.channelType,
+              platformId,
+              threadId,
+              message: {
+                id: message.id,
+                kind: message.kind,
+                content: JSON.stringify(message.content),
+                timestamp: message.timestamp,
+                isMention: message.isMention,
+                isGroup: message.isGroup,
+                isBotMessage: message.isBotMessage,
+                isSelfMessage: message.isSelfMessage,
+                isBackfill: message.isBackfill,
+              },
+            }),
+          )
+          .catch((err) => {
+            log.error('Failed to route inbound message', { channelType: adapter.channelType, err });
+          });
       },
       onInboundEvent(event) {
-        routeInbound(event).catch((err) => {
-          log.error('Failed to route inbound event', {
-            sourceAdapter: adapter.channelType,
-            targetChannelType: event.channelType,
-            err,
+        inboundReady
+          .then(() => routeInbound(event))
+          .catch((err) => {
+            log.error('Failed to route inbound event', {
+              sourceAdapter: adapter.channelType,
+              targetChannelType: event.channelType,
+              err,
+            });
           });
-        });
       },
       onMetadata(platformId, name, isGroup) {
         log.info('Channel metadata discovered', {
           channelType: adapter.channelType,
+          instance: adapter.instance ?? adapter.channelType,
           platformId,
           name,
           isGroup,
@@ -129,14 +150,16 @@ export async function _bootForHost(opts: { managedSignals: boolean }): Promise<v
           isGroup,
         });
       },
-      onAction(questionId, selectedOption, userId) {
+      onAction(questionId, selectedOption, userId, address) {
         dispatchResponse({
           questionId,
           value: selectedOption,
           userId,
           channelType: adapter.channelType,
-          platformId: '',
-          threadId: null,
+          instance: address?.instance ?? adapter.instance ?? adapter.channelType,
+          messageId: address?.messageId,
+          platformId: address?.platformId ?? '',
+          threadId: address?.threadId ?? null,
         }).catch((err) => {
           log.error('Failed to handle question response', { questionId, err });
         });
@@ -158,11 +181,11 @@ export async function _bootForHost(opts: { managedSignals: boolean }): Promise<v
       assistantName?: string,
       assistantPrefixSeparator?: string,
       suppressEmbeds?: boolean,
+      instance?: string,
     ): Promise<string | undefined> {
-      const adapter = getChannelAdapter(channelType);
+      const adapter = getChannelAdapterExact(instance ?? channelType);
       if (!adapter) {
-        log.warn('No adapter for channel type', { channelType });
-        return;
+        throw new Error(`No adapter for channel instance ${instance ?? channelType}`);
       }
       const parsed = JSON.parse(content) as Record<string, unknown>;
       const deliveredId = await adapter.deliver(platformId, threadId, {
@@ -197,14 +220,30 @@ export async function _bootForHost(opts: { managedSignals: boolean }): Promise<v
       }
       return deliveredId;
     },
-    async setTyping(channelType: string, platformId: string, threadId: string | null): Promise<void> {
-      const adapter = getChannelAdapter(channelType);
+    async setTyping(
+      channelType: string,
+      platformId: string,
+      threadId: string | null,
+      instance?: string,
+    ): Promise<void> {
+      const adapter = getChannelAdapterExact(instance ?? channelType);
       await adapter?.setTyping?.(platformId, threadId);
     },
   };
   setDeliveryAdapter(deliveryAdapter);
 
-  await startHostModules({ db, signal: hostAbortController.signal });
+  await startGatewayApprovalCoordinator(gatewayProvider, deliveryAdapter, stopGatewaySessionsForUnavailability, {
+    onAvailable: resumeGatewaySessionAdmission,
+    waitUntilReady: true,
+  });
+  stopGatewayMonitor = await startGatewayAvailabilityMonitor(
+    gatewayProvider,
+    stopGatewaySessionsForUnavailability,
+    resumeGatewaySessionAdmission,
+  );
+  await adoptRunningSessions();
+  releaseInbound();
+  await startHostModules({ db, deliveryAdapter, signal: hostAbortController.signal });
 
   // 5. Start delivery polls
   startActiveDeliveryPoll();
@@ -245,6 +284,9 @@ export async function _bootForHost(opts: { managedSignals: boolean }): Promise<v
 export async function _shutdownForHost(reason: string): Promise<void> {
   log.info('Shutdown requested', { reason });
   hostAbortController.abort();
+  stopGatewayMonitor?.();
+  await stopGatewayApprovalCoordinator();
+  await abortGatewaySessionObservers();
   // Unified lifecycle registry (upstream v2.2.0 replaced response-registry's
   // onShutdown/getShutdownCallbacks). Runs callbacks LIFO with per-callback
   // error isolation — same guarantee the inline loop here used to give.

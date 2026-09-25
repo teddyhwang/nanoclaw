@@ -9,8 +9,6 @@ import { isValidTimezone } from './timezone.js';
 const envConfig = readEnvFile([
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
-  'ONECLI_URL',
-  'ONECLI_API_KEY',
   'TZ',
   'DEFAULT_AGENT_PROVIDER',
   'NANOCLAW_DEFAULT_MODEL',
@@ -20,7 +18,7 @@ const envConfig = readEnvFile([
   'CONTAINER_PIDS_LIMIT',
   'NANOCLAW_EGRESS_LOCKDOWN',
   'NANOCLAW_EGRESS_NETWORK',
-  'ONECLI_GATEWAY_CONTAINER',
+  'WEBHOOK_PORT',
 ]);
 
 /**
@@ -126,13 +124,21 @@ export const CONTAINER_MEMORY_LIMIT = process.env.CONTAINER_MEMORY_LIMIT || envC
 // Empty = no cap.
 export const CONTAINER_PIDS_LIMIT = process.env.CONTAINER_PIDS_LIMIT ?? envConfig.CONTAINER_PIDS_LIMIT ?? '2048';
 
-// Egress lockdown — force all agent traffic through the OneCLI gateway on a
+// Egress lockdown — force all agent traffic through the selected gateway on a
 // no-internet Docker network. Off by default; consumed by src/egress-lockdown.ts.
 export const EGRESS_LOCKDOWN = (process.env.NANOCLAW_EGRESS_LOCKDOWN || envConfig.NANOCLAW_EGRESS_LOCKDOWN) === 'true';
 export const EGRESS_NETWORK =
   process.env.NANOCLAW_EGRESS_NETWORK || envConfig.NANOCLAW_EGRESS_NETWORK || 'nanoclaw-egress';
-export const ONECLI_GATEWAY_CONTAINER =
-  process.env.ONECLI_GATEWAY_CONTAINER || envConfig.ONECLI_GATEWAY_CONTAINER || 'onecli';
+
+// Resolve when the listener starts so a late process override still wins.
+export function getWebhookPort(): number {
+  const raw = process.env.WEBHOOK_PORT || envConfig.WEBHOOK_PORT || '3000';
+  const port = Number(raw);
+  if (!/^[1-9]\d*$/.test(raw) || !Number.isInteger(port) || port > 65_535) {
+    throw new Error(`Invalid WEBHOOK_PORT ${JSON.stringify(raw)}: expected an integer from 1 to 65535`);
+  }
+  return port;
+}
 
 // Timezone for scheduled tasks, message formatting, etc.
 // Validates each candidate is a real IANA identifier before accepting.

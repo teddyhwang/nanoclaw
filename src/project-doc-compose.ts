@@ -210,12 +210,17 @@ function readGroupKernelFile(filePath: string, group: AgentGroup, sourceCap: num
 }
 
 /** Regenerate one flat provider document from every enabled instruction source. */
-export async function composeGroupProjectDoc(group: AgentGroup, groupDir: string, spec: ProjectDocSpec): Promise<void> {
+export async function composeGroupProjectDoc(
+  group: AgentGroup,
+  groupDir: string,
+  spec: ProjectDocSpec,
+  runtimeSkills?: readonly string[],
+): Promise<void> {
   fs.mkdirSync(groupDir, { recursive: true });
 
   const configRow = await getContainerConfig(group.id);
   const mcpServers = sanitizeStoredMcpServers(configRow ? JSON.parse(configRow.mcp_servers) : {}, group.name);
-  const selectedSkills = parseSkillSelection(configRow?.skills, group.name);
+  const selectedSkills = runtimeSkills ?? parseSkillSelection(configRow?.skills, group.name);
   const containerSourceDir = resolveContainerSourceDir();
 
   const sections: ProjectDocSection[] = [];
@@ -291,13 +296,14 @@ export async function composeGroupProjectDoc(group: AgentGroup, groupDir: string
 
   // Plugin-registered skill roots are discoverable only at skills="all"; an
   // explicit allowlist deliberately retains built-in-only semantics.
-  if (selectedSkills === 'all') {
+  if (selectedSkills === 'all' || runtimeSkills) {
     for (const root of getExtraSkillRoots()) {
       if (!fs.existsSync(root.hostPath)) continue;
       for (const entry of fs
         .readdirSync(root.hostPath, { withFileTypes: true })
         .sort((a, b) => a.name.localeCompare(b.name))) {
         const skillName = entry.name;
+        if (selectedSkills !== 'all' && !selectedSkills.includes(skillName)) continue;
         if (!entry.isDirectory() || emittedSkills.has(skillName)) continue;
         if (root.skillFilter && !root.skillFilter(skillName, group)) continue;
         const source = path.join(root.hostPath, skillName, 'instructions.md');

@@ -213,8 +213,13 @@ async function applyMigration(db: DbDriver, migration: Migration): Promise<void>
 
   const raw = sqliteOnly || disableForeignKeys ? sqliteRaw(db) : null;
   if (disableForeignKeys) raw!.pragma('foreign_keys = OFF');
+  let applied = false;
   try {
-    await db.transaction(async () => {
+    applied = await db.transaction(async () => {
+      // Another process may have migrated since we selected the pending list.
+      // SQLite's BEGIN IMMEDIATE holds the write lock for this recheck and up().
+      if (await db.get('SELECT name FROM schema_version WHERE name = ?', migration.name)) return false;
+
       const preexisting = disableForeignKeys
         ? new Set((raw!.pragma('foreign_key_check') as FkViolation[]).map(fkIdentity))
         : null;
@@ -242,9 +247,10 @@ async function applyMigration(db: DbDriver, migration: Migration): Promise<void>
         migration.name,
         new Date().toISOString(),
       );
+      return true;
     });
   } finally {
     if (disableForeignKeys) raw!.pragma('foreign_keys = ON');
   }
-  log.info('Migration applied', { name: migration.name });
+  if (applied) log.info('Migration applied', { name: migration.name });
 }

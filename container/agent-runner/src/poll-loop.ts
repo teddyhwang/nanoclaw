@@ -878,6 +878,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         prompt,
         continuation,
         midTurnCompleteDelivery,
+        config.signal,
       );
       sawResult = Boolean(result.sawResult);
       if (result.pressureRotated) {
@@ -937,33 +938,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         clearContinuationStartedAt(config.providerName);
       }
 
-      const authFailure = isProviderAuthFailureText(errMsg);
-      if (authFailure) {
-        await emitProviderAuthFailureAlert({
-          provider: query.delivery?.providerName ?? config.providerName,
-          failedOverTo: null,
-          turnKind: shouldSendErrorResponseForBatch(keep) ? 'chat' : 'task',
-        });
-      }
-      if (retryableBatchFailure) {
-        log(`Suppressing user-visible retryable provider error for pending retry: ${errMsg}`);
-      } else if (shouldSendErrorResponseForBatch(keep)) {
-        // Write error response so the user knows something went wrong.
-        // Task-only failures stay in logs: scheduled maintenance prompts are
-        // often explicitly silent and should not leak raw runtime errors to chat.
-        // A rejected provider credential is an operator problem: the user gets
-        // a plain notice, never the raw 401 text.
-        await writeMessageOut({
-          id: generateId(),
-          kind: 'chat',
-          platform_id: routing.platformId,
-          channel_type: routing.channelType,
-          thread_id: routing.threadId,
-          content: JSON.stringify({ text: authFailure ? AUTH_FAILURE_USER_TEXT : `Error: ${errMsg}` }),
-        });
-      } else {
-        log(`Suppressing user-visible error for task-only batch: ${errMsg}`);
-      }
+      // processQuery owns push-scoped failure notices and auth alerts.
 
       // Task-fire error record. Captures the error message so the
       // dashboard can show "this fire failed and why" instead of leaving
@@ -1199,6 +1174,7 @@ export function processQuery(
   initialPrompt?: string,
   initialContinuation?: string,
   emitsMidTurnText?: boolean,
+  signal?: AbortSignal,
 ): Promise<QueryResult>;
 /** Compatibility overload retained for the staged upstream mid-turn suites. */
 export function processQuery(
@@ -1210,6 +1186,7 @@ export function processQuery(
   initialPrompt?: string,
   initialContinuation?: string,
   emitsMidTurnText?: boolean,
+  signal?: AbortSignal,
 ): Promise<QueryResult>;
 export async function processQuery(
   query: AgentQuery,
@@ -1220,18 +1197,23 @@ export async function processQuery(
   addressedOrPrompt: boolean | string = false,
   assistantNameOrContinuation: string | undefined = '',
   taskFireContextsOrCapability: TaskFireContext[] | boolean = [],
-  pressureThresholdTokensArg: number | null = null,
+  pressureThresholdTokensArg: number | null | AbortSignal = null,
   onExchangeCompleteArg?: ((exchange: ProviderExchange) => void) | undefined,
   initialPromptArg = '',
   initialContinuationArg: string | undefined = undefined,
   emitsMidTurnTextArg = false,
+  signalArg?: AbortSignal,
 ): Promise<QueryResult> {
   const upstreamCallShape = typeof addressedOrPrompt === 'string' || typeof taskFireContextsOrCapability === 'boolean';
   const activeSender = upstreamCallShape ? null : (activeSenderOrHook as string | null);
   const addressed = upstreamCallShape ? false : (addressedOrPrompt as boolean);
   const assistantName = upstreamCallShape ? '' : (assistantNameOrContinuation ?? '');
   const taskFireContexts = upstreamCallShape ? [] : (taskFireContextsOrCapability as TaskFireContext[]);
-  const pressureThresholdTokens = upstreamCallShape ? null : pressureThresholdTokensArg;
+  const pressureThresholdTokens = typeof pressureThresholdTokensArg === 'number' ? pressureThresholdTokensArg : null;
+  const signal =
+    upstreamCallShape && pressureThresholdTokensArg && typeof pressureThresholdTokensArg === 'object'
+      ? pressureThresholdTokensArg
+      : signalArg;
   const onExchangeComplete = upstreamCallShape
     ? typeof activeSenderOrHook === 'function'
       ? activeSenderOrHook
@@ -2069,10 +2051,10 @@ export async function processQuery(
           // Error results are terminal, but never successful/silent fires.
           // Telegram Dream 2026-08-26 returned a gateway 502 as a result;
           // telemetry previously labelled it silent and hid the failure.
-          lastHandledErrorResult = event.isError ? event.text : null;
+          lastHandledErrorResult = event.isError ? (event.error ?? event.text) : null;
           if (event.isError) {
             const ctx = mostRecentTaskContext();
-            if (ctx) ctx.errorMessage = event.text || 'Provider returned an error result';
+            if (ctx) ctx.errorMessage = event.error || event.text || 'Provider returned an error result';
           }
           const resultAddressed = pushAddressed[resultIndex] ?? false;
           // A queued Codex push may have been replayed into Claude during
@@ -2100,21 +2082,24 @@ export async function processQuery(
             dispatchingResult = false;
             continue;
           }
-          if (event.text) {
+          if (event.text || event.isError) {
+            const authFailure =
+              event.isError && isProviderAuthFailureText([event.text, event.error].filter(Boolean).join('\n'));
+            const archivedResult = [event.text, event.isError ? event.error : undefined].filter(Boolean).join('\n');
             // Attribute this result push-scoped: the newest unwritten
             // context in the OLDEST push that still has one. The SDK
             // delivers results in push order, so the earliest pending
             // push owns the next result. See processQuery's attribution
             // note for why this beats the prior overall-most-recent walk.
             const fireCtx = mostRecentTaskContext();
-            if (fireCtx) fireCtx.assistantText = event.text;
+            if (fireCtx) fireCtx.assistantText = archivedResult;
             // A task turn = this result push is attributed to a task fire and
             // no human addressed it. Such turns owe "exactly one message" and
             // must not append a final summary block to a destination they
             // already delivered to mid-turn via send_message/send_file.
             const isTaskTurn = !!fireCtx && !resultAddressed;
-            const { hasUnwrapped, dispatched, resultBlocks } = await dispatchResultText(
-              event.isError && isProviderAuthFailureText(event.text) ? AUTH_FAILURE_USER_TEXT : event.text,
+            const { hasUnwrapped, dispatched } = await dispatchResultText(
+              authFailure ? AUTH_FAILURE_USER_TEXT : (event.text ?? ''),
               routing,
               resultAddressed,
               resultBoundaryAt,
@@ -2131,13 +2116,13 @@ export async function processQuery(
             if (fireCtx && dispatched.length > 0) {
               fireCtx.dispatched.push(...dispatched);
             }
-            if (resultBlocks === 0 && event.isError === true) {
+            if (event.isError === true) {
               // Non-retryable error turn (e.g. both provider accounts are at
               // quota) with no <message> envelope: deliver the notice for an
               // interactive chat instead of dropping it as scratchpad. Task-
               // only failures remain silent in-channel, matching the outer
               // provider-throw path and scheduled-maintenance contract.
-              if (isProviderAuthFailureText(event.text)) {
+              if (authFailure) {
                 await emitProviderAuthFailureAlert({
                   provider: deliveryProviderName,
                   failedOverTo: null,
@@ -2145,13 +2130,18 @@ export async function processQuery(
                 });
               }
               if (!isTaskTurn) {
-                await deliverErrorResult(event.text, routing);
+                await deliverErrorResult(
+                  routing,
+                  authFailure
+                    ? AUTH_FAILURE_USER_TEXT
+                    : (event.error ?? 'The agent run failed. Check the logs for details.'),
+                );
               } else {
                 log(`Suppressing user-visible error result for task-only turn: ${event.text ?? '(empty)'}`);
               }
               notifyExchangeComplete(onExchangeComplete, {
                 prompt: archivePrompts[0] ?? initialPrompt,
-                result: event.text,
+                result: archivedResult,
                 continuation: queryContinuation ?? initialContinuation,
                 status: 'error',
               });
@@ -2160,7 +2150,7 @@ export async function processQuery(
               const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
               notifyExchangeComplete(onExchangeComplete, {
                 prompt: archivePrompts[0] ?? initialPrompt,
-                result: event.text,
+                result: archivedResult,
                 continuation: queryContinuation ?? initialContinuation,
                 status: hasUnwrapped ? 'undelivered' : 'completed',
               });
@@ -2352,6 +2342,10 @@ export async function processQuery(
       throw err;
     }
   } catch (err) {
+    // Freeze the queue before awaiting notices. Follow-ups have already been
+    // acknowledged, so an abandoned queued turn cannot rely on redelivery.
+    done = true;
+    const cancelled = endedForCommand || signal?.aborted;
     const errMsg = err instanceof Error ? err.message : String(err);
     notifyExchangeComplete(onExchangeComplete, {
       prompt: archivePrompts[0] ?? initialPrompt,
@@ -2359,6 +2353,53 @@ export async function processQuery(
       continuation: queryContinuation ?? initialContinuation,
       status: 'error',
     });
+    const authFailure = isProviderAuthFailureText(errMsg);
+    if (authFailure)
+      await emitProviderAuthFailureAlert({
+        provider: activeProviderName(),
+        failedOverTo: null,
+        turnKind: mostRecentTaskContext() ? 'task' : 'chat',
+      });
+    const pendingRetry = errMsg.startsWith('retryable provider error, no result:');
+    if (!cancelled && !pendingRetry) {
+      // Completed turns are no longer answering or queued. Preserve partial
+      // output from unfinished turns and report that the run did not finish.
+      // Retrying the same route or several queued turns in one thread needs
+      // only one notice. Task and agent wakes have no human chat endpoint.
+      const failedRoutes = [...(answering ? [routing] : []), ...queuedTurns.map((turn) => turn.routing)];
+      const noticed: RoutingContext[] = [];
+      for (const target of failedRoutes) {
+        if (
+          (target === routing && mostRecentTaskContext() && !(pushAddressed[resultIndex] ?? false)) ||
+          !target.platformId ||
+          !target.channelType ||
+          target.channelType === 'agent'
+        )
+          continue;
+        if (
+          noticed.some(
+            (prior) =>
+              prior.platformId === target.platformId &&
+              prior.channelType === target.channelType &&
+              prior.threadId === target.threadId,
+          )
+        )
+          continue;
+        noticed.push(target);
+        try {
+          await deliverErrorResult(
+            target,
+            authFailure ? AUTH_FAILURE_USER_TEXT : 'The agent run failed. Check the logs for details.',
+          );
+        } catch (noticeError) {
+          log(
+            `Failed to deliver query error notice: ${noticeError instanceof Error ? noticeError.message : String(noticeError)}`,
+          );
+        }
+      }
+    }
+    // Continuation recovery receives the original error; diagnostics remain
+    // in the exchange archive and runner log, never in the channel notice.
     throw err;
   } finally {
     done = true;
@@ -2493,7 +2534,7 @@ async function deliverProviderFile(providerPath: string, routing: RoutingContext
  * This is the same user-facing write the outer catch block does, minus the
  * `Error:` prefix — the provider's text is already a user-facing message.
  */
-async function deliverErrorResult(text: string, routing: RoutingContext): Promise<void> {
+async function deliverErrorResult(routing: RoutingContext, text: string): Promise<void> {
   log('Error result with no <message> envelope — delivering to channel');
   // A rejected credential's raw text ("Failed to authenticate. API Error: 401
   // OAuth access token has been revoked.") means nothing to a user and hides
@@ -2886,6 +2927,8 @@ export async function dispatchResultText(
     if (!options.errorResult) await emitSilentTurnComplete();
     return { sent, hasUnwrapped: true, dispatched, resultBlocks };
   }
+
+  if (options.errorResult) return { sent, hasUnwrapped, dispatched, resultBlocks };
 
   if (sent === 0 && !anythingDelivered) {
     // The destination contract gives the model one unambiguous way to say

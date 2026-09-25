@@ -71,7 +71,11 @@ export function isUsageLimitEvent(event: ProviderEvent): boolean {
  * time-sensitive question unanswered while Codex was healthy.
  */
 export function isAuthFailureEvent(event: ProviderEvent): boolean {
-  return event.type === 'result' && event.isError === true && isProviderAuthFailureText(event.text);
+  return (
+    event.type === 'result' &&
+    event.isError === true &&
+    isProviderAuthFailureText([event.text, event.error].filter(Boolean).join('\n'))
+  );
 }
 
 function failoverReason(event: ProviderEvent): FailoverReason | null {
@@ -219,7 +223,7 @@ export class UsageLimitFallbackProvider implements AgentProvider {
             // immediately rather than inheriting that hang.
             await switchToFallback(
               reason,
-              event.type === 'result' ? (event.text ?? '') : event.type === 'error' ? event.message : '',
+              event.type === 'result' ? (event.error ?? event.text ?? '') : event.type === 'error' ? event.message : '',
             );
             switched = true;
             break;
@@ -239,6 +243,7 @@ export class UsageLimitFallbackProvider implements AgentProvider {
             yield {
               type: 'result',
               text: failure?.reason === 'auth' ? failure.detail : dualLimitText,
+              error: failure?.reason === 'auth' ? undefined : dualLimitText,
               isError: true,
             };
             return;

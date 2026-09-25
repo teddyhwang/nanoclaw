@@ -29,6 +29,7 @@ export type MountClass =
   | 'shared-group-state'
   | 'install-surface'
   | 'identity-material'
+  | 'gateway-trust'
   | 'allowlisted-extra';
 
 export interface MountSpec {
@@ -46,6 +47,8 @@ export interface MountSpec {
    *   container's leased identity. Pinned to the deployment's materialsRoot; mode
    *   MUST be 'ro'; NEVER mountable into the 'agent' role — this makes the
    *   no-credentials-in-agents invariant an admission-checkable rule.
+   * - 'gateway-trust': public CA material pinned to the install's dedicated
+   *   gateway-trust root. Read-only and allowed in the agent role.
    * - 'allowlisted-extra': arbitrary host paths vetted upstream by the mount allowlist.
    */
   class: MountClass;
@@ -119,6 +122,12 @@ export interface SessionResources {
   shmSizeMb?: number;
 }
 
+/** Typed network destination. Drivers realize it or reject it; no argv crosses the seam. */
+export interface NetworkAccessIntent {
+  endpoint: string;
+  target: { kind: 'host' } | { kind: 'runtime'; identity: string } | { kind: 'session-container'; role: ContainerRole };
+}
+
 export interface SessionSpec {
   key: SessionKey;
   /**
@@ -132,7 +141,7 @@ export interface SessionSpec {
   sharedStateRoots?: string[];
   /** Lineage labels (channel id, container instance id, ...). Drivers stamp these onto every runtime object. */
   labels: Record<string, string>;
-  /** One session, one or more containers: ['agent'] in this tree; an overlay may compose auxiliary containers beside it. */
+  /** One session, exactly one container per safe role; an overlay may compose auxiliary containers beside `agent`. */
   containers: ContainerSpec[];
   /**
    * 'shared-private': the containers of this session reach the gateway and nothing
@@ -141,6 +150,8 @@ export interface SessionSpec {
    * the overlay which enforcement it got.
    */
   network: 'shared-private' | 'none';
+  /** Selected gateway destination for this session. */
+  networkAccess: NetworkAccessIntent;
   /** Named, versioned posture. Drivers map it; raw flags never cross the seam. */
   hardening: 'standard';
   resources: SessionResources;
@@ -306,6 +317,8 @@ export interface SessionDriver {
   capabilities(): DriverCapabilities;
   /** Fatal-at-startup reachability check. Agents cannot run without a runtime. */
   ensureReady?(): Promise<void>;
+  /** Restore gateway network realization when adopting an existing session. */
+  reconcileNetworkAccess?(access: NetworkAccessIntent): Promise<void>;
   /** Allocate everything, start nothing. Idempotent on key: an existing live session returns its handle. */
   prepare(spec: SessionSpec): Promise<SessionHandle>;
   /**
@@ -420,6 +433,7 @@ export interface MountPolicy {
   dataRoot: string;
   surfaceRoots: string[];
   materialsRoot: string;
+  gatewayTrustRoot: string;
 }
 
 export function validateSpec(spec: SessionSpec, policy: MountPolicy, capabilities?: DriverCapabilities): void {
@@ -479,7 +493,7 @@ export function validateSpec(spec: SessionSpec, policy: MountPolicy, capabilitie
       if (required && mount.class !== required) {
         // Where a file lives decides what it IS, so the class is not the
         // composer's to choose for these roots. Without this the taxonomy is
-        // only as strong as whoever assigns the class, and two of the four
+        // only as strong as whoever assigns the class, and three of the five
         // classes carry safety properties that a demotion silently drops:
         // `allowlisted-extra` is permitted unconditionally, so relabelling a
         // session private key as one mounts it INTO THE AGENT — defeating the
@@ -490,6 +504,9 @@ export function validateSpec(spec: SessionSpec, policy: MountPolicy, capabilitie
       }
       if ((mount.class === 'install-surface' || mount.class === 'shared-group-state') && mount.mode !== 'ro') {
         throw deniedByPolicy(`${mount.class} mount ${mount.hostPath} must be ro`);
+      }
+      if (mount.class === 'gateway-trust' && mount.mode !== 'ro') {
+        throw deniedByPolicy(`gateway-trust mount ${mount.hostPath} must be ro`);
       }
       if (mount.class === 'identity-material' && (mount.mode !== 'ro' || container.role === 'agent')) {
         // The no-credentials invariant, as a checkable rule: identity materials
@@ -580,7 +597,7 @@ export function looksLikeCredential(value: string): boolean {
 /**
  * The class a path is not allowed to disagree with.
  *
- * Only the two roots whose classes carry a safety property are pinned this way.
+ * Only the three roots whose classes carry a safety property are pinned this way.
  * `group-state` and `allowlisted-extra` stay a composition choice, because
  * `allowlisted-extra` legitimately covers operator-configured read-write mounts
  * and forcing those read-only would break the mount-allowlist feature. The rule
@@ -588,6 +605,7 @@ export function looksLikeCredential(value: string): boolean {
  * be claimed by a path that has not earned it".
  */
 export function classRequiredByPath(hostPath: string, policy: MountPolicy): MountClass | null {
+  if (underRoot(hostPath, policy.gatewayTrustRoot)) return 'gateway-trust';
   if (underRoot(hostPath, policy.materialsRoot)) return 'identity-material';
   if (policy.surfaceRoots.some((root) => underRoot(hostPath, root))) return 'install-surface';
   return null;
@@ -649,6 +667,8 @@ function mountAllowed(mount: MountSpec, spec: SessionSpec, policy: MountPolicy):
         mount.groupScope === spec.key.agentGroupId &&
         (spec.sharedStateRoots ?? []).some((root) => underRoot(mount.hostPath, root))
       );
+    case 'gateway-trust':
+      return underRoot(mount.hostPath, policy.gatewayTrustRoot);
     case 'group-state': {
       if (mount.groupScope !== spec.key.agentGroupId) return false;
       if (underRoot(mount.hostPath, `${policy.dataRoot}/v2-sessions/${mount.groupScope}`)) return true;

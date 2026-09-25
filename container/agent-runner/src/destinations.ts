@@ -85,7 +85,7 @@ export function findByRouting(
  */
 export function buildSystemPromptAddendum(
   assistantName?: string,
-  runtime?: { provider?: string; model?: string },
+  runtime?: { provider?: string; model?: string } | SessionMode,
 ): string {
   const sections: string[] = [];
 
@@ -99,12 +99,30 @@ export function buildSystemPromptAddendum(
     );
   }
 
-  const runtimeSection = buildRuntimeSection(runtime);
+  const mode = runtime && 'kind' in runtime ? runtime : { kind: 'chat' };
+  const runtimeSection = buildRuntimeSection(runtime && !('kind' in runtime) ? runtime : undefined);
   if (runtimeSection) sections.push(runtimeSection);
 
   sections.push(buildDestinationsSection());
+  if (mode.kind === 'chat') sections.push(buildReadingSection());
 
   return sections.join('\n\n');
+}
+
+/**
+ * What the inbound blocks are. Chat only: task runs have no messaging group, so they
+ * never receive echo or history rows. The three tags are the ones
+ * formatter.ts emits; keep the two in step.
+ */
+function buildReadingSection(): string {
+  return [
+    '## Reading messages',
+    '',
+    'Chat turns can include:',
+    '',
+    "- `<message>` — the message you are answering. `<dm-history>` and `<channel-history>` are this thread's own earlier timeline.",
+    "- `<cross-session-context>` — a copy of something from elsewhere in this conversation: another thread, or a message you or a scheduled task posted here. Its `from` says which. If you can't tell whether the current message refers to it or to this thread, ask.",
+  ].join('\n');
 }
 
 /**
