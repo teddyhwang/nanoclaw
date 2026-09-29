@@ -86,6 +86,18 @@ export function openInboundDb(): Database {
  * AI-chat went unanswered: host woke the container, the spawn-time
  * `getInboundDb()` open hit this window, process.exit(1), repeat).
  *
+ * A third shape is `attempt to write a readonly database`
+ * (SQLITE_READONLY_ROLLBACK, errno 776) on a plain SELECT. The host's
+ * write transaction leaves `inbound.db-journal` on disk until it
+ * commits; a reader that opens in that window sees a *hot journal*,
+ * and SQLite must roll it back before reading — which a readonly
+ * handle cannot do, so the read fails with READONLY. Same torn window,
+ * same fix: once the host commits and deletes the journal a reopen
+ * reads cleanly. Unclassified, it escaped withInboundDb and killed the
+ * runner from the idle poll (`Fatal error: attempt to write a readonly
+ * database`, ~200 container logs; reproduced 465× in a 16s host-write
+ * stress against a readonly VirtioFS reader, 2026-09-29).
+ *
  * The torn state is transient: the host write completes in
  * milliseconds, so a reopened connection a few ms later sees a
  * consistent file. We close, back off, reopen, and retry. This cannot
@@ -104,19 +116,26 @@ const INBOUND_CORRUPT_BACKOFF_MS = 40;
 export function isTransientInboundError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
   // bun:sqlite surfaces the sqlite text; match on the message rather
-  // than a code so it works regardless of driver error shape. All four
-  // shapes are the same transient VirtioFS torn-window race (see the
+  // than a code so it works regardless of driver error shape. Every
+  // shape is the same transient VirtioFS torn-window race (see the
   // docstring above) — malformed/CORRUPT are torn *reads*; CANTOPEN /
   // NOTADB are the torn *open* (journal present, or a momentarily
-  // zero/short file the guest sees mid-propagation). The on-disk file
-  // is consistent again within ms, so all four are safe to reopen-retry.
+  // zero/short file the guest sees mid-propagation); READONLY is the
+  // readonly handle refusing to roll back the host's hot journal. The
+  // on-disk file is consistent again within ms, so all are safe to
+  // reopen-retry. READONLY is only transient here because every inbound
+  // handle is readonly by design — the container never writes inbound.db.
+  const code = typeof (err as { code?: unknown })?.code === 'string' ? (err as { code: string }).code : '';
   return (
     msg.includes('database disk image is malformed') ||
     msg.includes('SQLITE_CORRUPT') ||
     msg.includes('unable to open database file') ||
     msg.includes('SQLITE_CANTOPEN') ||
     msg.includes('file is not a database') ||
-    msg.includes('SQLITE_NOTADB')
+    msg.includes('SQLITE_NOTADB') ||
+    msg.includes('attempt to write a readonly database') ||
+    msg.includes('SQLITE_READONLY') ||
+    code.startsWith('SQLITE_READONLY')
   );
 }
 
@@ -190,10 +209,13 @@ function openInboundSingleton(): Database {
 }
 
 /**
- * Inbound DB — long-lived singleton, OK for tables the host writes once
- * at spawn and never again (destinations, session_routing). For
- * messages_in polling — where the host writes continuously and a stale
- * view causes the pollHandle hang — use `openInboundDb()` instead.
+ * Inbound DB — long-lived singleton. Production readers must NOT use it:
+ * even tables the host writes once (destinations, session_routing) live
+ * in the same file as messages_in, which the host writes continuously,
+ * so a read through a long-lived handle can land in the host's
+ * hot-journal window and throw a transient READONLY/CORRUPT with no
+ * retry. Every production read goes through `withInboundDb()`; this
+ * remains for tests, where it is the in-memory fixture handle.
  */
 export function getInboundDb(): Database {
   if (!_inbound) {

@@ -1,4 +1,4 @@
-import { getInboundDb, getOutboundDb, openInboundDb, withInboundDb } from './connection.js';
+import { getOutboundDb, openInboundDb, withInboundDb } from './connection.js';
 import type { MessageInRow } from '../../db/messages-in.js';
 import type { MessageOutRow } from '../../db/messages-out.js';
 import {
@@ -524,12 +524,14 @@ export function sqliteHasIdenticalSend(platformId: string, channelType: string, 
 }
 
 export function sqliteGetSessionRouting(): SessionRouting {
-  const db = getInboundDb();
-  const exists = db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'session_routing'").get();
-  if (!exists) return { channelType: null, platformId: null, threadId: null };
-  const row = db.prepare('SELECT channel_type, platform_id, thread_id FROM session_routing WHERE id = 1').get() as
-    | { channel_type: string | null; platform_id: string | null; thread_id: string | null }
-    | undefined;
+  const row = withInboundDb((db) => {
+    const exists = db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'session_routing'").get();
+    if (!exists) return null;
+    return db.prepare('SELECT channel_type, platform_id, thread_id FROM session_routing WHERE id = 1').get() as
+      | { channel_type: string | null; platform_id: string | null; thread_id: string | null }
+      | undefined;
+  });
+  if (row === null) return { channelType: null, platformId: null, threadId: null };
   return parseSessionRoutingRecord({
     channelType: row?.channel_type ?? null,
     platformId: row?.platform_id ?? null,
@@ -596,27 +598,27 @@ function destination(row: DestinationRow): Destination {
 }
 
 export function sqliteGetAllDestinations(): Destination[] {
-  return (getInboundDb().prepare('SELECT * FROM destinations ORDER BY name').all() as DestinationRow[]).map(
+  return withInboundDb((db) => db.prepare('SELECT * FROM destinations ORDER BY name').all() as DestinationRow[]).map(
     destination,
   );
 }
 
 export function sqliteFindByName(name: string): Destination | undefined {
-  const row = getInboundDb().prepare('SELECT * FROM destinations WHERE name = ?').get(name) as
-    | DestinationRow
-    | undefined;
+  const row = withInboundDb(
+    (db) => db.prepare('SELECT * FROM destinations WHERE name = ?').get(name) as DestinationRow | undefined,
+  );
   return row && destination(row);
 }
 
 export function sqliteFindByRouting(channelType: string, platformId: string): Destination | undefined {
-  const db = getInboundDb();
-  const row =
+  const row = withInboundDb((db) =>
     channelType === 'agent'
       ? (db.prepare("SELECT * FROM destinations WHERE type = 'agent' AND agent_group_id = ?").get(platformId) as
           | DestinationRow
           | undefined)
       : (db
           .prepare("SELECT * FROM destinations WHERE type = 'channel' AND channel_type = ? AND platform_id = ?")
-          .get(channelType, platformId) as DestinationRow | undefined);
+          .get(channelType, platformId) as DestinationRow | undefined),
+  );
   return row && destination(row);
 }

@@ -531,6 +531,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
   let pollCount = 0;
   let isFirstPoll = true;
+  let idlePollFailureStreak = 0;
   while (true) {
     // Graceful shutdown: a SIGTERM (host reap) ends the active query and sets
     // this latch. Break BEFORE dequeuing more work so we don't start a turn
@@ -542,7 +543,25 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     }
     if (config.signal?.aborted) return;
     // Skip system messages — they're responses for MCP tools (e.g., ask_user_question)
-    const messages = getPendingMessages(isFirstPoll).filter((m) => m.kind !== 'system');
+    let messages: MessageInRow[];
+    try {
+      messages = getPendingMessages(isFirstPoll).filter((m) => m.kind !== 'system');
+      idlePollFailureStreak = 0;
+    } catch (err) {
+      // The follow-up poll already survives driver-classified transient
+      // mailbox errors; the idle poll did not, so one hot-journal READONLY
+      // that outlasted withInboundDb's retries escaped runPollLoop and
+      // killed the runner (`Fatal error: attempt to write a readonly
+      // database`). Same contract as the follow-up path: skip this tick,
+      // and only exit for a fresh runner after a sustained streak.
+      if (!getAgentMailbox().shouldRestartAfter?.(err)) throw err;
+      idlePollFailureStreak += 1;
+      const errMsg = err instanceof Error ? err.message : String(err);
+      log(`Poll error (transient, ${idlePollFailureStreak}/${MAILBOX_FAILURE_STREAK_EXIT}): ${errMsg}`);
+      if (idlePollFailureStreak >= MAILBOX_FAILURE_STREAK_EXIT) throw err;
+      await sleep(POLL_INTERVAL_MS);
+      continue;
+    }
     isFirstPoll = false;
     pollCount++;
 

@@ -1,6 +1,10 @@
-import { beforeEach, describe, expect, test } from 'bun:test';
+import { Database } from 'bun:sqlite';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
-import { initTestSessionDb, withInboundDb } from '../mailbox/sqlite/connection.js';
+import { initTestSessionDb, isTransientInboundError, withInboundDb } from '../mailbox/sqlite/connection.js';
 
 // withInboundDb is the S405 fix: a transient SQLITE_CORRUPT on the
 // inbound.db read (host writer + VirtioFS non-atomic page propagation
@@ -103,5 +107,91 @@ describe('withInboundDb — S405 corrupt-read retry', () => {
     });
     expect(result).toBe('recovered');
     expect(calls).toBe(2);
+  });
+});
+
+// The host commits inbound.db writes in journal_mode=DELETE, so between
+// its page writes and the journal delete an `inbound.db-journal` is on
+// disk. A reader that opens then sees a *hot journal*; rolling it back is
+// a write, which a readonly handle refuses — so a plain SELECT throws
+// `attempt to write a readonly database` (SQLITE_READONLY_ROLLBACK).
+// Unclassified, that escaped withInboundDb and killed the runner from the
+// idle poll (`Fatal error: attempt to write a readonly database`).
+describe('withInboundDb — hot-journal READONLY retry', () => {
+  let dir: string;
+  afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  /**
+   * Freeze a writer mid-transaction by copying the db + its rollback
+   * journal: the copy has a hot journal and no process holding its lock —
+   * exactly what a readonly reader sees in the host's commit window.
+   */
+  function realHotJournalError(): unknown {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hot-journal-'));
+    const live = path.join(dir, 'live.db');
+    const writer = new Database(live);
+    writer.exec('PRAGMA journal_mode = DELETE');
+    writer.exec('CREATE TABLE t (v TEXT)');
+    const insert = writer.prepare('INSERT INTO t VALUES (?)');
+    for (let i = 0; i < 200; i++) insert.run(`${i}`.padEnd(1000, 'x'));
+    // A tiny cache spills modified pages to the db file mid-transaction,
+    // so the frozen copy holds new pages with their originals in the journal.
+    writer.exec('PRAGMA cache_size = 2');
+    writer.exec('BEGIN');
+    writer.exec("UPDATE t SET v = v || 'y'");
+    const frozen = path.join(dir, 'inbound.db');
+    fs.copyFileSync(live, frozen);
+    fs.copyFileSync(`${live}-journal`, `${frozen}-journal`);
+    // SQLite leaves the header magic zeroed until it syncs the journal at
+    // commit (the host's commit window is exactly post-sync, pre-delete).
+    // Stamp the real magic + nRec=0xffffffff ("size from file") to freeze
+    // that synced state.
+    const fd = fs.openSync(`${frozen}-journal`, 'r+');
+    fs.writeSync(fd, Buffer.from('d9d505f920a163d7ffffffff', 'hex'), 0, 12, 0);
+    fs.closeSync(fd);
+    writer.exec('ROLLBACK');
+    writer.close();
+    const reader = new Database(frozen, { readonly: true });
+    try {
+      reader.prepare('SELECT count(*) FROM t').get();
+      return null;
+    } catch (err) {
+      return err;
+    } finally {
+      reader.close();
+    }
+  }
+
+  test('the real bun:sqlite hot-journal error is classified transient', () => {
+    const err = realHotJournalError();
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toBe('attempt to write a readonly database');
+    expect((err as { code?: string }).code).toBe('SQLITE_READONLY_ROLLBACK');
+    expect(isTransientInboundError(err)).toBe(true);
+  });
+
+  test('retries a hot-journal READONLY read, then succeeds', () => {
+    const hot = realHotJournalError();
+    let calls = 0;
+    const result = withInboundDb(() => {
+      calls++;
+      if (calls < 3) throw hot;
+      return 'recovered';
+    });
+    expect(result).toBe('recovered');
+    expect(calls).toBe(3);
+  });
+
+  test.each([
+    ['message text', 'attempt to write a readonly database', undefined],
+    ['code in message', 'SQLITE_READONLY_ROLLBACK: attempt to write a readonly database', undefined],
+    ['code property only', 'readonly', 'SQLITE_READONLY_RECOVERY'],
+  ])('classifies READONLY variant as transient: %s', (_label, message, code) => {
+    const err = Object.assign(new Error(message), code ? { code } : {});
+    expect(isTransientInboundError(err)).toBe(true);
+  });
+
+  test('still does not classify an unrelated error as transient', () => {
+    expect(isTransientInboundError(Object.assign(new Error('no such table: x'), { code: 'SQLITE_ERROR' }))).toBe(false);
   });
 });
