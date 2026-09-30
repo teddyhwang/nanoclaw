@@ -1252,8 +1252,8 @@ export async function processQuery(
   // Separate from the one-nudge-per-push guard above: once the nudge is sent,
   // deferred ambient work must not end the query until its retry result lands.
   let wrappingRetryInFlight = false;
-  // Results arrive in push order. Preserve whether each push was directly
-  // addressed so a new request pushed into a warm query is not mistaken
+  // Codex results consume one push; Claude results consume all pending pushes.
+  // Preserve whether each push was directly addressed so a warm request is not mistaken
   // for ambient continuation (Nook 2026-06-07).
   const pushAddressed: boolean[] = [addressed];
   // Parallel to pushAddressed. A same-sender chat follow-up that arrives
@@ -2022,6 +2022,7 @@ export async function processQuery(
           midTurnTail = '';
           textProviderName = deliveryProviderName;
         }
+        const resultPushEnd = deliveryProviderName === 'claude' ? pushAddressed.length : resultIndex + 1;
         if (event.type === 'result') {
           // Consume inputs before any awaited dispatch; a push during dispatch
           // belongs to the next result. Read the wrapped query's ACTIVE harness.
@@ -2075,11 +2076,15 @@ export async function processQuery(
             const ctx = mostRecentTaskContext();
             if (ctx) ctx.errorMessage = event.error || event.text || 'Provider returned an error result';
           }
-          const resultAddressed = pushAddressed[resultIndex] ?? false;
+          // Snapshot taken before handleEvent awaits: inputs arriving during
+          // dispatch belong to the next result. Claude merges pending inputs,
+          // so advancing just one slot leaves stale addressed flags behind and
+          // misclassifies a later internal pressure handoff as a user request.
+          const resultAddressed = pushAddressed.slice(resultIndex, resultPushEnd).some(Boolean);
           // A queued Codex push may have been replayed into Claude during
           // failover; Claude can merge it into this very result.
           const resultSuperseded = deliveryProviderName === 'codex' && (pushSuperseded[resultIndex] ?? false);
-          resultIndex++;
+          resultIndex = resultPushEnd;
           markCompleted(initialBatchIds);
           if (resultSuperseded) {
             log('Suppressing superseded chat result — a same-sender follow-up arrived before completion');

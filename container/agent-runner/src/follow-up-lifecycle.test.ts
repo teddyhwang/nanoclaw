@@ -88,7 +88,12 @@ function result(provider: ControlledProvider, text: string): void {
   if (provider.emitsMidTurnText) provider.emit({ type: 'text', text: block });
   provider.emit({ type: 'result', text: block });
 }
-function start(primary: ControlledProvider, name = 'codex', fallback = new ControlledProvider(name === 'codex')) {
+function start(
+  primary: ControlledProvider,
+  name = 'codex',
+  fallback = new ControlledProvider(name === 'codex'),
+  pressureThreshold: number | null = null,
+) {
   const provider = new UsageLimitFallbackProvider({
     primaryName: name,
     primary,
@@ -106,7 +111,7 @@ function start(primary: ControlledProvider, name = 'codex', fallback = new Contr
     true,
     'Optimus',
     [],
-    null,
+    pressureThreshold,
     undefined,
     'initial',
   );
@@ -284,6 +289,37 @@ describe('deferred work must not preempt any unfinished input', () => {
         result(active, 'Merged answer');
         await waitFor(() => active.ends === 1);
         expect(texts()).toEqual(['Merged answer']);
+      } finally {
+        query.abort();
+        await done;
+      }
+    });
+  }
+
+  for (const name of ['claude', 'codex'] as const) {
+    it(`rotates silently after a merged Claude result (${name} standing)`, async () => {
+      const primary = new ControlledProvider(name === 'claude');
+      const fallback = new ControlledProvider(true);
+      const { done, query } = start(primary, name, fallback, 100);
+      try {
+        chat('more-details');
+        await waitFor(() => primary.pushes.length === 1);
+        let active = primary;
+        if (name === 'codex') {
+          primary.emit({ type: 'error', message: 'quota', retryable: true, classification: 'quota' });
+          await waitFor(() => query.delivery?.providerName === 'claude');
+          active = fallback;
+        }
+        const beforeHandoff = active.pushes.length;
+        const block = '<message to="ai-friends">Merged answer</message>';
+        active.emit({ type: 'text', text: block });
+        active.emit({ type: 'result', text: block, tokensUsed: 101 });
+        await waitFor(() => active.pushes.length === beforeHandoff + 1);
+        active.emit({ type: 'result', text: '<internal>Wrote the handoff note.</internal>' });
+        await sleep(50);
+        expect(texts()).toEqual(['Merged answer']);
+        await waitFor(() => active.ends === 1);
+        expect((await done).pressureRotated).toBe(true);
       } finally {
         query.abort();
         await done;
