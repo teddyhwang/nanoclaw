@@ -61,6 +61,7 @@ import {
   extractMessageSender,
   extractImageAttachments,
   categorizeMessage,
+  FAILURE_NOTICE_FIELD,
   isClearCommand,
   isRunnerCommand,
   isSessionEcho,
@@ -2153,15 +2154,22 @@ export async function processQuery(
                   turnKind: isTaskTurn ? 'task' : 'chat',
                 });
               }
-              if (!isTaskTurn) {
+              if (isTaskTurn) {
+                log(`Suppressing user-visible error result for task-only turn: ${event.text ?? '(empty)'}`);
+              } else if (routing.failureNoticeWake) {
+                // Never answer a failure notice with another: an a2a or
+                // self-addressed failure chain stops after one notice. Keep
+                // the reason here, since the skipped notice was its only record.
+                log(
+                  `Error result — notice not sent on this route: ${event.error ?? 'The agent run failed. Check the logs for details.'}`,
+                );
+              } else {
                 await deliverErrorResult(
                   routing,
                   authFailure
                     ? AUTH_FAILURE_USER_TEXT
                     : (event.error ?? 'The agent run failed. Check the logs for details.'),
                 );
-              } else {
-                log(`Suppressing user-visible error result for task-only turn: ${event.text ?? '(empty)'}`);
               }
               notifyExchangeComplete(onExchangeComplete, {
                 prompt: archivePrompts[0] ?? initialPrompt,
@@ -2389,7 +2397,9 @@ export async function processQuery(
       // Completed turns are no longer answering or queued. Preserve partial
       // output from unfinished turns and report that the run did not finish.
       // Retrying the same route or several queued turns in one thread needs
-      // only one notice. Task and agent wakes have no human chat endpoint.
+      // only one notice. Task wakes have no human chat endpoint. The host picks
+      // an a2a reply's session by in_reply_to, so agent routes also compare it.
+      // A turn woken only by failure notices sends none.
       const failedRoutes = [...(answering ? [routing] : []), ...queuedTurns.map((turn) => turn.routing)];
       const noticed: RoutingContext[] = [];
       for (const target of failedRoutes) {
@@ -2397,7 +2407,7 @@ export async function processQuery(
           (target === routing && mostRecentTaskContext() && !(pushAddressed[resultIndex] ?? false)) ||
           !target.platformId ||
           !target.channelType ||
-          target.channelType === 'agent'
+          target.failureNoticeWake
         )
           continue;
         if (
@@ -2405,7 +2415,8 @@ export async function processQuery(
             (prior) =>
               prior.platformId === target.platformId &&
               prior.channelType === target.channelType &&
-              prior.threadId === target.threadId,
+              prior.threadId === target.threadId &&
+              (target.channelType !== 'agent' || prior.inReplyTo === target.inReplyTo),
           )
         )
           continue;
@@ -2571,7 +2582,8 @@ async function deliverErrorResult(routing: RoutingContext, text: string): Promis
     platform_id: routing.platformId,
     channel_type: routing.channelType,
     thread_id: routing.threadId,
-    content: JSON.stringify({ text: userText }),
+    // Flagged so a receiving agent's own failure sends no notice back.
+    content: JSON.stringify({ text: userText, [FAILURE_NOTICE_FIELD]: true }),
   });
 }
 

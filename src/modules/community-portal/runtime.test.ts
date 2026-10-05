@@ -112,6 +112,8 @@ async function until(check: () => boolean | Promise<boolean>, timeout = 5_000): 
   }
 }
 const journalFile = (): string => path.join(root, 'data/community-portal.json');
+const readJournal = async (): Promise<{ credentials: object; operations: object }> =>
+  JSON.parse(await readFile(journalFile(), 'utf8')) as { credentials: object; operations: object };
 
 beforeEach(async () => {
   root = await mkdtemp(path.join(os.tmpdir(), 'nc-portal-runtime-'));
@@ -203,10 +205,7 @@ it('reports sign_in_required and clears local credentials when the portal refuse
   await until(() => log.mock.calls.some(([event]) => event.event === 'sign_in_required'));
   // `sign_in_required` is logged synchronously by rejectIdentity(), but the
   // journal is only cleared on a LATER check() pass (process lock + HTTP +
-  // client.initialize()). Poll for the actual post-condition instead of
-  // sleeping a fixed interval, which raced on slow CI runners.
-  const readJournal = async (): Promise<{ credentials: object; operations: object }> =>
-    JSON.parse(await readFile(journalFile(), 'utf8')) as { credentials: object; operations: object };
+  // client.initialize()). Poll for both cleared maps instead of sleeping.
   await until(async () => {
     const j = await readJournal();
     return isDeepStrictEqual(j.credentials, {}) && isDeepStrictEqual(j.operations, {});

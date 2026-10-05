@@ -23,6 +23,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
+import { trustGatewayCaForChromium } from './browser-trust.js';
 import { loadConfig } from './config.js';
 import { buildSystemPromptAddendum } from './destinations.js';
 import { ensureMemoryScaffold } from './memory/scaffold.js';
@@ -79,6 +80,9 @@ async function main(): Promise<void> {
   // Every provider shares the provider-neutral memory scaffold. Legacy imports
   // remain an explicit operator migration, never an automatic startup action.
   ensureMemoryScaffold();
+
+  // The agent browser trusts only NSS, not the gateway CA env vars.
+  trustGatewayCaForChromium({ log });
 
   await mailbox.start(await readMailboxContext());
   try {

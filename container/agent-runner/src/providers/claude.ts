@@ -245,6 +245,23 @@ const postToolUseHook: HookCallback = async (input) => {
   return { continue: true };
 };
 
+/** Minimum spacing between `activity` frames derived from streaming deltas. */
+const STREAM_ACTIVITY_INTERVAL_MS = 1000;
+
+// The notices are written for a terminal user; a chat user can't act on them
+// and must never be invited to paste a key.
+const OWNER_FIX_HINT =
+  "Whoever runs this NanoClaw needs to fix this outside the chat. Please don't send keys or passwords here.";
+
+/** The Claude CLI's own fixed failure notices (exact strings), safe to show in a channel, and the hint added to each. */
+const SDK_NOTICES = new Map([
+  ['Not logged in · Please run /login', OWNER_FIX_HINT],
+  ['Invalid API key · Fix external API key', OWNER_FIX_HINT],
+  ['Invalid auth token · Fix external auth token', OWNER_FIX_HINT],
+  ['Credit balance is too low', OWNER_FIX_HINT],
+  ['Prompt is too long', 'This conversation got too long. An admin can send /clear to start a new one.'],
+]);
+
 /** The real clock for archive names and rotation stamps; tests hand the history functions a fixed one. */
 const REAL_CLOCK = { now: () => Date.now() };
 
@@ -272,9 +289,9 @@ function createPreCompactHook(assistantName?: string): HookCallback {
  * Claude Code auto-compacts context at this window (tokens). Kept here so
  * the generic bootstrap doesn't need to know about Claude-specific env vars.
  *
- * Operator override: set CLAUDE_CODE_AUTO_COMPACT_WINDOW in the host env to
- * raise or lower the threshold without editing source — useful when running
- * with a 1M-context model variant or when emergency-tuning a deployment.
+ * Operator override: set CLAUDE_CODE_AUTO_COMPACT_WINDOW in the host env or
+ * `.env`; the host-side claude provider (src/providers/claude.ts) passes it
+ * into the container. Useful with a 1M-context model variant.
  */
 const CLAUDE_CODE_AUTO_COMPACT_WINDOW = process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW || '165000';
 
@@ -516,6 +533,11 @@ export class ClaudeProvider implements AgentProvider {
           : undefined,
         allowedTools: [...this.mcp.allowedTools],
         disallowedTools: [...this.executionPolicy.disallowedTools],
+        // The SDK emits `assistant` only per completed content block, so a long
+        // block is silent and the host sweep kills the container mid-generation.
+        // Streaming deltas are the liveness signal for that window; translateEvents
+        // turns them into throttled `activity` and nothing else.
+        includePartialMessages: true,
         env: this.env,
         model: this.inference.model,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -549,11 +571,21 @@ export class ClaudeProvider implements AgentProvider {
       // events so the poll-loop's pressure-rotation check can fire
       // BEFORE the SDK's own auto-compaction does.
       let lastContextTokens: number | undefined;
+      let lastStreamActivityAt = 0;
       for await (const message of sdkResult) {
         if (aborted) return;
-        messageCount++;
 
-        // Yield activity for every SDK event so the poll loop knows the agent is working
+        // Yield activity for every SDK event so the poll loop knows the agent
+        // is working. Deltas arrive per token and carry no content for us, so
+        // they count at most once per second, and not as messages.
+        if (message.type === 'stream_event') {
+          const now = Date.now();
+          if (now - lastStreamActivityAt < STREAM_ACTIVITY_INTERVAL_MS) continue;
+          lastStreamActivityAt = now;
+          yield { type: 'activity' };
+          continue;
+        }
+        messageCount++;
         yield { type: 'activity' };
 
         if (message.type === 'system' && message.subtype === 'init') {
@@ -604,12 +636,20 @@ export class ClaudeProvider implements AgentProvider {
           // Assistant text has already gone through the single mid-turn door.
           // Keep the SDK result verbatim for status/error accounting, but never
           // replay an earlier assistant <message> from this result branch.
+          const isError = m.is_error === true;
+          // Some failures (e.g. an invalid API key) leave errors[] empty and put
+          // the SDK's own notice in `result`. Other result text can echo upstream
+          // bodies, so only exact fixed notices are reused; the rest stay generic.
+          const candidate = isError && !m.errors?.length ? (m.result?.trim() ?? '') : '';
+          // Notice first, hint on its own line: setup's ping shows only the first line.
+          const hint = SDK_NOTICES.get(candidate);
+          const resultAsError = hint ? `${candidate}\n${hint}` : '';
           yield {
             type: 'result',
-            text: m.result ?? null,
+            text: resultAsError ? null : (m.result ?? null),
             tokensUsed: lastContextTokens,
-            isError: m.is_error === true,
-            error: m.errors?.length ? m.errors.join('\n') : undefined,
+            isError,
+            error: m.errors?.length ? m.errors.join('\n') : resultAsError || undefined,
           };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };

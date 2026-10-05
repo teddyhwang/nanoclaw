@@ -222,6 +222,7 @@ describe('session echo formatting and safety', () => {
       threadId: null,
       inReplyTo: null,
       taskFire: false,
+      failureNoticeWake: false,
     });
   });
 
@@ -244,6 +245,7 @@ describe('session echo formatting and safety', () => {
       threadId: 'th-1',
       inReplyTo: 'm1',
       taskFire: false,
+      failureNoticeWake: false,
     });
   });
 
@@ -257,6 +259,7 @@ describe('session echo formatting and safety', () => {
       threadId: null,
       inReplyTo: null,
       taskFire: true,
+      failureNoticeWake: false,
     });
   });
 });
@@ -793,6 +796,7 @@ describe('pickInReplyToMessage', () => {
       threadId: 'discord:guild:general',
       inReplyTo: 'general-trigger',
       taskFire: false,
+      failureNoticeWake: false,
     });
   });
 

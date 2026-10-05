@@ -12,6 +12,7 @@
  * stable.
  */
 import { INSTALL_SLUG } from './config.js';
+import { stopOrphanedSessions } from './container-runner.js';
 import { ensureEgressNetwork } from './egress-lockdown.js';
 import { getActiveSessions } from './db/sessions.js';
 import { peekSessionDriver } from './drivers/index.js';
@@ -138,6 +139,15 @@ export function startHostSweep(): void {
           log.error('Egress lockdown re-heal failed', { err });
         }
       },
+      // Stop containers whose session or agent group was deleted: the
+      // per-session reconcile only visits sessions that still have a row.
+      'singleton:orphan-containers': async () => {
+        try {
+          await stopOrphanedSessions();
+        } catch (err) {
+          log.error('Orphaned container sweep failed', { err });
+        }
+      },
       // Finalize any "Reject with reason…" holds whose reply window elapsed
       // (admin ghosted, or the host restarted mid-capture). Central-DB scan,
       // once per tick — not per session.
@@ -206,7 +216,7 @@ async function sweep(generation: number): Promise<void> {
   if (!running || !tickQueue || generation !== sweepGeneration) return;
 
   // Enqueue order matches the loop this replaces: egress re-heal, then every
-  // active session, then the approvals scan. Keys START in that order; up to
+  // active session, then the approvals scan; the orphan-container stop last. Keys START in that order; up to
   // RECONCILE_CONCURRENCY of them run at once.
   tickQueue.add('singleton:egress-reheal');
   try {
@@ -218,6 +228,7 @@ async function sweep(generation: number): Promise<void> {
     log.error('Host sweep error', { err });
   }
   tickQueue.add('singleton:approvals-scan');
+  tickQueue.add('singleton:orphan-containers');
 
   // The tick ends — and the next one is armed — only after everything this
   // tick enqueued has run. Delayed backoff retries don't hold the tick open.

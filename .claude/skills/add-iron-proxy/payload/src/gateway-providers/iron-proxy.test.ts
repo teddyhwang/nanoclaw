@@ -121,6 +121,17 @@ describe('Iron Proxy provider', () => {
     expect(front).toEqual(JSON.parse(ironFrontConfig(settings)));
   });
 
+  it('keeps the local model host out of the front config; the bridge decides its port', () => {
+    const front = JSON.parse(ironFrontConfig(settings));
+    expect(front.plaintext_origins).toBeUndefined();
+    expect(front.allowed_hosts).not.toContain('host.docker.internal');
+  });
+
+  it('keeps the Docker bridge reachable, so host.docker.internal works on Linux', () => {
+    const denied = parseYaml(ironProxyConfig(settings)).proxy.upstream_deny_cidrs as string[];
+    for (const cidr of denied) expect(cidr).not.toMatch(/^(?:172\.(?:1[6-9]|2\d|3[01])\.|10\.|192\.168\.)/);
+  });
+
   it('uses the configured port for the front listener and agent URL only', () => {
     const configured = readIronProxySettings({ NANOCLAW_IRON_PROXY_PORT: '18081' }, root);
     fs.mkdirSync(path.dirname(configured.identityKey), { recursive: true });
@@ -149,6 +160,21 @@ describe('Iron Proxy provider', () => {
     const front = JSON.parse(ironFrontConfig(settings));
     expect(front.approval_target).toBe('unix:///run/nanoclaw-gateway/approval.sock');
     expect(front.allowed_hosts).toContain(settings.modelHost);
+  });
+
+  it('leaves an invalid allowed-hosts entry out of the front config and warns', async () => {
+    const { log } = await import('../log.js');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'iron-front-allowlist-'));
+    const allowedHostsFile = path.join(dir, 'allowed-hosts.json');
+    fs.writeFileSync(allowedHostsFile, JSON.stringify(['extra.example.com', 'host.docker.internal:11434']));
+    try {
+      const front = JSON.parse(ironFrontConfig({ ...settings, allowedHostsFile }));
+      expect(front.allowed_hosts).toContain('extra.example.com');
+      expect(front.allowed_hosts).not.toContain('host.docker.internal:11434');
+      expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('Iron only reaches HTTPS on 443'));
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('routes through the central proxy with a signed session identity', () => {

@@ -22,6 +22,21 @@ export function isSessionEcho(msg: MessageInRow): boolean {
 }
 
 /**
+ * Content flag the runner sets on its own failure notices. The host passes
+ * a2a content through unchanged, so the flag reaches the receiving agent and
+ * a failure there sends no notice back (never answer an error with an error).
+ */
+export const FAILURE_NOTICE_FIELD = 'failureNotice';
+
+export function isFailureNotice(msg: MessageInRow): boolean {
+  try {
+    return JSON.parse(msg.content)?.[FAILURE_NOTICE_FIELD] === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Command categories for messages starting with '/'.
  * - admin: sender must be in NANOCLAW_ADMIN_USER_IDS
  * - filtered: silently drop (mark completed without processing)
@@ -91,8 +106,9 @@ export function categorizeMessage(msg: MessageInRow, providerName: string): Comm
   const senderId = extractSenderId(msg, content);
 
   // Cross-session echo rows are ambient copies of another conversation —
-  // a copied "/clear" etc. must never execute here.
-  if (isSessionEcho(msg) || !text.startsWith('/')) {
+  // a copied "/clear" etc. must never execute here. Nor may a failure
+  // notice whose error text happens to start with a slash.
+  if (isSessionEcho(msg) || isFailureNotice(msg) || !text.startsWith('/')) {
     return { category: 'none', command: '', text, senderId };
   }
 
@@ -117,7 +133,7 @@ export function categorizeMessage(msg: MessageInRow, providerName: string): Comm
  * before messages reach the container.
  */
 export function isClearCommand(msg: MessageInRow): boolean {
-  if (isSessionEcho(msg)) return false;
+  if (isSessionEcho(msg) || isFailureNotice(msg)) return false;
   const content = parseContent(msg.content);
   const text = (content.text || '').trim();
   return text.toLowerCase().startsWith('/clear');
@@ -181,6 +197,8 @@ export interface RoutingContext {
   /** Batch is a task fire. Explicit sends must not inherit the series id as
    *  in_reply_to, or host task-fire suppression can drop them as echoes. */
   taskFire: boolean;
+  /** Every non-echo row that woke this turn is a failure notice. */
+  failureNoticeWake?: boolean;
 }
 
 /**
@@ -264,11 +282,16 @@ export function pickInReplyToMessage(messages: MessageInRow[]): MessageInRow | n
  * row; using the first row would route degraded fallbacks and implicit
  * replies to the wrong channel. Cross-session echoes are ambient context:
  * they never select a route or reply target, even if a malformed echo row
- * carries routing fields or `trigger=1`.
+ * carries routing fields or `trigger=1`. A failure notice routes only when
+ * no real message woke the turn, so a failure answers the requester, not the
+ * agent that failed.
  */
 export function extractRouting(messages: MessageInRow[]): RoutingContext {
-  const firstNonEcho = messages.find((m) => !isSessionEcho(m));
-  const replyTarget = pickInReplyToMessage(messages);
+  const nonEcho = messages.filter((m) => !isSessionEcho(m));
+  const waking = nonEcho.filter((m) => m.trigger !== 0);
+  const real = messages.filter((m) => !isFailureNotice(m));
+  const firstNonEcho = real.find((m) => !isSessionEcho(m)) ?? nonEcho[0];
+  const replyTarget = pickInReplyToMessage(real) ?? pickInReplyToMessage(messages);
   const routeSource = replyTarget ?? firstNonEcho;
   return {
     platformId: routeSource?.platform_id ?? null,
@@ -278,6 +301,8 @@ export function extractRouting(messages: MessageInRow[]): RoutingContext {
     // Echo rows riding along with a task remain ambient context and do not
     // change the local task-fire semantics. Echo-only batches are not tasks.
     taskFire: messages.some((m) => m.kind === 'task') && messages.every((m) => m.kind === 'task' || isSessionEcho(m)),
+    // Accumulated trigger=0 context rides along but did not wake the turn.
+    failureNoticeWake: waking.length > 0 && waking.every(isFailureNotice),
   };
 }
 
