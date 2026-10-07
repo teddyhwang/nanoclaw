@@ -250,6 +250,27 @@ describe('schedule-store timestamp boundaries', () => {
     },
   );
 
+  it.each(['2026-09-10 17:20:00', '2026-09-10T13:20', 'garbage'])(
+    'reads around a row written past the validators instead of throwing for the group: %s',
+    (value) => {
+      const db = freshDb();
+      try {
+        schedule(db, 'healthy', { processAfter: instant });
+        schedule(db, 'bad', { processAfter: instant });
+        db.prepare("UPDATE task_series SET process_after = ? WHERE series_id = 'bad'").run(value);
+        expect(getDueSeries(db, instant).map((r) => r.series_id)).toEqual(['healthy']);
+        expect(listLiveSeries(db).map((r) => r.series_id)).toEqual(['healthy']);
+        // Never rewritten or advanced by a read.
+        expect(db.prepare("SELECT process_after, status FROM task_series WHERE series_id = 'bad'").get()).toEqual({
+          process_after: value,
+          status: 'pending',
+        });
+      } finally {
+        db.close();
+      }
+    },
+  );
+
   it('orders legacy offsets chronologically and preserves null/paused semantics', () => {
     const db = freshDb();
     try {

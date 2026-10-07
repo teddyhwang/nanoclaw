@@ -127,7 +127,15 @@ async function maintainScheduling(
 ): Promise<void> {
   // MODULE-HOOK:scheduling-recurrence:start
   const { handleRecurrence } = await import('./modules/scheduling/recurrence.js');
-  await handleRecurrence(mailbox, session, openSchedule);
+  try {
+    await handleRecurrence(mailbox, session, openSchedule);
+    // eslint-disable-next-line no-catch-all/no-catch-all -- schedule failures must not abort the session sweep
+  } catch (err) {
+    // A schedule-level failure (unopenable schedule.db, failed due query)
+    // must not abort the rest of the session sweep: due-message wakes,
+    // stuck-claim recovery and delivery maintenance still run this tick.
+    log.error('Scheduled series recurrence failed', { sessionId: session.id, err });
+  }
 
   try {
     const { listLiveSeries, openScheduleDb } = await import('./modules/scheduling/schedule-store.js');

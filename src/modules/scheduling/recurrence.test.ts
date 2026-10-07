@@ -354,3 +354,69 @@ describe('production sweep snapshot timestamp regression', () => {
     }
   });
 });
+
+describe('production sweep: one invalid process_after in an agent group', () => {
+  it.each([
+    ['sqlite datetime(now)', '2026-09-10 13:20:00'],
+    ['naive ISO from a free-text edit', '2026-09-10T13:20'],
+    ['unparseable text', 'tomorrow 9am'],
+  ])('isolates a %s row: healthy series still fire and project', async (_label, bad) => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-10T13:21:00.000Z'));
+    seedSeries('dream', '0 4 * * *', '2026-09-10T13:00:00.000Z');
+    seedSeries('reminder', null, '2026-09-10T14:00:00.000Z');
+    seedSeries('bad-edit', null, '2026-09-10T13:00:00.000Z');
+    const schedule = openSchedule();
+    const inbound = openInboundDb(IN_DB);
+    try {
+      schedule.prepare("UPDATE task_series SET process_after = ? WHERE series_id = 'bad-edit'").run(bad);
+      vi.mocked(log.error).mockClear();
+      const mailbox = wrapSqliteInbound(inbound);
+      await _maintainSchedulingForTesting(mailbox, session(), openSchedule);
+      await _maintainSchedulingForTesting(mailbox, session(), openSchedule);
+
+      // The due Dream fired once despite its malformed neighbour…
+      expect(inboundTaskRows().map((r) => r.series_id)).toEqual(['dream']);
+      // …the snapshot was refreshed with every valid live series…
+      expect(inbound.prepare('SELECT series_id FROM task_series ORDER BY series_id').all()).toEqual([
+        { series_id: 'dream' },
+        { series_id: 'reminder' },
+      ]);
+      // …and the bad row is untouched for the operator, reported once.
+      expect(seriesRow('bad-edit')).toMatchObject({ status: 'pending', process_after: bad, last_fired_at: null });
+      const reports = vi
+        .mocked(log.error)
+        .mock.calls.filter(([msg]) =>
+          String(msg).startsWith('Skipping scheduled series with an invalid process_after'),
+        );
+      expect(reports.length).toBeGreaterThanOrEqual(1);
+      expect(reports.every(([, fields]) => (fields as { seriesId: string }).seriesId === 'bad-edit')).toBe(true);
+      expect(
+        vi.mocked(log.error).mock.calls.some(([msg]) => String(msg) === 'Failed to project task_series snapshot'),
+      ).toBe(false);
+    } finally {
+      vi.useRealTimers();
+      schedule.close();
+      inbound.close();
+    }
+  });
+
+  it('a schedule-level failure does not abort the session sweep', async () => {
+    const inbound = openInboundDb(IN_DB);
+    try {
+      vi.mocked(log.error).mockClear();
+      const unopenable = () => {
+        throw new Error('database disk image is malformed');
+      };
+      await expect(
+        _maintainSchedulingForTesting(wrapSqliteInbound(inbound), session(), unopenable),
+      ).resolves.toBeUndefined();
+      expect(vi.mocked(log.error).mock.calls.map(([msg]) => msg)).toEqual([
+        'Scheduled series recurrence failed',
+        'Failed to project task_series snapshot',
+      ]);
+    } finally {
+      inbound.close();
+    }
+  });
+});

@@ -40,6 +40,7 @@ import path from 'path';
 
 import { sessionsBaseDir } from '../../session-manager.js';
 import { parseIsoTimestamp, type IsoTimestamp } from '../../mailbox/model.js';
+import { log } from '../../log.js';
 
 export type SeriesStatus = 'pending' | 'paused' | 'cancelled';
 
@@ -140,6 +141,47 @@ function canonicalSeries(row: TaskSeriesRow): TaskSeriesRow {
   return { ...row, process_after: row.process_after === null ? null : scheduleTimestamp(row.process_after) };
 }
 
+/** Rows already reported, so a bad row logs one error, not one per sweep. */
+const reportedInvalidSeries = new Set<string>();
+
+/**
+ * Canonicalize a read batch with per-row isolation. Every write path rejects
+ * a naive or malformed `process_after`, but a row can still be written around
+ * them (raw SQL such as `datetime('now')`, or a client that skips the
+ * validators). Such a row is logged once and skipped, never thrown: before,
+ * one bad row made `getDueSeries`/`listLiveSeries` throw for the whole agent
+ * group, so none of its other series fired or projected. The row itself is
+ * left untouched for the operator to correct.
+ */
+function canonicalRows(rows: readonly TaskSeriesRow[], reader: string): TaskSeriesRow[] {
+  const canonical: TaskSeriesRow[] = [];
+  for (const row of rows) {
+    try {
+      canonical.push(canonicalSeries(row));
+      // eslint-disable-next-line no-catch-all/no-catch-all -- isolate one bad row from the rest of the group
+    } catch (err) {
+      const key = `${row.agent_group_id}\u0000${row.series_id}\u0000${row.process_after}`;
+      const fields = {
+        agentGroupId: row.agent_group_id,
+        seriesId: row.series_id,
+        processAfter: row.process_after,
+        reader,
+        err: err instanceof Error ? err.message : String(err),
+      };
+      if (reportedInvalidSeries.has(key)) {
+        log.debug('Still skipping scheduled series with an invalid process_after', fields);
+      } else {
+        reportedInvalidSeries.add(key);
+        log.error(
+          'Skipping scheduled series with an invalid process_after — it will not fire until corrected to a zoned ISO-8601 timestamp (e.g. 2026-10-07T14:00:00.000Z)',
+          fields,
+        );
+      }
+    }
+  }
+  return canonical;
+}
+
 /** Schedule a new (or replace an existing) task series. */
 export function upsertSeries(
   db: Database.Database,
@@ -204,7 +246,7 @@ export function getDueSeries(db: Database.Database, now: string): TaskSeriesRow[
         ORDER BY julianday(process_after) ASC`,
     )
     .all({ now: scheduleTimestamp(now) }) as TaskSeriesRow[];
-  return rows.map(canonicalSeries);
+  return canonicalRows(rows, 'getDueSeries');
 }
 
 /**
@@ -330,7 +372,7 @@ export function listLiveSeries(db: Database.Database): TaskSeriesRow[] {
         ORDER BY julianday(process_after) ASC`,
     )
     .all() as TaskSeriesRow[];
-  return rows.map(canonicalSeries);
+  return canonicalRows(rows, 'listLiveSeries');
 }
 
 /** True iff this series already exists (any status). Migration idempotency. */
