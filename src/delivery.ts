@@ -27,7 +27,15 @@ import {
   getMessagingGroupByPlatform,
   getMessagingGroupForOwnDestination,
 } from './db/messaging-groups.js';
-import { clearDeliveryAttempt, recordDeliveryAttempt } from './db/coordination.js';
+import {
+  clearDeliveryAttempt,
+  deferDeliveryAttempt,
+  getSessionDeliveryAttempts,
+  markDeliveryQueued,
+  recordDeliveryAttempt,
+  type DeliveryAttemptRow,
+} from './db/coordination.js';
+import { isChannelUnavailableError } from './channels/channel-unavailable.js';
 import { runGuarded, type DeliveryGuardSpec, type GuardedDeliveryHandler } from './delivery-guard.js';
 import { emitEngineEvent } from './engine/events.js';
 import { isUnguarded, type Unguarded } from './guard/index.js';
@@ -44,6 +52,24 @@ import type { OutboundMessage } from './mailbox/index.js';
 const ACTIVE_POLL_MS = 1000;
 const SWEEP_POLL_MS = 60_000;
 const MAX_DELIVERY_ATTEMPTS = 3;
+/**
+ * Delay before the next real attempt after a failed one, indexed by the
+ * number of attempts already spent before this failure. Without it the 1s
+ * active poll burned all three attempts in ~2s, so any blip longer than that
+ * (reconnect, 5xx burst) permanently lost the message.
+ */
+const RETRY_BACKOFF_MS = [5_000, 30_000] as const;
+/** Re-try cadence while a channel reports itself unavailable (a hold). */
+const UNAVAILABLE_RETRY_MS = 15_000;
+/**
+ * How long a message may be held for an unavailable channel before it fails
+ * permanently. Measured from when delivery first found the message stuck —
+ * its own first hold, or the first drain that queued it behind a stuck
+ * message to the same destination — or from its latest real attempt. So a
+ * channel that is down overnight still gets its replies, and no reply goes
+ * out more than ~24h after delivery first tried it.
+ */
+const MAX_UNAVAILABLE_HOLD_MS = 24 * 60 * 60 * 1000;
 /**
  * Sessions drained in parallel per poll tick. A visit is one mailbox round
  * trip (read the queue) plus the channel sends; serially, a tick scaled as
@@ -64,14 +90,21 @@ const DELIVERY_CONCURRENCY = 8;
  * give-up decision for this tick (the message just retries next poll), and a
  * failed clear leaves a stale row the next lifecycle of the same id clears.
  */
-async function recordAttemptRow(messageId: string, sessionId: string, err: unknown): Promise<number | null> {
+async function recordAttemptRow(
+  messageId: string,
+  sessionId: string,
+  err: unknown,
+  priorAttempts: number,
+): Promise<number | null> {
   /* eslint-disable no-catch-all/no-catch-all -- attempt bookkeeping must never break delivery */
   try {
+    const nowMs = Date.now();
+    const delay = RETRY_BACKOFF_MS[Math.min(priorAttempts, RETRY_BACKOFF_MS.length - 1)];
     return await recordDeliveryAttempt({
       messageId,
       sessionId,
-      now: new Date().toISOString(),
-      nextAttemptAt: null,
+      now: new Date(nowMs).toISOString(),
+      nextAttemptAt: new Date(nowMs + delay).toISOString(),
       error: err instanceof Error ? err.message : String(err),
     });
   } catch (recordErr) {
@@ -83,6 +116,48 @@ async function recordAttemptRow(messageId: string, sessionId: string, err: unkno
     return null;
   }
   /* eslint-enable no-catch-all/no-catch-all */
+}
+
+/**
+ * The session's attempt/hold rows, read once per drain. A failed read only
+ * loses scheduling for this tick (every pending row is treated as due, the
+ * pre-backoff behaviour); it never blocks delivery.
+ */
+async function readAttemptRows(sessionId: string): Promise<Map<string, DeliveryAttemptRow>> {
+  /* eslint-disable no-catch-all/no-catch-all -- attempt bookkeeping must never break delivery */
+  try {
+    return await getSessionDeliveryAttempts(sessionId);
+  } catch (err) {
+    log.warn('Failed to read delivery attempt rows — treating every pending message as due', { sessionId, err });
+    return new Map();
+  }
+  /* eslint-enable no-catch-all/no-catch-all */
+}
+
+async function markQueuedRow(messageId: string, sessionId: string): Promise<void> {
+  /* eslint-disable no-catch-all/no-catch-all -- attempt bookkeeping must never break delivery */
+  try {
+    await markDeliveryQueued({
+      messageId,
+      sessionId,
+      now: new Date().toISOString(),
+      reason: 'queued behind an undelivered message to the same destination',
+    });
+  } catch (err) {
+    log.warn('Failed to mark queued delivery — hold clock starts at its first attempt', { messageId, sessionId, err });
+  }
+  /* eslint-enable no-catch-all/no-catch-all */
+}
+
+/**
+ * Per-destination FIFO key. Once a message to a destination is held, backed
+ * off or failed in a drain, later messages to the same destination wait for
+ * a later tick, so a reply written after an outage never overtakes the one
+ * held during it.
+ */
+function destinationKey(msg: OutboundMessage): string | null {
+  if (msg.kind === 'system' || msg.kind === 'task_log' || !msg.channelType || !msg.platformId) return null;
+  return `${msg.channelType}\u0000${msg.platformId}\u0000${msg.threadId ?? ''}`;
 }
 
 async function clearAttemptRow(messageId: string): Promise<void> {
@@ -317,7 +392,24 @@ async function drainSession(session: Session): Promise<void> {
     }
   }
 
+  const attemptRows = pending.length > 0 ? await readAttemptRows(session.id) : new Map<string, DeliveryAttemptRow>();
+  const blockedDestinations = new Set<string>();
+
   for (const msg of pending) {
+    const destination = destinationKey(msg);
+    const attemptRow = attemptRows.get(msg.id);
+    if (destination !== null && blockedDestinations.has(destination)) {
+      // Queued behind a stuck message. Start its own hold clock now, once;
+      // otherwise its 24h window would only begin when it reaches the front,
+      // and a backlog of N replies would stretch an outage to N×24h.
+      if (!attemptRow) await markQueuedRow(msg.id, session.id);
+      continue;
+    }
+    if (attemptRow?.next_attempt_at && attemptRow.next_attempt_at > new Date().toISOString()) {
+      if (destination !== null) blockedDestinations.add(destination);
+      continue;
+    }
+
     try {
       // Stop a concurrent typing tick before the channel HTTP request lands.
       if (msg.kind !== 'system' && msg.channelType !== 'agent') {
@@ -368,7 +460,14 @@ async function drainSession(session: Session): Promise<void> {
         }
       }
     } catch (err) {
-      const attempts = await recordAttemptRow(msg.id, session.id, err);
+      if (destination !== null) blockedDestinations.add(destination);
+
+      if (isChannelUnavailableError(err)) {
+        await holdForUnavailableChannel(agentGroup.id, session, msg, attemptRow, err);
+        continue;
+      }
+
+      const attempts = await recordAttemptRow(msg.id, session.id, err, attemptRow?.attempts ?? 0);
       if (attempts !== null && attempts >= MAX_DELIVERY_ATTEMPTS) {
         log.error('Message delivery failed permanently, giving up', {
           messageId: msg.id,
@@ -376,29 +475,7 @@ async function drainSession(session: Session): Promise<void> {
           attempts,
           err,
         });
-        try {
-          const marked = await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) => {
-            mailbox.markDeliveryFailed(msg.id);
-            return true;
-          });
-          if (marked === undefined) {
-            throw new Error(`mailbox disappeared before marking ${msg.id} failed`, { cause: err });
-          }
-          await clearAttemptRow(msg.id);
-          emitEngineEvent('outbound.failed', {
-            sessionId: session.id,
-            agentGroupId: session.agent_group_id,
-            channelType: msg.channelType ?? '',
-            platformId: msg.platformId ?? '',
-            err,
-          });
-        } catch (markErr) {
-          log.error('Failed to record permanent delivery failure', {
-            messageId: msg.id,
-            sessionId: session.id,
-            err: markErr,
-          });
-        }
+        await failPermanently(agentGroup.id, session, msg, err);
       } else {
         log.warn('Message delivery failed, will retry', {
           messageId: msg.id,
@@ -411,6 +488,104 @@ async function drainSession(session: Session): Promise<void> {
       }
     }
   }
+}
+
+/**
+ * Terminal failure: mark the row failed mailbox-side, clear its attempt row
+ * and tell observers. Bookkeeping errors are logged, never thrown — the next
+ * tick re-reads the queue and tries again.
+ */
+async function failPermanently(
+  agentGroupId: string,
+  session: Session,
+  msg: OutboundMessage,
+  err: unknown,
+): Promise<void> {
+  try {
+    const marked = await withExistingMailboxSession(agentGroupId, session.id, (mailbox) => {
+      mailbox.markDeliveryFailed(msg.id);
+      return true;
+    });
+    if (marked === undefined) {
+      throw new Error(`mailbox disappeared before marking ${msg.id} failed`, { cause: err });
+    }
+    await clearAttemptRow(msg.id);
+    emitEngineEvent('outbound.failed', {
+      sessionId: session.id,
+      agentGroupId: session.agent_group_id,
+      channelType: msg.channelType ?? '',
+      platformId: msg.platformId ?? '',
+      err,
+    });
+  } catch (markErr) {
+    log.error('Failed to record permanent delivery failure', {
+      messageId: msg.id,
+      sessionId: session.id,
+      err: markErr,
+    });
+  }
+}
+
+/**
+ * The channel said it cannot send right now (`ChannelUnavailableError`).
+ * Hold the message without spending an attempt and re-try it every
+ * UNAVAILABLE_RETRY_MS until the channel recovers. A hold that outlives
+ * MAX_UNAVAILABLE_HOLD_MS fails permanently like any exhausted message.
+ */
+async function holdForUnavailableChannel(
+  agentGroupId: string,
+  session: Session,
+  msg: OutboundMessage,
+  attemptRow: DeliveryAttemptRow | undefined,
+  err: unknown,
+): Promise<void> {
+  const nowMs = Date.now();
+  const reason = err instanceof Error ? err.message : String(err);
+  const holdStartedMs = attemptRow?.last_attempt_at ? Date.parse(attemptRow.last_attempt_at) : nowMs;
+  if (Number.isFinite(holdStartedMs) && nowMs - holdStartedMs >= MAX_UNAVAILABLE_HOLD_MS) {
+    log.error('Channel unavailable past the hold window, giving up', {
+      messageId: msg.id,
+      sessionId: session.id,
+      channelType: msg.channelType,
+      heldSince: attemptRow?.last_attempt_at,
+      err,
+    });
+    await failPermanently(agentGroupId, session, msg, err);
+    return;
+  }
+
+  /* eslint-disable no-catch-all/no-catch-all -- attempt bookkeeping must never break delivery */
+  try {
+    await deferDeliveryAttempt({
+      messageId: msg.id,
+      sessionId: session.id,
+      now: new Date(nowMs).toISOString(),
+      nextAttemptAt: new Date(nowMs + UNAVAILABLE_RETRY_MS).toISOString(),
+      error: reason,
+    });
+  } catch (deferErr) {
+    log.error('Failed to record delivery hold — retrying next poll', {
+      messageId: msg.id,
+      sessionId: session.id,
+      err: deferErr,
+    });
+    return;
+  }
+  /* eslint-enable no-catch-all/no-catch-all */
+
+  // Warn when a hold starts or its reason changes; the 15s re-tries of the
+  // same hold stay at debug so a long outage doesn't flood the log.
+  const fields = {
+    messageId: msg.id,
+    sessionId: session.id,
+    channelType: msg.channelType,
+    platformId: msg.platformId,
+    retryInMs: UNAVAILABLE_RETRY_MS,
+    reason,
+  };
+  if (attemptRow?.last_error !== reason)
+    log.warn('Channel unavailable — holding message without spending an attempt', fields);
+  else log.debug('Channel still unavailable — message held', fields);
 }
 
 async function deliverMessage(

@@ -6,6 +6,7 @@
  */
 import type { ChannelAdapter, ChannelDefaults, ChannelRegistration, ChannelSetup, OutboundFile } from './adapter.js';
 import type { ChannelDeliveryAdapter } from '../delivery.js';
+import { ChannelUnavailableError } from './channel-unavailable.js';
 import { log } from '../log.js';
 
 /** Adapter instance registry key shape: a webhook route segment and state-namespace key, so URL-safe only. */
@@ -84,15 +85,17 @@ export function getChannelAdapter(key: string): ChannelAdapter | undefined {
  *  rather than an `undefined` return: `undefined` is also what a successful
  *  adapter with no platform message id resolves to, and a normal return makes
  *  `drainSession` mark the row delivered even though nothing was sent (#2995).
- *  Throwing routes the message into the delivery retry path, where it ends as
- *  `status='failed'` if the adapter never comes back. */
-export class MissingChannelAdapterError extends Error {
+ *  Nothing can have been sent, so it is a `ChannelUnavailableError`: delivery
+ *  holds the message until the adapter comes back (a restart after the
+ *  operator fixes setup) and fails it only after the hold window. */
+export class MissingChannelAdapterError extends ChannelUnavailableError {
   constructor(
     readonly channelType: string,
     readonly instance?: string,
   ) {
     super(
-      `No adapter registered for '${instance ?? channelType}' — message enters the delivery retry path. ` +
+      instance ?? channelType,
+      `no adapter registered — message is held for delivery. ` +
         `Check the startup log for why this channel's adapter did not start.`,
     );
     this.name = 'MissingChannelAdapterError';

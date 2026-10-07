@@ -71,12 +71,14 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.useRealTimers();
   await closeDb();
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
 });
 
 describe('delivery attempt shadow rows', () => {
   it('records attempts with the error, and clears on eventual success', async () => {
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() });
     await seedAgentAndChannel();
     const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
     insertOutbound('ag-1', session.id, 'out-1');
@@ -97,12 +99,16 @@ describe('delivery attempt shadow rows', () => {
     expect(afterFailure?.attempts).toBe(1);
     expect(afterFailure?.session_id).toBe(session.id);
     expect(afterFailure?.last_error).toContain('channel offline');
+    // The failure schedules the next attempt 5s out instead of the next 1s tick.
+    expect(afterFailure?.next_attempt_at).toBe(new Date(Date.now() + 5_000).toISOString());
 
+    vi.setSystemTime(Date.now() + 5_001);
     await deliverSessionMessages(session);
     expect(await getDeliveryAttempt('out-1')).toBeUndefined();
   });
 
   it('clears the row when delivery gives up permanently', async () => {
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() });
     await seedAgentAndChannel();
     const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
     insertOutbound('ag-1', session.id, 'out-poison');
@@ -115,11 +121,13 @@ describe('delivery attempt shadow rows', () => {
 
     // MAX_DELIVERY_ATTEMPTS is 3: two failures leave the row counting…
     await deliverSessionMessages(session);
+    vi.setSystemTime(Date.now() + 31_000);
     await deliverSessionMessages(session);
     expect((await getDeliveryAttempt('out-poison'))?.attempts).toBe(2);
 
     // …the third marks the message failed mailbox-side and clears the row —
     // the attempt bookkeeping's job is done.
+    vi.setSystemTime(Date.now() + 31_000);
     await deliverSessionMessages(session);
     expect(await getDeliveryAttempt('out-poison')).toBeUndefined();
   });

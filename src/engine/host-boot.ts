@@ -30,7 +30,12 @@ import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, st
 import { startHostSweep, stopHostSweep } from '../host-sweep.js';
 import { routeInbound } from '../router.js';
 import { log } from '../log.js';
-import { initChannelAdapters, teardownChannelAdapters, getChannelAdapterExact } from '../channels/channel-registry.js';
+import {
+  initChannelAdapters,
+  teardownChannelAdapters,
+  getChannelAdapterExact,
+  MissingChannelAdapterError,
+} from '../channels/channel-registry.js';
 import type { ChannelAdapter, ChannelSetup } from '../channels/adapter.js';
 import { handleChatMigrated } from '../channels/chat-migration.js';
 import { getResponseHandlers, type ResponsePayload } from '../response-registry.js';
@@ -185,7 +190,7 @@ export async function _bootForHost(opts: { managedSignals: boolean }): Promise<v
     ): Promise<string | undefined> {
       const adapter = getChannelAdapterExact(instance ?? channelType);
       if (!adapter) {
-        throw new Error(`No adapter for channel instance ${instance ?? channelType}`);
+        throw new MissingChannelAdapterError(channelType, instance);
       }
       const parsed = JSON.parse(content) as Record<string, unknown>;
       const deliveredId = await adapter.deliver(platformId, threadId, {

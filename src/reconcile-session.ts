@@ -102,12 +102,22 @@ export function decideStuckAction(args: {
   return { action: 'ok' };
 }
 
+/**
+ * A spent task session closes once its container is gone and no task is live
+ * — but never while it still has undelivered DUE outbound rows. A closed
+ * session is outside both delivery polls, so closing it would strand a reply
+ * that is backing off or held for an unavailable channel (neither delivered
+ * nor failed). The hold window bounds how long that keeps the session open.
+ * Rows whose `deliver_after` is still in the future are not counted
+ * (pre-existing behaviour, unchanged here).
+ */
 export function shouldCloseTaskSession(
   threadId: string | null,
   containerRunning: boolean,
   liveTaskCount: number,
+  undeliveredOutboundCount = 0,
 ): boolean {
-  return isTaskThread(threadId) && !containerRunning && liveTaskCount === 0;
+  return isTaskThread(threadId) && !containerRunning && liveTaskCount === 0 && undeliveredOutboundCount === 0;
 }
 
 async function maintainScheduling(
@@ -211,7 +221,8 @@ async function maintainSessionMailbox(
 
   if (isTaskThread(session.thread_id)) {
     const liveTasks = mailbox.countLiveTasks();
-    if (shouldCloseTaskSession(session.thread_id, isContainerRunning(session.id), liveTasks)) {
+    const undelivered = mailbox.getDueMessages(mailbox.getDeliveredIds()).length;
+    if (shouldCloseTaskSession(session.thread_id, isContainerRunning(session.id), liveTasks, undelivered)) {
       await updateSession(session.id, { status: 'closed' });
       log.info('Closed spent task session', { sessionId: session.id, threadId: session.thread_id });
     }

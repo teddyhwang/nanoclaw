@@ -466,6 +466,13 @@ describe('shouldCloseTaskSession', () => {
     expect(shouldCloseTaskSession('system:tasks:task-1', true, 0)).toBe(false);
   });
 
+  it('keeps it while outbound rows are undelivered (backing off or held for a down channel)', () => {
+    // Closing would drop the session out of both delivery polls and strand
+    // the reply: neither delivered nor failed.
+    expect(shouldCloseTaskSession('system:tasks:task-1', false, 0, 1)).toBe(false);
+    expect(shouldCloseTaskSession('system:tasks:task-1', false, 0, 0)).toBe(true);
+  });
+
   it('never touches non-task sessions', () => {
     expect(shouldCloseTaskSession('telegram:12345', false, 0)).toBe(false);
     expect(shouldCloseTaskSession(null, false, 0)).toBe(false);

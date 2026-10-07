@@ -23,6 +23,7 @@ import { registerDeliveryAction } from '../../delivery.js';
 import { unguarded } from '../../guard/index.js';
 import { heartbeatPath, withExistingMailboxSession } from '../../session-manager.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
+import { getSessionDeliveryAttempts } from '../../db/coordination.js';
 import { log } from '../../log.js';
 
 const TYPING_REFRESH_MS = 4000;
@@ -114,16 +115,28 @@ function isHeartbeatFresh(agentGroupId: string, sessionId: string): boolean {
  * Local fork patch (Optimus): upstream NanoClaw doesn't see the lingering
  * indicator often enough to file it. Kept narrow on purpose.
  */
-async function hasPendingUserFacingOutbound(agentGroupId: string, sessionId: string): Promise<boolean> {
+export async function hasPendingUserFacingOutbound(agentGroupId: string, sessionId: string): Promise<boolean> {
   try {
-    return (
+    const pending =
       (await withExistingMailboxSession(agentGroupId, sessionId, (mailbox) => {
         const delivered = mailbox.getDeliveredIds();
         return mailbox
           .getDueMessages(delivered)
-          .some((message) => message.kind !== 'system' && message.channelType !== 'agent');
-      })) ?? false
-    );
+          .filter((message) => message.kind !== 'system' && message.channelType !== 'agent')
+          .map((message) => message.id);
+      })) ?? [];
+    if (pending.length === 0) return false;
+    // Only a never-attempted row, or one whose scheduled re-try is due, is
+    // imminent. A row backing off, held for an unavailable channel, or queued
+    // behind one (attempt row with NULL next_attempt_at) is not: counting it
+    // would suppress typing for the whole session for up to the 24h hold.
+    // A queued row whose head just delivered reads "not imminent" for ~1s.
+    const attempts = await getSessionDeliveryAttempts(sessionId);
+    const now = new Date().toISOString();
+    return pending.some((id) => {
+      const row = attempts.get(id);
+      return !row || (row.next_attempt_at !== null && row.next_attempt_at <= now);
+    });
   } catch {
     return false;
   }

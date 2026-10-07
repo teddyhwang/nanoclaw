@@ -138,6 +138,11 @@ export {
 // the engine uses for normal outbound. Read-only — plugins can't replace
 // the adapter, only call deliver/setTyping on it.
 export { getDeliveryAdapter, type ChannelDeliveryAdapter } from '../delivery.js';
+export {
+  ChannelUnavailableError,
+  isChannelUnavailableError,
+  CHANNEL_UNAVAILABLE,
+} from '../channels/channel-unavailable.js';
 
 // System-action registry for plugins that handle container-emitted
 // `kind: 'system'` outbound messages (e.g. escalate_to_dev_agent,

@@ -35,6 +35,7 @@ import {
   createMessagingGroupAgent,
 } from './db/index.js';
 import { getDeliveredIds } from './mailbox/sqlite/session-db.js';
+import { getDeliveryAttempt } from './db/coordination.js';
 import { inboundDbPath, outboundDbPath } from './mailbox/sqlite/paths.js';
 import { resolveSession, resolveTaskSession, withMailboxSession } from './session-manager.js';
 import {
@@ -54,6 +55,16 @@ function openInboundDb(agentGroupId: string, sessionId: string): Database.Databa
 
 function now(): string {
   return new Date().toISOString();
+}
+
+/** Retries are wall-clock scheduled; freeze only `Date` so timers stay real. */
+function freezeDeliveryClock(): void {
+  vi.useFakeTimers({ toFake: ['Date'], now: Date.now() });
+}
+
+/** Step the frozen clock past the longest retry backoff (30s). */
+function advancePastRetryBackoff(): void {
+  vi.setSystemTime(Date.now() + 31_000);
 }
 
 async function seedAgentAndChannel(): Promise<void> {
@@ -92,6 +103,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.useRealTimers();
   await closeDb();
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
 });
@@ -232,6 +244,7 @@ describe('deliverSessionMessages — malformed row containment', () => {
 
 describe('deliverSessionMessages — retry and permanent failure', () => {
   it('retries on adapter failure and marks failed after MAX_DELIVERY_ATTEMPTS (3)', async () => {
+    freezeDeliveryClock();
     await seedAgentAndChannel();
     const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
     insertOutbound('ag-1', session.id, 'out-flaky');
@@ -248,15 +261,22 @@ describe('deliverSessionMessages — retry and permanent failure', () => {
     await deliverSessionMessages(session);
     expect(callCount).toBe(1);
 
+    // Inside the backoff window the row is not due — no attempt is spent.
+    await deliverSessionMessages(session);
+    expect(callCount).toBe(1);
+
     // Attempt 2
+    advancePastRetryBackoff();
     await deliverSessionMessages(session);
     expect(callCount).toBe(2);
 
     // Attempt 3 — should mark as permanently failed
+    advancePastRetryBackoff();
     await deliverSessionMessages(session);
     expect(callCount).toBe(3);
 
     // Attempt 4 — message is now in delivered (as failed), adapter not called
+    advancePastRetryBackoff();
     await deliverSessionMessages(session);
     expect(callCount).toBe(3);
 
@@ -269,26 +289,35 @@ describe('deliverSessionMessages — retry and permanent failure', () => {
     // Regression: the real bridge used to return undefined when the exact
     // adapter lookup missed, and drainSession marked the row delivered with
     // platform_message_id=NULL even though no send happened. The bridge must
-    // throw so the row takes the normal retry → failed path. Uses the REAL
+    // throw. Nothing can have been sent, so the throw is a channel-unavailable
+    // hold: no attempt is spent while the adapter is missing, and the row ends
+    // as failed only after the hold window. Uses the REAL
     // createChannelDeliveryAdapter with an empty registry — the state after
     // an adapter factory returns null (missing credentials) at startup.
+    freezeDeliveryClock();
     await seedAgentAndChannel();
     const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
     insertOutbound('ag-1', session.id, 'out-offline');
 
     setDeliveryAdapter(createChannelDeliveryAdapter());
 
-    // Attempt 1 — must NOT be acknowledged as delivered
-    await deliverSessionMessages(session);
+    // Many drains while the adapter is missing — never acknowledged, and the
+    // hold never spends the retry budget.
+    for (let i = 0; i < 5; i++) {
+      await deliverSessionMessages(session);
+      advancePastRetryBackoff();
+    }
     expect(
       await withMailboxSession('ag-1', session.id, (mailbox) => mailbox.getDeliveredIds().has('out-offline')),
     ).toBe(false);
+    const held = await getDeliveryAttempt('out-offline');
+    expect(held?.attempts).toBe(0);
+    expect(held?.next_attempt_at).not.toBeNull();
 
-    // Attempts 2 and 3 — exhausts MAX_DELIVERY_ATTEMPTS
-    await deliverSessionMessages(session);
+    // Past the 24h hold window the row fails — still never 'delivered'.
+    vi.setSystemTime(Date.now() + 24 * 60 * 60 * 1000);
     await deliverSessionMessages(session);
 
-    // The row must end as status='failed', never 'delivered'
     const deliveryDb = new Database(inboundDbPath('ag-1', session.id), { readonly: true });
     const row = deliveryDb.prepare('SELECT * FROM delivered WHERE message_out_id = ?').get('out-offline') as
       | { status: string; platform_message_id: string | null }
@@ -297,9 +326,11 @@ describe('deliverSessionMessages — retry and permanent failure', () => {
     expect(row).toBeDefined();
     expect(row!.status).toBe('failed');
     expect(row!.platform_message_id).toBeNull();
+    expect(await getDeliveryAttempt('out-offline')).toBeUndefined();
   });
 
   it('clears attempt counter on successful delivery', async () => {
+    freezeDeliveryClock();
     await seedAgentAndChannel();
     const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
     insertOutbound('ag-1', session.id, 'out-retry-ok');
@@ -317,7 +348,8 @@ describe('deliverSessionMessages — retry and permanent failure', () => {
     await deliverSessionMessages(session);
     expect(callCount).toBe(1);
 
-    // Attempt 2 — succeeds
+    // Attempt 2 — succeeds once the 5s backoff has elapsed
+    vi.setSystemTime(Date.now() + 5_001);
     await deliverSessionMessages(session);
     expect(callCount).toBe(2);
 
@@ -519,9 +551,12 @@ describe('deliverSessionMessages — permission check', () => {
       },
     });
 
-    // Deliver 3 times to exhaust retries
+    // Deliver 3 times (past each backoff) to exhaust retries
+    freezeDeliveryClock();
     await deliverSessionMessages(session);
+    advancePastRetryBackoff();
     await deliverSessionMessages(session);
+    advancePastRetryBackoff();
     await deliverSessionMessages(session);
 
     // Adapter never called — permission check throws before reaching it

@@ -249,6 +249,63 @@ export async function recordDeliveryAttempt(args: {
   return row?.attempts ?? 1;
 }
 
+/**
+ * Hold a message whose channel is unavailable without spending an attempt.
+ * `attempts` and `last_attempt_at` are left untouched on conflict: a hold is
+ * not an attempt, and a row created by a hold keeps its first-hold time in
+ * `last_attempt_at`, which delivery uses as the start of the hold window.
+ */
+export async function deferDeliveryAttempt(args: {
+  messageId: string;
+  sessionId: string;
+  now: string;
+  nextAttemptAt: string;
+  error?: string;
+}): Promise<void> {
+  await getDb().run(
+    `INSERT INTO delivery_attempts (message_id, session_id, attempts, last_attempt_at, next_attempt_at, last_error)
+     VALUES (?, ?, 0, ?, ?, ?)
+     ON CONFLICT (message_id) DO UPDATE SET
+       next_attempt_at = excluded.next_attempt_at,
+       last_error = excluded.last_error`,
+    args.messageId,
+    args.sessionId,
+    args.now,
+    args.nextAttemptAt,
+    args.error ?? null,
+  );
+}
+
+/**
+ * Start the hold clock for a message that is queued behind an undelivered
+ * message to the same destination. Idempotent: an existing row (a real
+ * attempt, a hold, or an earlier mark) is never touched. `next_attempt_at`
+ * stays NULL so the mark adds no delay of its own once the message reaches
+ * the front of its queue.
+ */
+export async function markDeliveryQueued(args: {
+  messageId: string;
+  sessionId: string;
+  now: string;
+  reason: string;
+}): Promise<void> {
+  await getDb().run(
+    `INSERT INTO delivery_attempts (message_id, session_id, attempts, last_attempt_at, next_attempt_at, last_error)
+     VALUES (?, ?, 0, ?, NULL, ?)
+     ON CONFLICT (message_id) DO NOTHING`,
+    args.messageId,
+    args.sessionId,
+    args.now,
+    args.reason,
+  );
+}
+
+/** Every attempt/hold row for one session, keyed by message id. */
+export async function getSessionDeliveryAttempts(sessionId: string): Promise<Map<string, DeliveryAttemptRow>> {
+  const rows = await getDb().all<DeliveryAttemptRow>('SELECT * FROM delivery_attempts WHERE session_id = ?', sessionId);
+  return new Map(rows.map((row) => [row.message_id, row]));
+}
+
 export async function getDeliveryAttempt(messageId: string): Promise<DeliveryAttemptRow | undefined> {
   return getDb().get<DeliveryAttemptRow>('SELECT * FROM delivery_attempts WHERE message_id = ?', messageId);
 }
