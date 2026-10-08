@@ -30,7 +30,6 @@ import {
   sqliteHasChatMessageToDestinationSince,
   sqliteHasIdenticalSend,
   sqliteIsTaskOnlyTurn,
-  sqliteListTaskSeries,
   sqliteMarkCompleted,
   sqliteMarkFailed,
   sqliteMarkProcessing,
@@ -161,10 +160,6 @@ export class SqliteAgentMailbox implements AgentMailbox {
 
   isTaskOnlyTurn(): boolean {
     return sqliteIsTaskOnlyTurn();
-  }
-
-  listTaskSeries(status?: string) {
-    return sqliteListTaskSeries(status);
   }
 
   writeTaskFire(fire: Parameters<MailboxOperations['writeTaskFire']>[0]): void {

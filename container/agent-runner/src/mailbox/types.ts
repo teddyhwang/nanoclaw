@@ -66,14 +66,6 @@ export interface TaskFireRecord {
   errorMessage: string | null;
 }
 
-export interface TaskSeriesSnapshot {
-  id: string;
-  status: string;
-  processAfter: string | null;
-  recurrence: string | null;
-  content: string;
-}
-
 export interface MailboxOperations {
   getPendingMessages(limit: number, isFirstPoll: boolean): InboundMessage[];
   /** Optional because only schema-probing drivers need a process-lifetime test reset. */
@@ -85,7 +77,6 @@ export interface MailboxOperations {
   findCliResponse(requestId: string): InboundMessage | undefined;
   /** Legacy rollout fallback used only when no authoritative batch reply target exists. */
   isTaskOnlyTurn(): boolean;
-  listTaskSeries(status?: string): TaskSeriesSnapshot[];
   writeTaskFire(fire: TaskFireWrite): void;
   getLatestTaskFire(seriesId: string): TaskFireRecord | undefined;
   writeMessageOut(message: OutboundMessageDraft): Promise<number>;

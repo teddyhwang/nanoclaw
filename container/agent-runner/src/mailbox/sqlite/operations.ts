@@ -15,7 +15,6 @@ import type {
   TaskFireRecord,
   TaskFireStatus,
   TaskFireWrite,
-  TaskSeriesSnapshot,
 } from '../types.js';
 
 interface PendingMessageRow extends MessageInRow {
@@ -211,48 +210,6 @@ export function sqliteIsTaskOnlyTurn(): boolean {
         .get(...ids) as { 1: number } | null | undefined,
   );
   return nonTask == null;
-}
-
-/** Read the host-projected task-series snapshot without exposing SQLite above the driver. */
-export function sqliteListTaskSeries(status?: string): TaskSeriesSnapshot[] {
-  return withInboundDb((inbound) => {
-    const exists = inbound.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_series'").get();
-    if (!exists) return [];
-
-    const rows = status
-      ? (inbound
-          .prepare(
-            `SELECT series_id AS id, status, process_after, recurrence, content
-             FROM task_series WHERE status = ? ORDER BY process_after ASC`,
-          )
-          .all(status) as Array<{
-          id: string;
-          status: string;
-          process_after: string | null;
-          recurrence: string | null;
-          content: string;
-        }>)
-      : (inbound
-          .prepare(
-            `SELECT series_id AS id, status, process_after, recurrence, content
-             FROM task_series WHERE status IN ('pending', 'paused') ORDER BY process_after ASC`,
-          )
-          .all() as Array<{
-          id: string;
-          status: string;
-          process_after: string | null;
-          recurrence: string | null;
-          content: string;
-        }>);
-
-    return rows.map((row) => ({
-      id: row.id,
-      status: row.status,
-      processAfter: row.process_after,
-      recurrence: row.recurrence,
-      content: row.content,
-    }));
-  });
 }
 
 /** Record one Optimus task fire and enforce the per-series retention cap. */

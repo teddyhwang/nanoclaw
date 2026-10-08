@@ -3,10 +3,11 @@
  *
  * Registers:
  *   - Five delivery action handlers: schedule_task, cancel_task, pause_task,
- *     resume_task, update_task. The container's scheduling MCP tools
- *     (container/agent-runner/src/mcp-tools/scheduling.ts) write system
- *     messages with these actions; the host applies them to the owning agent
- *     group's host-only `schedule.db`.
+ *     resume_task, update_task. Container-side MCP tools supplied by the
+ *     host app's tool plugin write system messages with these actions (the
+ *     fork's own mcp-tools/scheduling.ts was removed, as upstream did in
+ *     b0c76ce4); the host applies them to the owning agent group's
+ *     host-only `schedule.db`.
  *
  * Host integration points:
  *   - `src/host-sweep.ts` calls `handleRecurrence` through the narrow mailbox
