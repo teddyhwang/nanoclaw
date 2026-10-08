@@ -73,6 +73,8 @@ export interface McpStdioServerConfig {
    */
   plugin?: string;
   instructions?: string;
+  /** See McpHttpServerConfig.timeout. */
+  timeout?: number;
 }
 
 export interface McpHttpServerConfig {
@@ -84,6 +86,32 @@ export interface McpHttpServerConfig {
   plugin?: string;
   /** Same instructions hook as stdio servers. */
   instructions?: string;
+  /**
+   * Per-server tool-call timeout in milliseconds (1000–3600000), for servers
+   * whose calls legitimately run long (a browser-driven booking). Providers
+   * map it onto their native per-server setting: Claude `timeout` (ms), Pi
+   * `timeout` (s), Codex `tool_timeout_sec`. Absent ⇒ provider default.
+   */
+  timeout?: number;
+}
+
+/** Bounds for McpServerConfig.timeout (ms). */
+export const MCP_SERVER_TIMEOUT_MIN_MS = 1_000;
+export const MCP_SERVER_TIMEOUT_MAX_MS = 3_600_000;
+
+function parseTimeout(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== 'number' ||
+    !Number.isInteger(value) ||
+    value < MCP_SERVER_TIMEOUT_MIN_MS ||
+    value > MCP_SERVER_TIMEOUT_MAX_MS
+  ) {
+    throw new Error(
+      `timeout must be an integer number of milliseconds between ${MCP_SERVER_TIMEOUT_MIN_MS} and ${MCP_SERVER_TIMEOUT_MAX_MS}`,
+    );
+  }
+  return value;
 }
 
 export type McpServerConfig = McpStdioServerConfig | McpHttpServerConfig;
@@ -158,6 +186,7 @@ export function parseMcpServerConfig(input: Record<string, unknown>): McpServerC
   if (instructions !== undefined && typeof instructions !== 'string') {
     throw new Error('MCP instructions must be a string');
   }
+  const timeout = parseTimeout(input.timeout);
 
   if (url !== undefined) {
     if (command !== undefined) throw new Error('Provide exactly one of command or url');
@@ -188,6 +217,7 @@ export function parseMcpServerConfig(input: Record<string, unknown>): McpServerC
       url,
       ...(headers === undefined ? {} : { headers }),
       ...(instructions === undefined ? {} : { instructions }),
+      ...(timeout === undefined ? {} : { timeout }),
     };
   }
   if (command === undefined) throw new Error('Provide exactly one of command or url');
@@ -210,6 +240,7 @@ export function parseMcpServerConfig(input: Record<string, unknown>): McpServerC
     env,
     ...(cwd === undefined ? {} : { cwd }),
     ...(instructions === undefined ? {} : { instructions }),
+    ...(timeout === undefined ? {} : { timeout }),
   };
 }
 

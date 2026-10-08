@@ -178,6 +178,23 @@ describe('parseMcpServerConfig', () => {
     );
   });
 
+  it('keeps a per-server tool timeout on http and stdio entries and rejects out-of-range values', () => {
+    expect(parseMcpServerConfig({ url: 'https://mcp.example.com/mcp', timeout: 600_000 })).toEqual({
+      type: 'http',
+      url: 'https://mcp.example.com/mcp',
+      timeout: 600_000,
+    });
+    expect(parseMcpServerConfig({ command: 'server', timeout: 1_000 })).toMatchObject({ timeout: 1_000 });
+    for (const timeout of [999, 3_600_001, 1.5, '600000', null]) {
+      expect(() => parseMcpServerConfig({ url: 'https://mcp.example.com/mcp', timeout })).toThrow(/timeout must be/);
+    }
+    expect(
+      sanitizeStoredMcpServers({ slow: { type: 'http', url: 'https://x.example/mcp', timeout: 900_000 } }, 'g'),
+    ).toEqual({
+      slow: { type: 'http', url: 'https://x.example/mcp', timeout: 900_000 },
+    });
+  });
+
   it.each(['./sub', '${PLUGIN_ROOT}', '${PLUGIN_ROOT}/srv', '${PLUGIN_DATA}', '${PLUGIN_DATA}/cache'])(
     'accepts the fixed cwd form %s',
     (cwd) => {

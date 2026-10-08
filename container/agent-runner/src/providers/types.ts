@@ -189,6 +189,8 @@ export interface McpStdioServerConfig {
    * (cwd-shim.ts) or drop it — never launch in the wrong directory.
    */
   cwd?: string;
+  /** See McpHttpServerConfig.timeout. */
+  timeout?: number;
 }
 
 export interface McpHttpServerConfig {
@@ -196,6 +198,12 @@ export interface McpHttpServerConfig {
   url: string;
   /** Optional bearer token / custom headers (e.g. `Authorization`). */
   headers?: Record<string, string>;
+  /**
+   * Per-server tool-call timeout in milliseconds, validated host-side
+   * (container-config.ts). Claude consumes it natively (`timeout`, ms);
+   * other providers translate it to their own per-server setting.
+   */
+  timeout?: number;
 }
 
 export interface AgentQuery {
