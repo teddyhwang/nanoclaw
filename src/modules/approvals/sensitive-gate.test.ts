@@ -7,11 +7,12 @@
  *   - actor-id namespacing matches clicker-auth (prefix only when no `:`);
  *   - live `(session, actor)` grant short-circuits to allow + bumps
  *     last_used_at; expired grant (past the 30-min hard cap) does not;
- *   - empty registry ⇒ every tool unmapped ⇒ require_confirmation, and
- *     a Confirm/Cancel card is delivered in-channel with the actor woven
- *     in and `{integration,tool,groupFolder,actorId}` on the row;
- *   - the pure policy (write/destructive any chat; pii-read public only;
- *     unmapped fail-closed) via a temporarily-seeded registry.
+ *   - an unclassified call ⇒ require_confirmation, and a Confirm/Cancel
+ *     card is delivered in-channel with the actor woven in and
+ *     `{integration,tool,groupFolder,actorId}` on the row;
+ *   - the pure policy over the dashboard-supplied classification
+ *     (write/external/destructive any chat; pii-read public only;
+ *     unclassified fail-closed).
  *
  * container-runner + session-manager are mocked (requestConfirmation's
  * notify path can reach them); a stub delivery adapter captures the card.
@@ -46,7 +47,7 @@ import {
   decideSensitiveGate,
   namespaceActorId,
   evaluatePolicy,
-  CLASSIFICATION_REGISTRY,
+  parseCallClassification,
   HARD_TTL_MS,
 } from './sensitive-gate.js';
 
@@ -102,8 +103,6 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await closeDb();
-  // Tests that mutate the registry restore it; belt-and-suspenders.
-  for (const k of Object.keys(CLASSIFICATION_REGISTRY)) delete CLASSIFICATION_REGISTRY[k];
 });
 
 describe('namespaceActorId — must match clicker-auth', async () => {
@@ -116,29 +115,27 @@ describe('namespaceActorId — must match clicker-auth', async () => {
 });
 
 describe('evaluatePolicy — ordered rules + fail-closed', async () => {
-  it('unmapped tool → require_confirmation (empty registry)', async () => {
-    expect(evaluatePolicy({ integration: 'google', tool: 'anything', args: {}, isPublicChannel: false })).toBe(
-      'require_confirmation',
-    );
+  const cls = (risk: 'read' | 'write' | 'external' | 'destructive', pii = false) => ({ risk, pii });
+  it('unclassified call → require_confirmation', async () => {
+    expect(evaluatePolicy({ classification: null, isPublicChannel: false })).toBe('require_confirmation');
+    expect(evaluatePolicy({ classification: undefined, isPublicChannel: false })).toBe('require_confirmation');
   });
-  it('write/destructive → require_confirmation in ANY chat; read non-pii → allow; pii read public-only', async () => {
-    CLASSIFICATION_REGISTRY.t = {
-      w: { classification: 'write' },
-      d: { classification: 'destructive' },
-      r: { classification: 'read' },
-      rp: { classification: 'read', pii: true },
-    };
-    expect(evaluatePolicy({ integration: 't', tool: 'w', args: {}, isPublicChannel: false })).toBe(
-      'require_confirmation',
-    );
-    expect(evaluatePolicy({ integration: 't', tool: 'd', args: {}, isPublicChannel: false })).toBe(
-      'require_confirmation',
-    );
-    expect(evaluatePolicy({ integration: 't', tool: 'r', args: {}, isPublicChannel: true })).toBe('allow');
-    expect(evaluatePolicy({ integration: 't', tool: 'rp', args: {}, isPublicChannel: false })).toBe('allow');
-    expect(evaluatePolicy({ integration: 't', tool: 'rp', args: {}, isPublicChannel: true })).toBe(
-      'require_confirmation',
-    );
+  it('write/external/destructive → require_confirmation in ANY chat; read non-pii → allow; pii read public-only', async () => {
+    for (const risk of ['write', 'external', 'destructive'] as const) {
+      expect(evaluatePolicy({ classification: cls(risk), isPublicChannel: false })).toBe('require_confirmation');
+    }
+    expect(evaluatePolicy({ classification: cls('read'), isPublicChannel: true })).toBe('allow');
+    expect(evaluatePolicy({ classification: cls('read', true), isPublicChannel: false })).toBe('allow');
+    expect(evaluatePolicy({ classification: cls('read', true), isPublicChannel: true })).toBe('require_confirmation');
+  });
+  it('parseCallClassification accepts only the exact bridge shape', async () => {
+    expect(parseCallClassification({ risk: 'read', pii: false })).toEqual({ risk: 'read', pii: false });
+    expect(parseCallClassification({ risk: 'external', pii: true })).toEqual({ risk: 'external', pii: true });
+    expect(parseCallClassification({ risk: 'admin', pii: false })).toBeNull();
+    expect(parseCallClassification({ risk: 'read' })).toBeNull();
+    expect(parseCallClassification({ risk: 'read', pii: 'no' })).toBeNull();
+    expect(parseCallClassification('read')).toBeNull();
+    expect(parseCallClassification(null)).toBeNull();
   });
 });
 
@@ -181,7 +178,7 @@ describe('decideSensitiveGate — grant + policy path', async () => {
     senderDisplayName: 'Actor',
   };
 
-  it('unmapped tool, no grant → confirm + in-channel card with actor + row payload', async () => {
+  it('unclassified call, no grant → confirm + in-channel card with actor + row payload', async () => {
     await seedGroupAndSession(1);
     const r = await decideSensitiveGate(base);
     expect(r.decision).toBe('confirm');
@@ -220,10 +217,9 @@ describe('decideSensitiveGate — grant + policy path', async () => {
     expect(delivered).toHaveLength(1);
   });
 
-  it('mapped allow tool, no grant → allow (policy_allow), no card', async () => {
+  it('read-classified call, no grant → allow (policy_allow), no card', async () => {
     await seedGroupAndSession(0); // private chat
-    CLASSIFICATION_REGISTRY.google = { google_call: { classification: 'read' } };
-    const r = await decideSensitiveGate(base);
+    const r = await decideSensitiveGate({ ...base, classification: { risk: 'read', pii: false } });
     expect(r).toEqual({ decision: 'allow', reason: 'policy_allow' });
     expect(delivered).toHaveLength(0);
   });
@@ -233,7 +229,7 @@ describe('Phase 5 — admin-controlled per-agent gate disable', async () => {
   const base = {
     groupFolder: FOLDER,
     integration: 'google',
-    tool: 'google_call', // unmapped ⇒ would normally require_confirmation
+    tool: 'google_call', // unclassified ⇒ would normally require_confirmation
     args: {},
     rawSenderId: '777',
     senderDisplayName: 'Actor',
@@ -262,7 +258,7 @@ describe('Phase 5 — admin-controlled per-agent gate disable', async () => {
     expect(await getSensitiveGateMode(AG)).toBe('enforce');
   });
 
-  it('mode unset ⇒ gate still runs (unmapped tool ⇒ confirm + card)', async () => {
+  it('mode unset ⇒ gate still runs (unclassified call ⇒ confirm + card)', async () => {
     await seedGroupAndSession(1);
     const r = await decideSensitiveGate(base);
     expect(r.decision).toBe('confirm');
@@ -273,7 +269,7 @@ describe('Phase 5 — admin-controlled per-agent gate disable', async () => {
     await seedGroupAndSession(1);
     await ensureContainerConfig(AG);
     await updateContainerConfigScalars(AG, { sensitive_gate_mode: 'off' });
-    // Tool is unmapped — without the bypass this is a guaranteed confirm.
+    // Call is unclassified — without the bypass this is a guaranteed confirm.
     const r = await decideSensitiveGate(base);
     expect(r).toEqual({ decision: 'allow', reason: 'gate_disabled_by_admin' });
     expect(delivered).toHaveLength(0); // short-circuited before requestConfirmation
@@ -281,10 +277,9 @@ describe('Phase 5 — admin-controlled per-agent gate disable', async () => {
 
   it('mode "off" short-circuits even a write-classified tool (before policy eval)', async () => {
     await seedGroupAndSession(1); // public channel — a write here would always confirm
-    CLASSIFICATION_REGISTRY.google = { google_call: { classification: 'write' } };
     await ensureContainerConfig(AG);
     await updateContainerConfigScalars(AG, { sensitive_gate_mode: 'off' });
-    const r = await decideSensitiveGate(base);
+    const r = await decideSensitiveGate({ ...base, classification: { risk: 'write', pii: false } });
     expect(r).toEqual({ decision: 'allow', reason: 'gate_disabled_by_admin' });
     expect(delivered).toHaveLength(0);
   });
@@ -336,7 +331,7 @@ describe('source-chat card routing — merged agent-shared groups (2026-06-15)',
   const base = {
     groupFolder: FOLDER,
     integration: 'google',
-    tool: 'google_call', // unmapped ⇒ require_confirmation
+    tool: 'google_call', // unclassified ⇒ require_confirmation
     args: {},
     rawSenderId: '777',
     senderDisplayName: 'JCho',

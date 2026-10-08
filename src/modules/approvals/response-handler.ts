@@ -73,7 +73,7 @@ async function handleRegisteredApproval(
       content: JSON.stringify({ text, sender: 'system', senderId: 'system' }),
     });
 
-  // Self-confirm gates (MCP integrations + golf booking) use a two-button
+  // The self-confirm gate (MCP integrations) uses a two-button
   // Confirm/Cancel card delivered in-channel. The recorded actor — not an
   // approver role — is the only authorized clicker, and no reason capture
   // applies to cancellation.
@@ -149,7 +149,7 @@ export function namespacedUserId(payload: ResponsePayload): string | null {
  * bystander click is claimed by this handler but remains inert.
  */
 function isSelfConfirmAction(action: string): boolean {
-  return action === 'sensitive_mcp_confirm' || action === 'sensitive_golf_confirm';
+  return action === 'sensitive_mcp_confirm';
 }
 
 export async function isAuthorizedApprovalClick(approval: PendingApproval, payload: ResponsePayload): Promise<boolean> {

@@ -31,16 +31,28 @@
  * tool call; the next decision finds the live grant and returns
  * `'allow'`. See sensitive-mcp-confirm.ts.
  *
- * ## Policy (single-sourced here; the dashboard-server copy is deleted)
+ * ## Policy
  *
  * Ordered rules, from the v6 doc:
- *   1. write / destructive  → require_confirmation  (ANY chat)
- *   2. read & pii & public  → require_confirmation  (public channel only)
- *   3. else                 → allow
- * Unmapped tool → require_confirmation UNCONDITIONALLY (operator
+ *   1. write / external / destructive → require_confirmation (ANY chat)
+ *   2. read & pii & public            → require_confirmation (public channel only)
+ *   3. else                           → allow
+ * Unclassified call → require_confirmation UNCONDITIONALLY (operator
  *   decision: strictest; no name heuristic; "let the LLM judge" rejected
- *   as a confused-deputy hole). Phase 1 ships the registry EMPTY, so
- *   every tool is gated (fail-closed) until Phase 2 fills it.
+ *   as a confused-deputy hole).
+ *
+ * ## Where the classification comes from (2026-10-08)
+ *
+ * The tool's risk is declared ONCE, on the tool definition in
+ * dashboard-server (`mcp/kit/policy.ts`: risk, pii, argument classifier
+ * for multiplexers such as `google_call`). The dashboard classifies the
+ * concrete call and sends `classification` with the bridge request; this
+ * module only applies the ordered policy above. The former per-tool
+ * `CLASSIFICATION_REGISTRY` here duplicated (and disagreed with) the tool
+ * definitions and silently gated every unlisted read (home, health,
+ * investments, tpl); it is gone. The bridge is host-only (localhost +
+ * shared secret), so the classification is as trusted as the tool
+ * definition itself.
  */
 import { getAgentGroupByFolder } from '../../db/agent-groups.js';
 import { getSensitiveGateMode } from '../../db/container-configs.js';
@@ -52,189 +64,41 @@ import { requestConfirmation } from './primitive.js';
 
 // ─── Policy (pure data + pure functions; zero side effects) ───────────
 
-export type Classification = 'read' | 'write' | 'destructive';
+/** Risk of one concrete tool call, as classified by the tool's definition. */
+export type ToolRisk = 'read' | 'write' | 'external' | 'destructive';
 
-export interface ToolClass {
-  classification: Classification;
-  /** Read-only relevance: does this tool's read output carry PII? */
-  pii?: boolean;
-  /**
-   * For multiplexer tools (one MCP tool spanning many methods, e.g.
-   * `google_call`): refine classification from the call arguments.
-   * Returns null to fall back to `classification`.
-   */
-  argPredicate?: (args: unknown) => Classification | null;
+export interface CallClassification {
+  risk: ToolRisk;
+  /** A read whose output carries personal data. */
+  pii: boolean;
 }
 
-// ─── Multiplexer arg predicates ───────────────────────────────────────
-//
-// `google_call` and `lunchmoney_call` are ONE MCP tool each spanning the
-// whole upstream API, so a flat classification can't work — the call's
-// arguments decide read vs write vs destructive. These predicates inspect
-// only the verb/HTTP-method (never the LLM-supplied free text — that
-// would be the confused-deputy hole the v6 doc rejected). They are
-// fail-safe by construction: any verb they don't positively recognise as
-// a read returns 'write', and an unparseable arg shape returns 'write'
-// (NOT null — null would fall back to the entry's base `read`, opening a
-// hole for a malformed/novel mutating verb). The base entry's
-// `classification: 'read'` only takes effect when the predicate
-// affirmatively recognises a read verb.
+const TOOL_RISKS: ReadonlySet<string> = new Set(['read', 'write', 'external', 'destructive']);
 
-/** Google API method verbs that only ever read. Everything else mutates. */
-const GOOGLE_READ_VERBS = new Set(['get', 'list', 'search', 'aggregatedlist', 'watch', 'export']);
-
-/**
- * `google_call` args: { service, resource, method, body?, target_user_id? }.
- * `method` is the bare Google verb ("list", "insert", "create", "update",
- * "patch", "batchupdate", "send", "delete", "copy", ...). Classify by it:
- *   - a known read verb            → read   (PII per the base entry)
- *   - "delete"                     → destructive
- *   - anything else / unparseable  → write  (fail-safe: never silent-read
- *     a mutating or novel verb; drive.permissions.create with
- *     body.type ∈ {anyone,domain} — the headline public-share — lands
- *     here as `write`, gated in ANY chat by policy rule 1)
- */
-export function classifyGoogleCall(args: unknown): Classification | null {
-  if (!args || typeof args !== 'object') return 'write';
-  const method = (args as { method?: unknown }).method;
-  if (typeof method !== 'string' || method.length === 0) return 'write';
-  const verb = method.trim().toLowerCase();
-  if (verb === 'delete') return 'destructive';
-  if (GOOGLE_READ_VERBS.has(verb)) return 'read';
-  return 'write';
+/** Strict shape check for a classification received over the bridge. */
+export function parseCallClassification(value: unknown): CallClassification | null {
+  if (!value || typeof value !== 'object') return null;
+  const { risk, pii } = value as { risk?: unknown; pii?: unknown };
+  if (typeof risk !== 'string' || !TOOL_RISKS.has(risk)) return null;
+  if (typeof pii !== 'boolean') return null;
+  return { risk: risk as ToolRisk, pii };
 }
-
-/**
- * `lunchmoney_call` args: { endpoint, method: 'GET'|'POST'|'PUT'|'DELETE',
- * body?, target_user_id? }. HTTP method is the clean discriminator:
- *   GET → read (financial PII), DELETE → destructive, POST/PUT/anything
- *   else / unparseable → write (fail-safe).
- */
-export function classifyLunchMoneyCall(args: unknown): Classification | null {
-  if (!args || typeof args !== 'object') return 'write';
-  const method = (args as { method?: unknown }).method;
-  if (typeof method !== 'string') return 'write';
-  const m = method.trim().toUpperCase();
-  if (m === 'GET') return 'read';
-  if (m === 'DELETE') return 'destructive';
-  return 'write'; // POST / PUT / unknown
-}
-
-/**
- * Per-integration tool classification registry (Phase 2 — filled from
- * the real registered tool surface of every dashboard `*-mcp.ts` route,
- * 2026-05-17). Rules applied (see knowledge/projects/sensitive-action-approvals.md):
- *   - any mutation (create/update/add/book) → `write`  (gated ANY chat)
- *   - cancellation/delete                    → `destructive` (gated ANY chat)
- *   - read whose payload carries personal data (contacts, financials,
- *     someone's reservations/calendar/mail, AND every `*_workspace_members`
- *     tool which returns member names+emails) → `read, pii:true`
- *     (gated in PUBLIC channels only — operator's locked rule 2)
- *   - read of public/reference data (restaurant/property listings, API
- *     schema, own capability flags) → `read` (no pii → always allow)
- * `target_user_id` (cross-user access on google/lunchmoney/opentable/…)
- * does NOT change classification: cross-user *reads* are still PII reads
- * (rule 2, public-only) and cross-user *writes* are writes (rule 1, any
- * chat) — both already covered. Anything NOT in this map stays
- * fail-closed → require_confirmation (unmapped strictest default), so a
- * newly-added tool is gated until it is classified here.
- */
-export const CLASSIFICATION_REGISTRY: Record<string, Record<string, ToolClass>> = {
-  google: {
-    google_call: { classification: 'read', pii: true, argPredicate: classifyGoogleCall },
-    google_schema: { classification: 'read' }, // API shape only — no user data
-    google_capabilities: { classification: 'read' }, // own capability flags
-    google_workspace_members: { classification: 'read', pii: true }, // member names+emails
-  },
-  lunchmoney: {
-    lunchmoney_call: { classification: 'read', pii: true, argPredicate: classifyLunchMoneyCall },
-    lunchmoney_workspace_members: { classification: 'read', pii: true },
-  },
-  ixact: {
-    ixact_search_contacts: { classification: 'read', pii: true }, // names/email/phone
-    ixact_get_contact: { classification: 'read', pii: true }, // full contact record
-    ixact_get_today_tasks: { classification: 'read', pii: true }, // tasks reference contacts
-    ixact_get_task: { classification: 'read', pii: true },
-    ixact_create_contact: { classification: 'write' },
-    ixact_update_contact: { classification: 'write' },
-    ixact_add_follow_up: { classification: 'write' },
-    ixact_create_task: { classification: 'write' },
-    ixact_update_task: { classification: 'write' },
-    ixact_workspace_members: { classification: 'read', pii: true },
-  },
-  opentable: {
-    opentable_search: { classification: 'read' }, // public restaurant data
-    opentable_availability: { classification: 'read' },
-    opentable_restaurant: { classification: 'read' },
-    opentable_reservations: { classification: 'read', pii: true }, // personal reservations
-    opentable_booking_preview: { classification: 'read', pii: true }, // card summary + requests
-    opentable_book: { classification: 'write' },
-    opentable_cancel: { classification: 'destructive' },
-    opentable_workspace_members: { classification: 'read', pii: true },
-  },
-  resy: {
-    resy_search: { classification: 'read' }, // public restaurant data
-    resy_availability: { classification: 'read' },
-    resy_venue: { classification: 'read' },
-    resy_reservations: { classification: 'read', pii: true }, // personal reservations
-    resy_booking_preview: { classification: 'read', pii: true }, // card summary + policies
-    resy_book: { classification: 'write' }, // commits a real reservation
-    resy_cancel: { classification: 'destructive' }, // cancels a real reservation
-    resy_workspace_members: { classification: 'read', pii: true },
-  },
-  chronogolf: {
-    chronogolf_search_courses: { classification: 'read' }, // public course data
-    chronogolf_course: { classification: 'read' },
-    chronogolf_availability: { classification: 'read' },
-    chronogolf_reservations: { classification: 'read', pii: true },
-    chronogolf_booking_preview: { classification: 'read', pii: true }, // saved-card summary
-    chronogolf_book: { classification: 'write' }, // creates/charges a reservation
-    chronogolf_workspace_members: { classification: 'read', pii: true },
-  },
-  housesigma: {
-    housesigma_search_map: { classification: 'read' }, // public listings
-    housesigma_listing_preview: { classification: 'read' },
-    housesigma_address_suggest: { classification: 'read' },
-    housesigma_listing_detail: { classification: 'read' },
-    housesigma_workspace_members: { classification: 'read', pii: true },
-  },
-  realtorca: {
-    realtorca_location_suggest: { classification: 'read' }, // public reference
-    realtorca_search: { classification: 'read' }, // public listings
-  },
-};
 
 export interface PolicyContext {
-  integration: string;
-  tool: string;
-  args: unknown;
+  /** The call's classification; null/undefined ⇒ unclassified (strictest). */
+  classification: CallClassification | null | undefined;
   /** messaging_group.is_group === 1 — a multi-person ("public") chat. */
   isPublicChannel: boolean;
 }
 
 export type PolicyDecision = 'allow' | 'require_confirmation';
 
-/** Resolve a tool's classification, or null if it is unmapped. */
-export function classifyTool(integration: string, tool: string, args: unknown): ToolClass | null {
-  const entry = CLASSIFICATION_REGISTRY[integration]?.[tool];
-  if (!entry) return null;
-  if (entry.argPredicate) {
-    const refined = entry.argPredicate(args);
-    if (refined) return { ...entry, classification: refined };
-  }
-  return entry;
-}
-
-/** The ordered policy. Unmapped → require_confirmation (fail-closed). */
+/** The ordered policy. Unclassified → require_confirmation (fail-closed). */
 export function evaluatePolicy(ctx: PolicyContext): PolicyDecision {
-  const cls = classifyTool(ctx.integration, ctx.tool, ctx.args);
-  if (!cls) return 'require_confirmation'; // unmapped → strictest
-  if (cls.classification === 'write' || cls.classification === 'destructive') {
-    return 'require_confirmation'; // rule 1 — any chat
-  }
-  if (cls.classification === 'read' && cls.pii && ctx.isPublicChannel) {
-    return 'require_confirmation'; // rule 2 — PII read in a public channel
-  }
+  const cls = ctx.classification;
+  if (!cls) return 'require_confirmation'; // unclassified → strictest
+  if (cls.risk !== 'read') return 'require_confirmation'; // rule 1 — any chat
+  if (cls.pii && ctx.isPublicChannel) return 'require_confirmation'; // rule 2
   return 'allow'; // rule 3
 }
 
@@ -285,8 +149,13 @@ export interface SensitiveGateInput {
   integration: string;
   /** JSON-RPC `params.name`. */
   tool: string;
-  /** JSON-RPC `params.arguments` (opaque; only the argPredicate inspects it). */
+  /** JSON-RPC `params.arguments` (opaque here; logged by nobody). */
   args: unknown;
+  /**
+   * The call's classification from the tool definition (dashboard
+   * `mcp/kit/policy.ts`). Absent ⇒ unclassified ⇒ require_confirmation.
+   */
+  classification?: CallClassification | null;
   /**
    * Raw platform sender id from the host-written sender-identity.json
    * (e.g. `159867859914790@lid`, `1234567890`). NOT namespaced — this
@@ -332,8 +201,8 @@ export type SensitiveGateDecision =
  * NEVER a silent allow. A security gate that fails open is not a gate.
  */
 export async function decideSensitiveGate(input: SensitiveGateInput): Promise<SensitiveGateDecision> {
-  const { groupFolder, integration, tool, args, rawSenderId, senderDisplayName, sourceChannelType, sourcePlatformId } =
-    input;
+  const { groupFolder, integration, tool, rawSenderId, senderDisplayName, sourceChannelType, sourcePlatformId } = input;
+  const classification = parseCallClassification(input.classification);
 
   const agentGroup = await getAgentGroupByFolder(groupFolder);
   if (!agentGroup) {
@@ -409,7 +278,7 @@ export async function decideSensitiveGate(input: SensitiveGateInput): Promise<Se
   }
 
   // 2. No live grant — evaluate the policy.
-  const policy = evaluatePolicy({ integration, tool, args, isPublicChannel });
+  const policy = evaluatePolicy({ classification, isPublicChannel });
   if (policy === 'allow') {
     return { decision: 'allow', reason: 'policy_allow' };
   }
@@ -447,6 +316,7 @@ export async function decideSensitiveGate(input: SensitiveGateInput): Promise<Se
     tool,
     approvalId,
     isPublicChannel,
+    risk: classification?.risk ?? 'unclassified',
   });
   return { decision: 'confirm', approvalId };
 }
