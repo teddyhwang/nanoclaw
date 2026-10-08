@@ -264,7 +264,7 @@ export const sendFile: McpToolDefinition = {
   tool: {
     name: 'send_file',
     description:
-      "Send a file to a named destination. If you have only one destination, you can omit `to`. The `text` argument IS the chat message posted alongside the file — do NOT follow up with a separate `<message>` repeating or paraphrasing it; the turn is complete from the user's perspective once this returns. Codex native image_gen images are automatically forwarded: do not send_file the same image again. NanoClaw generate_image and ordinary artifacts still require send_file.",
+      "Send a file to a named destination. If you have only one destination, you can omit `to`. The `text` argument IS the chat message posted alongside the file — do NOT follow up with a separate `<message>` repeating or paraphrasing it; the turn is complete from the user's perspective once this returns. Codex native image_gen images are automatically forwarded: do not send_file the same image again. Images from the media server's media_generate_image and ordinary artifacts still require send_file.",
     inputSchema: {
       type: 'object' as const,
       properties: {

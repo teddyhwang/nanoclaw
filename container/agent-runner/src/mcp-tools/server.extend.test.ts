@@ -304,3 +304,19 @@ describe('extendTool — fixture extension of create_agent (end to end)', () => 
     expect(payload).not.toHaveProperty('purpose');
   });
 });
+
+describe('unknown tools', () => {
+  it('answer with an MCP tool execution error', async () => {
+    const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+    const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js');
+    const { createMcpServer } = await import('./server.js');
+    const server = createMcpServer();
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 't', version: '1' });
+    await server.connect(b);
+    await client.connect(a);
+    const result = await client.callTool({ name: 'definitely_not_a_tool', arguments: {} });
+    expect(result.isError).toBe(true);
+    await client.close();
+  });
+});

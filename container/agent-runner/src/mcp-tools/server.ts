@@ -163,7 +163,7 @@ export function createMcpServer(
     const { name, arguments: args } = request.params;
     const tool = toolMap.get(name);
     if (!tool) {
-      return { content: [{ type: 'text', text: `Unknown tool: ${name}` }] };
+      return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true };
     }
     return run(() => tool.handler(args ?? {}, { signal: context.signal }));
   });
