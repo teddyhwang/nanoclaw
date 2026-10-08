@@ -96,6 +96,8 @@ export interface MailboxOperations {
   getUndeliveredMessages(): OutboundMessage[];
   /** Opaque cursor used to scope outbound queries to one push/turn. */
   getOutboundCursor(): string;
+  /** Every outbound row (chat and system actions) written after the cursor, oldest first. */
+  getOutboundMessagesSince(cursor: string): OutboundMessage[];
   countChatMessagesSince(cursor: string): number;
   hasChatMessageTextSince(cursor: string, text: string): boolean;
   hasChatMessageToDestinationSince(cursor: string, destination: { channelType: string; platformId: string }): boolean;

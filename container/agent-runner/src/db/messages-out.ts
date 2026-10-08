@@ -134,6 +134,11 @@ export function getUndeliveredMessages(): MessageOutRow[] {
   return getAgentMailbox().operations.getUndeliveredMessages().map(messageRow);
 }
 
+/** Every outbound row written after the mailbox-consistent turn cursor, oldest first. */
+export function getOutboundMessagesSince(cursor: string): MessageOutRow[] {
+  return getAgentMailbox().operations.getOutboundMessagesSince(cursor).map(messageRow);
+}
+
 /** Count chat rows written after the mailbox-consistent turn cursor. */
 export function countChatMessagesSince(cursor: string): number {
   return getAgentMailbox().operations.countChatMessagesSince(cursor);

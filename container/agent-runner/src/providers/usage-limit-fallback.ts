@@ -15,6 +15,21 @@ export interface FallbackProviderConfig {
   fallback: AgentProvider;
   /** Observes each primary→alternate switch (operator alerting). Must not throw. */
   onFailover?: (info: FailoverInfo) => void | Promise<void>;
+  /**
+   * Read-only view of what the current turn already wrote to the outbox.
+   * Without it a mid-turn switch can only see streamed provider events, not
+   * MCP-tool sends, and the alternate re-answers a question the user already
+   * has an answer to (AI Friends, 2026-10-08).
+   */
+  turnLedger?: FailoverTurnLedger;
+}
+
+/** Outbound rows recorded for one turn, oldest first. */
+export interface FailoverTurnLedger {
+  /** Opaque cursor captured when a query starts. */
+  cursor(): string;
+  /** Rows written after `cursor` (chat sends and host system actions). */
+  since(cursor: string): ReadonlyArray<{ kind: string; content: string }>;
 }
 
 export type FailoverReason = 'quota' | 'auth';
@@ -88,6 +103,98 @@ function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+const HANDOFF_MESSAGE_CHARS = 1500;
+const HANDOFF_TOTAL_CHARS = 6000;
+
+function clip(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}… [truncated]` : text;
+}
+
+/** What the abandoned primary visibly completed before the switch. */
+export interface PrimaryTurnWork {
+  /** Chat texts already written to the outbox this turn, oldest first. */
+  delivered: string[];
+  /** Host system actions requested this turn (name → count). */
+  actions: Map<string, number>;
+}
+
+export function summarizeTurnLedger(rows: ReadonlyArray<{ kind: string; content: string }>): PrimaryTurnWork {
+  const delivered: string[] = [];
+  const actions = new Map<string, number>();
+  for (const row of rows) {
+    let payload: Record<string, unknown> | null = null;
+    try {
+      const parsed: unknown = JSON.parse(row.content);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) payload = parsed as Record<string, unknown>;
+    } catch {
+      // Malformed rows are not evidence of completed work.
+    }
+    if (!payload) continue;
+    if (row.kind === 'chat') {
+      const text = typeof payload.text === 'string' ? payload.text.trim() : '';
+      const files = Array.isArray(payload.files) ? payload.files.length : 0;
+      if (text) delivered.push(text);
+      else if (files > 0) delivered.push(`[${files} file attachment(s)]`);
+    } else if (row.kind === 'system' && typeof payload.action === 'string') {
+      actions.set(payload.action, (actions.get(payload.action) ?? 0) + 1);
+    }
+  }
+  return { delivered, actions };
+}
+
+/**
+ * Prompt preamble for an alternate provider taking over a turn the primary had
+ * already acted on. The alternate starts on a fresh ephemeral thread, so
+ * without this it sees only the original request and answers it again.
+ */
+export function buildFailoverHandoff(options: {
+  from: string;
+  reason: FailoverReason;
+  work: PrimaryTurnWork;
+  producedOutput: boolean;
+}): string | null {
+  const { from, reason, work, producedOutput } = options;
+  if (work.delivered.length === 0 && work.actions.size === 0 && !producedOutput) return null;
+  const why = reason === 'auth' ? 'a credential failure' : 'a usage/rate limit';
+  const lines = [
+    '[Runtime failover handoff — read before acting]',
+    `This turn started on ${from}, which stopped mid-turn because of ${why} after it had already begun working. ` +
+      'You are continuing that SAME turn, not starting a new one.',
+  ];
+  if (work.delivered.length > 0) {
+    lines.push('', 'Already delivered to the chat in this turn (the recipients have seen these, verbatim):');
+    let budget = HANDOFF_TOTAL_CHARS;
+    work.delivered.forEach((text, index) => {
+      if (budget <= 0) return;
+      const shown = clip(text, Math.min(HANDOFF_MESSAGE_CHARS, budget));
+      budget -= shown.length;
+      lines.push(`${index + 1}. <<<${shown}>>>`);
+    });
+  } else {
+    lines.push('', 'Nothing has been delivered to the chat yet in this turn.');
+  }
+  if (work.actions.size > 0) {
+    const actions = [...work.actions].map(([name, count]) => (count > 1 ? `${name} ×${count}` : name)).join(', ');
+    lines.push(`Host actions ${from} already requested in this turn: ${actions}.`);
+  }
+  lines.push('', 'Rules for the rest of this turn:');
+  if (work.delivered.length > 0) {
+    lines.push(
+      '- Do not resend, restate, rephrase, correct-by-repetition or re-acknowledge anything delivered above.',
+      '- If the delivered messages already answer the request, end the turn now with exactly ' +
+        '`<internal>silent turn</internal>` and no `<message>` block. The "never silent when addressed" rule is ' +
+        'already satisfied by the reply above.',
+      '- Otherwise send only what is still missing (for example, the answer an acknowledgement promised).',
+    );
+  }
+  lines.push(
+    `- ${from} may also have run tools that left no chat trace. Check current state before repeating any ` +
+      'side-effecting action (sends, bookings, schedules, file or memory writes).',
+    '',
+  );
+  return lines.join('\n');
+}
+
 /**
  * Wrap two providers so an account usage-limit from the standing provider is
  * swallowed and the same turn is retried once on the alternate provider.
@@ -107,6 +214,7 @@ export class UsageLimitFallbackProvider implements AgentProvider {
   private readonly primary: AgentProvider;
   private readonly fallback: AgentProvider;
   private readonly onFailover?: (info: FailoverInfo) => void | Promise<void>;
+  private readonly turnLedger?: FailoverTurnLedger;
   private preferFallback = false;
   private fallbackCause: { reason: FailoverReason; detail: string } | null = null;
 
@@ -117,6 +225,7 @@ export class UsageLimitFallbackProvider implements AgentProvider {
     this.primary = config.primary;
     this.fallback = config.fallback;
     this.onFailover = config.onFailover;
+    this.turnLedger = config.turnLedger;
     const contract = getProviderRuntimeContract(config.primaryName);
     this.supportsNativeSlashCommands = contract
       ? contract.commands.formatting === 'native'
@@ -130,8 +239,25 @@ export class UsageLimitFallbackProvider implements AgentProvider {
   }
 
   query(input: QueryInput): AgentQuery {
-    const fallbackInput = (): QueryInput => ({
+    const ledger = this.turnLedger;
+    let ledgerCursor: string | null = null;
+    try {
+      ledgerCursor = ledger?.cursor() ?? null;
+    } catch (err) {
+      log(`turn ledger cursor unavailable: ${errorText(err)}`);
+    }
+    const primaryWork = (): PrimaryTurnWork => {
+      if (!ledger || ledgerCursor === null) return { delivered: [], actions: new Map() };
+      try {
+        return summarizeTurnLedger(ledger.since(ledgerCursor));
+      } catch (err) {
+        log(`turn ledger read failed: ${errorText(err)}`);
+        return { delivered: [], actions: new Map() };
+      }
+    };
+    const fallbackInput = (handoff: string | null = null): QueryInput => ({
       ...input,
+      prompt: handoff ? `${handoff}\n${input.prompt}` : input.prompt,
       continuation: undefined,
       systemContext: {
         ...input.systemContext,
@@ -171,8 +297,25 @@ export class UsageLimitFallbackProvider implements AgentProvider {
     let ended = false;
     let aborted = false;
 
+    // Tool sends (e.g. MCP send_message) never surface as provider events, so
+    // the outbox is the only complete record of what the user already has.
+    const primaryHasDelivered = (): boolean => primaryProducedWork || primaryWork().delivered.length > 0;
+
     const switchToFallback = async (reason: FailoverReason, detail: string): Promise<void> => {
       if (activeProvider === this.fallback) return;
+      const work = primaryWork();
+      const handoff = buildFailoverHandoff({
+        from: this.primaryName,
+        reason,
+        work,
+        producedOutput: primaryProducedWork,
+      });
+      if (handoff) {
+        log(
+          `handing ${this.fallbackName} the partial turn: ${work.delivered.length} delivered message(s), ` +
+            `${[...work.actions.values()].reduce((a, b) => a + b, 0)} host action(s)`,
+        );
+      }
       log(
         reason === 'auth'
           ? `${this.primaryName} authentication failed — retrying transparently with ${this.fallbackName}`
@@ -183,7 +326,7 @@ export class UsageLimitFallbackProvider implements AgentProvider {
       activeQuery.abort();
       this.preferFallback = true;
       activeProvider = this.fallback;
-      activeQuery = this.fallback.query(fallbackInput());
+      activeQuery = this.fallback.query(fallbackInput(handoff));
       for (const followup of followups) {
         activeQuery.push(followup.message, followup.imageBlocks);
       }
@@ -204,9 +347,9 @@ export class UsageLimitFallbackProvider implements AgentProvider {
             // after) yielding it as an error result. Treat that the same way.
             if (
               !aborted &&
-              !primaryProducedWork &&
               activeProvider !== fallbackProvider &&
-              isProviderAuthFailureText(errorText(err))
+              isProviderAuthFailureText(errorText(err)) &&
+              !primaryHasDelivered()
             ) {
               await switchToFallback('auth', errorText(err));
               switched = true;
@@ -217,7 +360,7 @@ export class UsageLimitFallbackProvider implements AgentProvider {
           if (next.done) break;
           const event = next.value;
           const reason = activeProvider !== fallbackProvider ? failoverReason(event) : null;
-          if (!aborted && reason && (reason !== 'auth' || !primaryProducedWork)) {
+          if (!aborted && reason && (reason !== 'auth' || !primaryHasDelivered())) {
             // Do not await iterator.return(): a provider stream can be parked
             // in its SDK even after abort. The alternate attempt must start
             // immediately rather than inheriting that hang.

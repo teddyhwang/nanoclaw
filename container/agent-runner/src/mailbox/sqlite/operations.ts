@@ -458,6 +458,18 @@ export function sqliteCountChatMessagesSince(cursor: string): number {
   return row.count;
 }
 
+/** Outbound rows written after a turn cursor, oldest first. */
+export function sqliteGetOutboundMessagesSince(cursor: string): MessageOutRow[] {
+  const sequence = parseOutboundCursor(cursor);
+  return (
+    sequence === null
+      ? getOutboundDb()
+          .prepare('SELECT * FROM messages_out WHERE timestamp > ? ORDER BY timestamp ASC, seq ASC')
+          .all(cursor)
+      : getOutboundDb().prepare('SELECT * FROM messages_out WHERE seq > ? ORDER BY seq ASC').all(sequence)
+  ) as MessageOutRow[];
+}
+
 function normalizeMessageText(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }

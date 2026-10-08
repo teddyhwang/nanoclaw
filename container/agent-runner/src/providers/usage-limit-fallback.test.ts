@@ -5,9 +5,11 @@ import { mockRuntimeContract } from '../provider-contracts/mock.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, QueryInput } from './types.js';
 import {
   UsageLimitFallbackProvider,
+  buildFailoverHandoff,
   isAuthFailureEvent,
   isUsageLimitEvent,
   resolveUsageLimitFallback,
+  summarizeTurnLedger,
   type FailoverInfo,
 } from './usage-limit-fallback.js';
 
@@ -443,4 +445,129 @@ it('recognizes upstream dedicated credential errors without leaking alternate co
   ]);
   const provider = new UsageLimitFallbackProvider({ primaryName: 'claude', fallbackName: 'codex', primary, fallback });
   expect(await collect(provider.query({ prompt: 'q', cwd: '/tmp' }))).toEqual([{ type: 'result', text: 'ok' }]);
+});
+
+describe('mid-turn failover handoff (AI Friends 2026-10-08 duplicate answer)', () => {
+  // Claude sent the full answer with the send_message MCP tool, then hit a 429
+  // on its next request. Tool sends never surface as provider events, so the
+  // alternate replayed the bare prompt and answered the same question again.
+  class FakeLedger {
+    rows: Array<{ kind: string; content: string }> = [];
+    failCursor = false;
+    cursor(): string {
+      if (this.failCursor) throw new Error('db closed');
+      return String(this.rows.length);
+    }
+    since(cursor: string) {
+      return this.rows.slice(Number(cursor));
+    }
+    send(text: string): void {
+      this.rows.push({ kind: 'chat', content: JSON.stringify({ text }) });
+    }
+    action(action: string): void {
+      this.rows.push({ kind: 'system', content: JSON.stringify({ action, requestId: 'r' }) });
+    }
+  }
+  const quota: ProviderEvent = { type: 'error', message: '429', retryable: true, classification: 'quota' };
+  const answer = "That wasn't you. Mack posted the Hindsight link on Jul 14.";
+
+  function wrapWithLedger(primary: StubProvider, fallback: StubProvider, ledger: FakeLedger) {
+    return new UsageLimitFallbackProvider({
+      primaryName: 'claude',
+      fallbackName: 'codex',
+      primary,
+      fallback,
+      turnLedger: ledger,
+    });
+  }
+
+  it('hands the alternate the messages the primary already delivered by tool', async () => {
+    const ledger = new FakeLedger();
+    ledger.send('an earlier turn reply');
+    const primary = new StubProvider([[{ type: 'activity' }, quota]]);
+    const fallback = new StubProvider([[{ type: 'result', text: '<internal>silent turn</internal>' }]]);
+    const provider = wrapWithLedger(primary, fallback, ledger);
+    const query = provider.query({ prompt: 'did I share a hindsight link?', cwd: '/tmp' });
+    ledger.action('search_conversations');
+    ledger.send(answer); // MCP send_message mid-turn: invisible to the wrapper's event stream
+    expect(await collect(query)).toEqual([
+      { type: 'activity' },
+      { type: 'result', text: '<internal>silent turn</internal>' },
+    ]);
+    const prompt = fallback.inputs[0].prompt;
+    expect(prompt.startsWith('[Runtime failover handoff')).toBe(true);
+    expect(prompt).toContain(`1. <<<${answer}>>>`);
+    expect(prompt).not.toContain('an earlier turn reply');
+    expect(prompt).toContain('search_conversations');
+    expect(prompt).toContain('<internal>silent turn</internal>');
+    expect(prompt.endsWith('did I share a hindsight link?')).toBe(true);
+    expect(fallback.inputs[0].continuation).toBeUndefined();
+  });
+
+  it('leaves the prompt untouched when the primary failed before doing anything', async () => {
+    const ledger = new FakeLedger();
+    ledger.send('previous turn');
+    const fallback = new StubProvider([[{ type: 'result', text: 'ok' }]]);
+    const provider = wrapWithLedger(new StubProvider([[quota]]), fallback, ledger);
+    await collect(provider.query({ prompt: 'q', cwd: '/tmp' }));
+    expect(fallback.inputs[0].prompt).toBe('q');
+  });
+
+  it('flags streamed-but-undelivered primary output without claiming a delivery', async () => {
+    const fallback = new StubProvider([[{ type: 'result', text: 'ok' }]]);
+    const provider = wrapWithLedger(
+      new StubProvider([[{ type: 'text', text: 'private narration' }, quota]]),
+      fallback,
+      new FakeLedger(),
+    );
+    await collect(provider.query({ prompt: 'q', cwd: '/tmp' }));
+    const prompt = fallback.inputs[0].prompt;
+    expect(prompt).toContain('Nothing has been delivered to the chat yet');
+    expect(prompt).not.toContain('silent turn');
+  });
+
+  it('does not replay a credential-failed turn whose answer was already tool-sent', async () => {
+    const ledger = new FakeLedger();
+    const primary = new StubProvider([[{ type: 'result', text: REVOKED, isError: true }]]);
+    const fallback = new StubProvider([[{ type: 'result', text: 'duplicate' }]]);
+    const provider = wrapWithLedger(primary, fallback, ledger);
+    const query = provider.query({ prompt: 'q', cwd: '/tmp' });
+    ledger.send(answer);
+    expect(await collect(query)).toEqual([{ type: 'result', text: REVOKED, isError: true }]);
+    expect(fallback.inputs).toHaveLength(0);
+  });
+
+  it('still fails over with the bare prompt when the ledger is unavailable', async () => {
+    const ledger = new FakeLedger();
+    ledger.failCursor = true;
+    const fallback = new StubProvider([[{ type: 'result', text: 'ok' }]]);
+    const provider = wrapWithLedger(new StubProvider([[quota]]), fallback, ledger);
+    expect(await collect(provider.query({ prompt: 'q', cwd: '/tmp' }))).toEqual([{ type: 'result', text: 'ok' }]);
+    expect(fallback.inputs[0].prompt).toBe('q');
+  });
+
+  it('summarizes ledger rows and bounds the delivered text', () => {
+    const work = summarizeTurnLedger([
+      { kind: 'chat', content: JSON.stringify({ text: 'x'.repeat(4000) }) },
+      { kind: 'chat', content: JSON.stringify({ text: '', files: ['a.png'] }) },
+      { kind: 'system', content: JSON.stringify({ action: 'schedule_task' }) },
+      { kind: 'system', content: JSON.stringify({ action: 'schedule_task' }) },
+      { kind: 'chat', content: 'not json' },
+    ]);
+    expect(work.delivered).toHaveLength(2);
+    expect(work.delivered[1]).toBe('[1 file attachment(s)]');
+    expect(work.actions.get('schedule_task')).toBe(2);
+    const handoff = buildFailoverHandoff({ from: 'claude', reason: 'quota', work, producedOutput: false })!;
+    expect(handoff).toContain('… [truncated]');
+    expect(handoff).toContain('schedule_task ×2');
+    expect(handoff.length).toBeLessThan(3500);
+    expect(
+      buildFailoverHandoff({
+        from: 'claude',
+        reason: 'quota',
+        work: { delivered: [], actions: new Map() },
+        producedOutput: false,
+      }),
+    ).toBeNull();
+  });
 });

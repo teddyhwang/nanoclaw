@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 
 import { markProcessing } from './db/messages-in.js';
-import { getUndeliveredMessages } from './db/messages-out.js';
+import { getOutboundMessagesSince, getUndeliveredMessages, outboundDbNow, writeMessageOut } from './db/messages-out.js';
 import { getContinuation } from './db/session-state.js';
 import { closeSessionDb, getInboundDb, initTestSessionDb } from './mailbox/sqlite/connection.js';
 import { _resetShutdownStateForTests, processQuery, runPollLoop } from './poll-loop.js';
@@ -230,6 +230,40 @@ describe('quota wrapper delivery through the real poll loop', () => {
       [{ seriesId: 'dream-test', taskId: 'm1', dispatched: [], assistantText: null, written: false }],
     );
     expect(texts()).toEqual([]);
+  });
+
+  it('hands a tool-sent answer to the alternate so a mid-turn quota does not answer twice', async () => {
+    // AI Friends 2026-10-08: Claude answered via send_message, then a 429 moved
+    // the turn to Codex, which re-ran the search and posted an ack plus a
+    // second, differently-worded answer. Exercise the production ledger wiring.
+    const primary = new ScriptedProvider(true, async function* () {
+      yield { type: 'activity' };
+      await writeMessageOut({
+        id: 'tool-send-1',
+        kind: 'chat',
+        platform_id: 'test-chat',
+        channel_type: 'telegram',
+        in_reply_to: 'm1',
+        content: JSON.stringify({ text: 'The complete answer.' }),
+      });
+      yield quota;
+    });
+    const fallback = new ScriptedProvider(false, async function* () {
+      yield { type: 'result', text: '<internal>silent turn</internal>' };
+    });
+    const provider = new UsageLimitFallbackProvider({
+      primaryName: 'claude',
+      primary,
+      fallbackName: 'codex',
+      fallback,
+      turnLedger: { cursor: outboundDbNow, since: getOutboundMessagesSince },
+    });
+    await dispatch(provider, 'claude');
+    expect(fallback.inputs).toHaveLength(1);
+    expect(fallback.inputs[0].prompt).toContain('<<<The complete answer.>>>');
+    expect(fallback.inputs[0].prompt.endsWith('question')).toBe(true);
+    expect(texts()).toEqual(['The complete answer.']);
+    expect(fallback.pushes).toEqual([]);
   });
 
   for (const primaryName of ['claude', 'codex']) {

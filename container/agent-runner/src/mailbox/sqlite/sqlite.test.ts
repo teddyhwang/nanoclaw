@@ -411,6 +411,11 @@ describe('SQLite runner mailbox Optimus semantics', () => {
     });
 
     expect(mailbox.countChatMessagesSince(cursor)).toBe(1);
+    await mailbox.writeMessageOut({ id: 'action', kind: 'system', content: '{"action":"schedule_task"}' });
+    expect(mailbox.getOutboundMessagesSince(cursor).map((m) => [m.id, m.kind])).toEqual([
+      ['after', 'chat'],
+      ['action', 'system'],
+    ]);
     expect(mailbox.hasChatMessageTextSince(cursor, ' hello world ')).toBe(true);
     expect(mailbox.hasChatMessageToDestinationSince(cursor, { channelType: 'discord', platformId: 'room-a' })).toBe(
       true,

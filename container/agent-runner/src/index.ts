@@ -26,6 +26,7 @@ import { fileURLToPath } from 'url';
 import { trustGatewayCaForChromium } from './browser-trust.js';
 import { loadConfig } from './config.js';
 import { buildSystemPromptAddendum } from './destinations.js';
+import { getOutboundMessagesSince, outboundDbNow } from './db/messages-out.js';
 import { ensureMemoryScaffold } from './memory/scaffold.js';
 import { MEMORY_SESSION_HOOK } from './memory/session-hook.js';
 // Module barrel — loads registration modules, including the singular mailbox slot.
@@ -193,6 +194,9 @@ async function main(): Promise<void> {
         fallbackModel: fallback.model,
         primary: standingProvider,
         fallback: alternate,
+        // The outbox is the only record of MCP-tool sends; the alternate needs
+        // it to continue a half-finished turn instead of answering it again.
+        turnLedger: { cursor: outboundDbNow, since: getOutboundMessagesSince },
         // A rejected credential stays broken until the operator rotates it,
         // even when the alternate harness answered this turn — tell the host.
         onFailover: async (info) => {

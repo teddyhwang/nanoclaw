@@ -19,6 +19,7 @@ import {
   sqliteGetMessageIn,
   sqliteGetMessageIdBySeq,
   sqliteGetOutboundCursor,
+  sqliteGetOutboundMessagesSince,
   sqliteGetPendingMessages,
   sqliteGetReplyTargetMessageIdBySeq,
   sqliteGetRoutingBySeq,
@@ -208,6 +209,10 @@ export class SqliteAgentMailbox implements AgentMailbox {
 
   getOutboundCursor(): string {
     return sqliteGetOutboundCursor();
+  }
+
+  getOutboundMessagesSince(cursor: string): OutboundMessage[] {
+    return sqliteGetOutboundMessagesSince(cursor).map(outboundMessage);
   }
 
   countChatMessagesSince(cursor: string): number {
