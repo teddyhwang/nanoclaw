@@ -107,7 +107,39 @@ https://www.onecli.sh/docs/guides/credential-stubs/general-app
 
 ## When a Request Fails
 
-If you get a 401, 403, or a gateway error (e.g., `app_not_connected`):
+> **Optimus host override — `credential_not_found` on a public URL is the
+> site refusing you, not a missing credential.** OneCLI rewrites **every
+> upstream 401/403** from a host it has no credential for into a 403 JSON
+> body `{"error":"credential_not_found","hostname":...,"secret_url":...}`
+> and discards the site's real body and headers. The request _did_ reach the
+> site. For a URL that needs no login — an unsubscribe link, a public page,
+> a tokenized one-click link from an email — this almost always means the
+> site's bot protection (Cloudflare, Akamai, etc.) rejected a non-browser
+> client. Verified 2026-10-09: a Bandsintown unsubscribe URL returned
+> Cloudflare's "Attention Required" 403 to every curl, with or without the
+> proxy, and OneCLI relabeled it `credential_not_found`.
+>
+> For a public / no-auth URL that comes back `credential_not_found`:
+>
+> 1. **Do not** send the user the `secret_url`/`connect_url`, and do not
+>    ask anyone to add a credential — there is nothing to connect.
+> 2. Retry the action once in the **browser** (the Camoufox browser
+>    tools). The browser egresses directly, not through OneCLI, so you see
+>    the site's real response. For an unsubscribe, open the link (or the
+>    sender's preferences page) and complete it the way a person would.
+> 3. If the browser also gets a block page ("Sorry, you have been
+>    blocked", a CAPTCHA), stop and report it as **blocked by the site**,
+>    with the URL, so the user can do it by hand. Do not loop retries.
+>
+> The connect-link flow below still applies when the host is a real API
+> that needs an account (GitHub, Stripe, …) and the user wants it
+> connected.
+>
+> Only `"error":"blocked_by_policy"` ("Blocked by OneCLI policy rule …")
+> is an OneCLI policy block — `credential_not_found` is not.
+
+If you get a 401, 403, or a gateway error (e.g., `app_not_connected`) from
+an API that needs an account:
 
 **Step 1 — Show the user a connect link.** Use the `connect_url` from the
 error response:
@@ -136,5 +168,7 @@ request. If the retry still fails, ask if they need help with the setup.
 - **Never** suggest the user open Gmail/Calendar/GitHub in their browser
   when they ask you to read or interact with those services. You have API
   access. Use it.
-- If the gateway returns a policy error (403 with a JSON body), respect
-  the block. Do not retry or circumvent it.
+- If the gateway returns a policy error (`"error":"blocked_by_policy"`),
+  respect the block. Do not retry or circumvent it. A
+  `credential_not_found` 403 is **not** a policy error — see the override
+  under "When a Request Fails".

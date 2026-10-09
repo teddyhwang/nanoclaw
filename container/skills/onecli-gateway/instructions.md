@@ -7,3 +7,5 @@ Your other HTTP requests (GitHub, Stripe, Slack, etc.) go through the OneCLI pro
 Use any method: curl, Python, a CLI tool, whatever fits. If a tool checks for credentials locally, pass any placeholder value — the proxy replaces it with real credentials at request time.
 
 If you get a `401`/`403`/`app_not_connected`, the error response contains a `connect_url` — you MUST show it to the user as a bare URL on its own line (no angle brackets, no markdown link syntax) so they can click to connect. Run `/onecli-gateway` for the full error-handling flow. Never ask the user for API keys or tokens.
+
+**Exception — public URLs:** OneCLI relabels _any_ upstream 401/403 from a host it holds no credential for as `credential_not_found`. On a URL that needs no login (an email unsubscribe link, a public page) that means the site's bot protection refused a non-browser client, not that a credential is missing: don't send a connect link; retry once in the browser (it egresses directly, not through OneCLI), and if that is also blocked, report it as blocked by the site. Only `"error":"blocked_by_policy"` is an OneCLI policy block.
