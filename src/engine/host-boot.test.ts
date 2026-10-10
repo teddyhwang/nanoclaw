@@ -1,7 +1,9 @@
 import { expect, it, vi } from 'vitest';
 import type { ChannelAdapter, ChannelSetup } from '../channels/adapter.js';
 
-const { order, routed, responses, setups } = vi.hoisted(() => ({
+const { order, routed, responses, setups, delivery, channelAdapter } = vi.hoisted(() => ({
+  delivery: { current: undefined as unknown },
+  channelAdapter: { deliver: vi.fn(async () => 'sent-card') },
   order: [] as string[],
   routed: vi.fn(),
   responses: vi.fn(async () => true),
@@ -33,7 +35,9 @@ vi.mock('../host-instance.js', () => ({
 vi.mock('../delivery.js', () => ({
   startActiveDeliveryPoll: () => order.push('delivery-start'),
   startSweepDeliveryPoll: () => {},
-  setDeliveryAdapter: () => {},
+  setDeliveryAdapter: (adapter: unknown) => {
+    delivery.current = adapter;
+  },
   stopDeliveryPolls: () => order.push('delivery-stop'),
 }));
 vi.mock('../host-sweep.js', () => ({
@@ -56,7 +60,7 @@ vi.mock('../channels/channel-registry.js', () => ({
     expect(routed).not.toHaveBeenCalled();
   },
   teardownChannelAdapters: async () => order.push('channels-stop'),
-  getChannelAdapterExact: () => undefined,
+  getChannelAdapterExact: () => channelAdapter,
 }));
 vi.mock('../channels/chat-migration.js', () => ({ handleChatMigrated: async () => {} }));
 vi.mock('../channels/index.js', () => ({}));
@@ -98,4 +102,54 @@ it('the embedded boot owns a durable lease before adoption and releases it after
   expect(order).toEqual(expect.arrayContaining(['modules-abort', 'gateway-stop', 'gateway-detach', 'modules-stop']));
   expect(order.indexOf('gateway-stop')).toBeLessThan(order.indexOf('modules-stop'));
   expect(order.slice(-4)).toEqual(['delivery-stop', 'sweep-stop', 'lease-stop', 'channels-stop']);
+});
+
+it('observes question cards and terminal edits as readable history, not blank text', async () => {
+  const { _bootForHost, _shutdownForHost } = await import('./host-boot.js');
+  const { engineEvents } = await import('./events.js');
+  const observed = vi.fn();
+  const off = engineEvents.on('channel.outbound_observed', observed);
+  await _bootForHost({ managedSignals: false });
+  const adapter = delivery.current as { deliver: (...args: unknown[]) => Promise<unknown> };
+  try {
+    await adapter.deliver(
+      'discord',
+      'discord:@me:room',
+      null,
+      'chat-sdk',
+      JSON.stringify({
+        type: 'ask_question',
+        title: '📣 Bot mentioned in new channel',
+        question: 'Connect Gaming?',
+        options: [
+          { label: 'Choose existing agent', value: 'choose' },
+          { label: 'Ignore', value: 'reject' },
+        ],
+      }),
+    );
+    expect(observed).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        operation: 'send',
+        messageId: 'sent-card',
+        text: '📣 Bot mentioned in new channel\n\nConnect Gaming?\nOptions: Choose existing agent, Ignore',
+      }),
+    );
+    await adapter.deliver(
+      'discord',
+      'discord:@me:room',
+      null,
+      'chat-sdk',
+      JSON.stringify({
+        operation: 'edit',
+        messageId: 'sent-card',
+        terminalCard: { title: 'Choose an agent', question: 'Which agent?', resolution: 'Degenerates by Teddy' },
+      }),
+    );
+    expect(observed).toHaveBeenLastCalledWith(
+      expect.objectContaining({ operation: 'edit', text: 'Choose an agent\n\nWhich agent?\n\nDegenerates by Teddy' }),
+    );
+  } finally {
+    off();
+    await _shutdownForHost('test');
+  }
 });

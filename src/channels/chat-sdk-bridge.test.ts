@@ -1264,6 +1264,38 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
     await closeDb();
   });
 
+  it.each([204, 403])(
+    'projects a clicked-card outcome only after a successful Discord callback (%s)',
+    async (status) => {
+      const { engineEvents } = await import('../engine/events.js');
+      const observed = vi.fn();
+      const off = engineEvents.on('channel.outbound_observed', observed);
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response(null, { status })),
+      );
+      const { bridge, post } = await startGateway(BOT_TOKEN);
+      try {
+        const payload = JSON.parse(click);
+        payload.data.message.embeds = [{ title: 'Choose an agent', description: 'Which agent?' }];
+        await post(JSON.stringify(payload), { 'x-discord-gateway-token': BOT_TOKEN });
+        if (status === 204) {
+          expect(observed).toHaveBeenCalledWith(
+            expect.objectContaining({
+              platformId: 'discord:@me:chan-1',
+              messageId: 'card-1',
+              operation: 'edit',
+              text: 'Choose an agent\n\nWhich agent?\n\napprove by clicker',
+            }),
+          );
+        } else expect(observed).not.toHaveBeenCalled();
+      } finally {
+        off();
+        await bridge.teardown();
+      }
+    },
+  );
+
   it.each([
     ['no gateway token', {}],
     ['a wrong gateway token', { 'x-discord-gateway-token': 'not-the-token' }],

@@ -24,6 +24,7 @@ import {
   type ReactionEvent,
 } from 'chat';
 import { log } from '../log.js';
+import { emitEngineEvent } from '../engine/events.js';
 import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
 import { normalizeOptions, type NormalizedOption } from './ask-question.js';
@@ -2178,23 +2179,40 @@ async function handleForwardedEvent(
       const actorName = user?.global_name || user?.username || '';
       const resolution = actorName ? `${selectedLabel} by ${actorName}` : selectedLabel;
       try {
-        await fetch(`https://discord.com/api/v10/interactions/${interactionId}/${interactionToken}/callback`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            type: 7, // UPDATE_MESSAGE — acknowledge + update in one call
-            data: {
-              embeds: [
-                {
-                  title: cardTitle,
-                  description: originalDescription || render?.question || '',
-                  footer: { text: resolution },
-                },
-              ],
-              components: [], // remove buttons
-            },
-          }),
-        });
+        const response = await fetch(
+          `https://discord.com/api/v10/interactions/${interactionId}/${interactionToken}/callback`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              type: 7, // UPDATE_MESSAGE — acknowledge + update in one call
+              data: {
+                embeds: [
+                  {
+                    title: cardTitle,
+                    description: originalDescription || render?.question || '',
+                    footer: { text: resolution },
+                  },
+                ],
+                components: [], // remove buttons
+              },
+            }),
+          },
+        );
+        // The interaction callback edits Discord directly, bypassing the shared
+        // delivery adapter. Observe only an acknowledged update, not a click.
+        const messageId = (interaction.message as Record<string, unknown> | undefined)?.id;
+        if (response.ok && typeof messageId === 'string' && typeof interaction.channel_id === 'string') {
+          emitEngineEvent('channel.outbound_observed', {
+            channelType: 'discord',
+            platformId: `${adapter.name}:${typeof interaction.guild_id === 'string' ? interaction.guild_id : '@me'}:${interaction.channel_id}`,
+            threadId: null,
+            messageId,
+            operation: 'edit',
+            text: [cardTitle, originalDescription || render?.question || '', resolution].filter(Boolean).join('\n\n'),
+            ts: new Date().toISOString(),
+          });
+        }
       } catch (err) {
         log.error('Failed to update interaction', { err });
       }

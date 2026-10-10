@@ -8,6 +8,7 @@
  *
  * NOT part of the public plugin API. Hosts should use `createNanoClawHost`.
  */
+import { outboundHistoryText } from '../channels/outbound-history.js';
 import path from 'path';
 
 import { getEnginePaths } from './paths.js';
@@ -212,14 +213,13 @@ export async function _bootForHost(opts: { managedSignals: boolean }): Promise<v
       const messageId =
         operation === 'send' ? deliveredId : typeof parsed.messageId === 'string' ? parsed.messageId : undefined;
       if (operation && messageId) {
-        const rawText = parsed.text ?? parsed.markdown;
         emitEngineEvent('channel.outbound_observed', {
           channelType,
           platformId,
           threadId,
           messageId,
           operation,
-          text: typeof rawText === 'string' ? rawText : null,
+          text: outboundHistoryText(parsed),
           ts: new Date().toISOString(),
         });
       }
