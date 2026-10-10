@@ -26,7 +26,12 @@ import { writeSessionMessage } from '../../session-manager.js';
 import type { PendingApproval } from '../../types.js';
 import { hasAdminPrivilege, isGlobalAdmin, isOwner } from '../permissions/db/user-roles.js';
 import { finalizeReject } from './finalize.js';
-import { getApprovalHandler, notifyApprovalResolved, REJECT_WITH_REASON_VALUE } from './primitive.js';
+import {
+  getApprovalHandler,
+  getHostApprovalHandler,
+  notifyApprovalResolved,
+  REJECT_WITH_REASON_VALUE,
+} from './primitive.js';
 import { armReasonCapture } from './reason-capture.js';
 
 export async function handleApprovalsResponse(payload: ResponsePayload): Promise<boolean> {
@@ -52,6 +57,21 @@ async function handleRegisteredApproval(
   selectedOption: string,
   userId: string,
 ): Promise<void> {
+  const hostHandler = getHostApprovalHandler(approval.action);
+  if (hostHandler && approval.session_id === null) {
+    if (!approval.approver_user_id || userId !== approval.approver_user_id || approval.status !== 'pending') return;
+    if (selectedOption !== 'approve' && selectedOption !== 'reject') return;
+    const status = selectedOption === 'approve' ? 'approved' : 'rejected';
+    if (!(await transitionPendingApprovalStatus(approval.approval_id, 'pending', status))) return;
+    // Keep the durable decision for crash recovery; host gate owns revalidation.
+    try {
+      await hostHandler({ approval: { ...approval, status }, userId, outcome: selectedOption });
+      // eslint-disable-next-line no-catch-all/no-catch-all -- the durable decision stands; host revalidates on redelivery
+    } catch {
+      log.warn('Host approval deferred', { action: approval.action, approvalId: approval.approval_id });
+    }
+    return;
+  }
   if (!approval.session_id) {
     await deletePendingApproval(approval.approval_id);
     return;
