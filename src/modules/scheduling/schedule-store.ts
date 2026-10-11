@@ -281,6 +281,84 @@ export function advanceRecurrence(
   ).run({ seriesId, nextRun, firedAt });
 }
 
+/**
+ * Atomically take one due occurrence (compare-and-set). Several active
+ * sessions of one agent group share this schedule.db and each sweep reads the
+ * due set before awaiting; without a claim, two of them could materialize the
+ * same tick. Only the caller that still sees the series pending at
+ * `observedProcessAfter` wins: the row moves to `nextRun` (or is cancelled
+ * for a one-shot, `nextRun` null) and every other session finds it no longer
+ * due. `last_fired_at` is untouched — a claim is not a fire (see
+ * `markSeriesFired`). Returns the claim stamp to pass to
+ * `releaseOccurrenceClaim`, or null when another caller got there first or
+ * the series changed (paused, cancelled, edited) since it was read.
+ */
+export function claimDueOccurrence(
+  db: Database.Database,
+  seriesId: string,
+  observedProcessAfter: string,
+  nextRun: string | null,
+  claimedAt: string,
+): string | null {
+  claimedAt = scheduleTimestamp(claimedAt);
+  const changes = db
+    .prepare(
+      `UPDATE task_series
+          SET process_after = @nextRun,
+              status = CASE WHEN @nextRun IS NULL THEN 'cancelled' ELSE status END,
+              updated_at = @claimedAt
+        WHERE series_id = @seriesId
+          AND status = 'pending'
+          AND process_after IS NOT NULL
+          AND julianday(process_after) = julianday(@observed)`,
+    )
+    .run({
+      seriesId,
+      observed: scheduleTimestamp(observedProcessAfter),
+      nextRun: nextRun === null ? null : scheduleTimestamp(nextRun),
+      claimedAt,
+    }).changes;
+  return changes === 1 ? claimedAt : null;
+}
+
+/**
+ * Give back a claim whose occurrence was never written (mailbox or guard
+ * failure), so a later sweep retries the same tick. Restores only our own
+ * claim: any edit since (pause, cancel, update, another fire) changed
+ * `updated_at`, and that edit wins.
+ */
+export function releaseOccurrenceClaim(
+  db: Database.Database,
+  seriesId: string,
+  observedProcessAfter: string,
+  claimedAt: string,
+): boolean {
+  return (
+    db
+      .prepare(
+        `UPDATE task_series
+            SET process_after = @observed, status = 'pending', updated_at = @now
+          WHERE series_id = @seriesId AND updated_at = @claimedAt`,
+      )
+      .run({
+        seriesId,
+        observed: scheduleTimestamp(observedProcessAfter),
+        claimedAt,
+        now: new Date().toISOString(),
+      }).changes === 1
+  );
+}
+
+/** Stamp a claimed occurrence as fired (observability/telemetry; the Dream
+ * activity window is measured from it). */
+export function markSeriesFired(db: Database.Database, seriesId: string, firedAt: string): void {
+  firedAt = scheduleTimestamp(firedAt);
+  db.prepare(
+    `UPDATE task_series SET last_fired_at = @firedAt, updated_at = @firedAt
+      WHERE series_id = @seriesId`,
+  ).run({ seriesId, firedAt });
+}
+
 /** Cancel a series (matches by series id). Terminal. */
 export function cancelSeries(db: Database.Database, seriesId: string): number {
   return db

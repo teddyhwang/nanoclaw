@@ -1,6 +1,9 @@
 /** Host-only eligibility checks, before an occurrence or runtime exists.
- * False skips this tick silently; throws leave it due for retry. Guards must
- * not re-enter the current session mailbox (the scheduling sweep owns it).
+ * Guards run only in the one session that claimed the tick (see
+ * `claimDueOccurrence`), so a guard may log its decision once per tick.
+ * False skips this tick silently; throws give the claim back and leave it due
+ * for retry. Guards must not re-enter the current session mailbox (the
+ * scheduling sweep owns it).
  */
 import type { Session } from '../types.js';
 import type { TaskSeriesRow } from '../modules/scheduling/schedule-store.js';

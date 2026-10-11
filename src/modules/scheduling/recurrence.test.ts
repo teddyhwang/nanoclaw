@@ -20,7 +20,7 @@ import { addTaskMaterializationGuard } from '../../engine/task-materialization.j
 import { log } from '../../log.js';
 import { handleRecurrence } from './recurrence.js';
 import { _maintainSchedulingForTesting } from '../../host-sweep.js';
-import { listLiveSeries, openScheduleDbAt, updateSeries, upsertSeries } from './schedule-store.js';
+import { listLiveSeries, openScheduleDbAt, pauseSeries, updateSeries, upsertSeries } from './schedule-store.js';
 
 const TEST_ROOT = '/tmp/nanoclaw-recurrence-test';
 const AG = 'ag-test';
@@ -418,5 +418,154 @@ describe('production sweep: one invalid process_after in an agent group', () => 
     } finally {
       inbound.close();
     }
+  });
+});
+
+/**
+ * One agent group can hold several active sessions (Paik homes: an unwired
+ * maintenance session plus its Telegram chat session). Each sweeps the same
+ * host schedule.db and reads the due set before its first await, so both used
+ * to be able to materialize the same tick. The claim makes it exactly one.
+ */
+describe('cross-session claim of a due tick', () => {
+  const SESS_B = 'sess-test-b';
+  const IN_DB_B = path.join(BASE, AG, SESS_B, 'inbound.db');
+
+  beforeEach(() => {
+    fs.mkdirSync(path.dirname(IN_DB_B), { recursive: true });
+    ensureSchema(IN_DB_B, 'inbound');
+  });
+
+  async function sweepAs(sessionId: string, inboundPath: string): Promise<void> {
+    const db = openInboundDb(inboundPath);
+    try {
+      await handleRecurrence(wrapSqliteInbound(db), { ...session(), id: sessionId }, openSchedule);
+    } finally {
+      db.close();
+    }
+  }
+
+  function occurrences(inboundPath: string): number {
+    const db = openInboundDb(inboundPath);
+    try {
+      return (db.prepare("SELECT count(*) AS n FROM messages_in WHERE kind = 'task'").get() as { n: number }).n;
+    } finally {
+      db.close();
+    }
+  }
+
+  it.each([
+    ['no guard', false],
+    ['a slow async guard (the Dream activity lookup)', true],
+  ])('two sessions racing one recurring tick materialize it once (%s)', async (_label, withGuard) => {
+    seedSeries('dream-ag-test', '0 4 * * *', '2020-01-01T08:00:00.000Z');
+    let guardCalls = 0;
+    const remove = withGuard
+      ? addTaskMaterializationGuard(async () => {
+          guardCalls += 1;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          return true;
+        })
+      : () => {};
+    try {
+      await Promise.all([sweepAs(SESS, IN_DB), sweepAs(SESS_B, IN_DB_B)]);
+    } finally {
+      remove();
+    }
+
+    expect(occurrences(IN_DB) + occurrences(IN_DB_B)).toBe(1);
+    if (withGuard) expect(guardCalls).toBe(1);
+    const series = seriesRow('dream-ag-test');
+    expect(series.status).toBe('pending');
+    expect(new Date(series.process_after!).getTime()).toBeGreaterThan(Date.now());
+    expect(series.last_fired_at).toBeTruthy();
+
+    // Later sweeps of either session find nothing due.
+    await Promise.all([sweepAs(SESS, IN_DB), sweepAs(SESS_B, IN_DB_B)]);
+    expect(occurrences(IN_DB) + occurrences(IN_DB_B)).toBe(1);
+  });
+
+  it('two sessions racing a one-shot fire it once and cancel it', async () => {
+    seedSeries('reminder', null, '2020-01-01T00:00:00.000Z');
+
+    await Promise.all([sweepAs(SESS, IN_DB), sweepAs(SESS_B, IN_DB_B)]);
+
+    expect(occurrences(IN_DB) + occurrences(IN_DB_B)).toBe(1);
+    expect(seriesRow('reminder')).toMatchObject({ status: 'cancelled', process_after: null });
+  });
+
+  it('a declining guard consumes the tick once without stamping a fire', async () => {
+    seedSeries('dream-ag-test', '0 4 * * *', '2020-01-01T08:00:00Z');
+    let guardCalls = 0;
+    const remove = addTaskMaterializationGuard(async () => {
+      guardCalls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return false;
+    });
+    try {
+      await Promise.all([sweepAs(SESS, IN_DB), sweepAs(SESS_B, IN_DB_B)]);
+    } finally {
+      remove();
+    }
+
+    expect(guardCalls).toBe(1);
+    expect(occurrences(IN_DB) + occurrences(IN_DB_B)).toBe(0);
+    const series = seriesRow('dream-ag-test');
+    expect(series).toMatchObject({ status: 'pending', last_fired_at: null });
+    expect(new Date(series.process_after!).getTime()).toBeGreaterThan(Date.now());
+  });
+
+  it('gives the claim back when the mailbox write fails, so the next sweep retries the tick', async () => {
+    seedSeries('task-retry', '0 9 * * *', '2020-01-01T00:00:00Z');
+    const db = openInboundDb(IN_DB);
+    try {
+      const real = wrapSqliteInbound(db);
+      const failing = Object.create(real) as typeof real;
+      failing.materializeTaskOccurrence = async () => {
+        throw new Error('disk full');
+      };
+      vi.mocked(log.error).mockClear();
+      await handleRecurrence(failing, session(), openSchedule);
+    } finally {
+      db.close();
+    }
+
+    expect(occurrences(IN_DB)).toBe(0);
+    expect(seriesRow('task-retry')).toMatchObject({
+      status: 'pending',
+      process_after: '2020-01-01T00:00:00.000Z',
+      last_fired_at: null,
+    });
+    expect(vi.mocked(log.error).mock.calls[0]?.[1]).toMatchObject({ seriesId: 'task-retry', claimReleased: true });
+
+    await sweepAs(SESS_B, IN_DB_B);
+    expect(occurrences(IN_DB_B)).toBe(1);
+    expect(seriesRow('task-retry').last_fired_at).toBeTruthy();
+  });
+
+  it('a failed claim release never overwrites an edit made meanwhile', async () => {
+    seedSeries('task-paused', '0 9 * * *', '2020-01-01T00:00:00.000Z');
+    const remove = addTaskMaterializationGuard(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      const schedule = openSchedule();
+      try {
+        expect(pauseSeries(schedule, 'task-paused')).toBe(1);
+      } finally {
+        schedule.close();
+      }
+      throw new Error('history unavailable');
+    });
+    try {
+      vi.mocked(log.error).mockClear();
+      await sweepAs(SESS, IN_DB);
+    } finally {
+      remove();
+    }
+
+    expect(occurrences(IN_DB)).toBe(0);
+    const series = seriesRow('task-paused');
+    expect(series.status).toBe('paused');
+    expect(new Date(series.process_after!).getTime()).toBeGreaterThan(Date.now());
+    expect(vi.mocked(log.error).mock.calls[0]?.[1]).toMatchObject({ seriesId: 'task-paused', claimReleased: false });
   });
 });
