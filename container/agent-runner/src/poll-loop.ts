@@ -1417,6 +1417,7 @@ export async function processQuery(
   let midTurnSent = 0;
   let turnStartSeq = maxOutboundSeq();
   let midTurnTail = '';
+  let deliveredAssemblyFragment: string | undefined;
   // Prompt queue for the exchange hook — each result event consumes the
   // oldest unanswered prompt. Retries append the original user prompt at
   // their position in the provider input queue.
@@ -2024,6 +2025,7 @@ export async function processQuery(
         const emitsMidTurnText = query.delivery?.emitsMidTurnText ?? defaultMidTurnText;
         if (deliveryProviderName !== textProviderName) {
           midTurnTail = '';
+          deliveredAssemblyFragment = undefined;
           textProviderName = deliveryProviderName;
         }
         const resultPushEnd = deliveryProviderName === 'claude' ? pushAddressed.length : resultIndex + 1;
@@ -2058,6 +2060,7 @@ export async function processQuery(
             });
             midTurnSent += scan.delivered;
             midTurnTail = scan.tail;
+            deliveredAssemblyFragment = scan.deliveredAssemblyFragment;
             if (fireCtx && scan.dispatched.length > 0) fireCtx.dispatched.push(...scan.dispatched);
           }
         } else if (event.type === 'result') {
@@ -2104,6 +2107,7 @@ export async function processQuery(
             midTurnSent = 0;
             turnStartSeq = maxOutboundSeq();
             midTurnTail = '';
+            deliveredAssemblyFragment = undefined;
             const next = queuedTurns.shift();
             if (next) adoptTurn(next);
             else answering = false;
@@ -2136,6 +2140,7 @@ export async function processQuery(
               retryDedupSince ?? resultBoundaryAt,
               {
                 midTurnSent,
+                deliveredAssemblyFragment,
                 suppressDelivery: emitsMidTurnText,
                 turnDelivered: emitsMidTurnText ? midTurnSent > 0 || chatRowWrittenSince(turnStartSeq) : undefined,
                 errorResult: event.isError === true,
@@ -2336,6 +2341,7 @@ export async function processQuery(
           midTurnSent = 0;
           turnStartSeq = maxOutboundSeq();
           midTurnTail = '';
+          deliveredAssemblyFragment = undefined;
           const next = queuedTurns.shift();
           if (next) adoptTurn(next);
           else answering = false;
@@ -2638,6 +2644,8 @@ interface MessageBlock {
 
 /** Result-door behavior for providers that stream assistant text. */
 export interface ResultDispatchOptions {
+  /** Exact streamed fragment already consumed by a delivered cross-segment block. */
+  deliveredAssemblyFragment?: string;
   midTurnSent?: number;
   suppressDelivery?: boolean;
   turnDelivered?: boolean;
@@ -2646,6 +2654,7 @@ export interface ResultDispatchOptions {
 }
 
 export interface MidTurnScanResult {
+  deliveredAssemblyFragment?: string;
   delivered: number;
   tail: string;
   dispatched: DispatchedMessage[];
@@ -2806,6 +2815,7 @@ export async function deliverMidTurnBlocks(
   const seen = new Set<string>();
   const dispatched: DispatchedMessage[] = [];
   let delivered = 0;
+  let deliveredAssemblyFragment: string | undefined;
   let match: RegExpExecArray | null;
 
   while ((match = messageRe.exec(visible)) !== null) {
@@ -2826,6 +2836,13 @@ export async function deliverMidTurnBlocks(
     const destination = findByName(block.to);
     if (!destination) continue;
 
+    // The SDK result may repeat only the last fragment, not the assembled
+    // block. Prove that the ENTIRE event is the suffix of this valid block;
+    // unrelated trailing prose/malformed intent must still trigger a retry.
+    const assembledFragment = carry && text && match[0].length > text.length && match[0].endsWith(text);
+    const recordAssembly = () => {
+      if (assembledFragment) deliveredAssemblyFragment = text;
+    };
     const dedupKey = `${block.to} ${body.replace(/\s+/g, ' ')}`;
     if (seen.has(dedupKey)) {
       log(`Suppressing duplicate mid-turn <message to="${block.to}"> block`);
@@ -2835,10 +2852,12 @@ export async function deliverMidTurnBlocks(
 
     const dedupSince = options.taskTurn ? (options.taskTurnDedupSince ?? options.turnStartedAt) : options.turnStartedAt;
     if (dedupSince && wasTextWrittenToDestinationSince(destination, body, dedupSince)) {
+      recordAssembly();
       log(`Suppressing duplicate mid-turn <message to="${block.to}"> already delivered via MCP tool`);
       continue;
     }
     if (turnStartSeq !== undefined && wasWrittenInSeqWindow(destination, body, turnStartSeq, segmentStartSeq)) {
+      recordAssembly();
       log(`Mid-turn <message to="${block.to}"> repeats an earlier segment in this turn — skipped`);
       continue;
     }
@@ -2848,12 +2867,13 @@ export async function deliverMidTurnBlocks(
       log(`Mid-turn <message to="${block.to}"> dropped: ${sent.reason ?? 'not deliverable'}`);
       continue;
     }
+    recordAssembly();
     delivered++;
     dispatched.push({ destination: block.to, body });
     log(`Mid-turn delivery: <message to="${block.to}"> (${body.length} chars)`);
   }
 
-  return { delivered, tail, dispatched };
+  return { delivered, tail, dispatched, deliveredAssemblyFragment };
 }
 
 /**
@@ -2965,12 +2985,15 @@ export async function dispatchResultText(
   // A tool acknowledgment proves only that a chat row was written, not that
   // the final answer was delivered. An orphan closing tag (including a bare
   // <message> opener with no destination) is explicit failed message intent.
-  // Retry its wrapping even after an acknowledgment, but never expose this
+  // A proven cross-segment delivery may leave only its closing fragment in
+  // the SDK result: that exact fragment is not new failed message intent.
+  // Retry other wrapping even after an acknowledgment, but never expose this
   // scratchpad directly or retry an identical tool-send echo. Ordinary private
   // bookkeeping after a successful tool send keeps its existing silent path.
   const orphanMessageBody = scratchpad.replace(/<\/?message\b[^>]*>/g, '').trim();
   const undeliveredMalformedMessage =
     resultBlocks === 0 &&
+    originalText !== options.deliveredAssemblyFragment &&
     /<\/message\s*>/.test(scratchpad) &&
     !!orphanMessageBody &&
     !(turnStartedAt && hasChatMessageTextSince(turnStartedAt, orphanMessageBody));

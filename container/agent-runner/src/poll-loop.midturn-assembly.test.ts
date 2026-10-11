@@ -97,6 +97,61 @@ describe('cross-segment block assembly', () => {
     expect(pushes).toHaveLength(0);
   });
 
+  it.each([
+    ['different final', false, 'new answer</message>'],
+    ['later text event', true, 'tail</message>'],
+    ['extra final prose', false, 'tail</message> new answer</message>'],
+  ])('still nudges failed message intent after assembly: %s', async (_name, laterText, finalText) => {
+    seedDest();
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'text', text: '<message to="discord-main">delivered ' };
+      yield { type: 'text', text: 'tail</message>' };
+      if (laterText) yield { type: 'text', text: 'tail</message>' };
+      yield { type: 'result', text: finalText };
+    }
+    const pushes = await run(events());
+    expect(deliveredTexts()).toEqual(['delivered tail']);
+    expect(pushes.filter((p) => p.includes('was not delivered'))).toHaveLength(1);
+  });
+
+  it('does not prove delivery for an assembled block with an unknown destination', async () => {
+    seedDest();
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'text', text: '<message to="missing">undelivered ' };
+      yield { type: 'text', text: 'tail</message>' };
+      yield { type: 'result', text: 'tail</message>' };
+    }
+    const pushes = await run(events());
+    expect(deliveredTexts()).toEqual([]);
+    expect(pushes.filter((p) => p.includes('was not delivered'))).toHaveLength(1);
+  });
+
+  it('recognizes an assembled fragment whose full body was already delivered this turn', async () => {
+    seedDest();
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'text', text: '<message to="discord-main">delivered tail</message>' };
+      yield { type: 'text', text: '<message to="discord-main">delivered ' };
+      yield { type: 'text', text: 'tail</message>' };
+      yield { type: 'result', text: 'tail</message>' };
+    }
+    const pushes = await run(events());
+    expect(deliveredTexts()).toEqual(['delivered tail']);
+    expect(pushes).toHaveLength(0);
+  });
+
+  it('does not reuse assembly proof in a later result', async () => {
+    seedDest();
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'text', text: '<message to="discord-main">delivered ' };
+      yield { type: 'text', text: 'tail</message>' };
+      yield { type: 'result', text: 'tail</message>' };
+      yield { type: 'result', text: 'tail</message>' };
+    }
+    const pushes = await run(events());
+    expect(deliveredTexts()).toEqual(['delivered tail']);
+    expect(pushes.filter((p) => p.includes('was not delivered'))).toHaveLength(1);
+  });
+
   it('an open tag literally split mid-token ("<mess" / "age to=…") reunites and the block delivers', async () => {
     seedDest();
     async function* events(): AsyncGenerator<ProviderEvent> {
