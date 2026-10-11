@@ -22,7 +22,13 @@ afterEach(() => {
 
 // Real poll loop + SQLite mailboxes; result-only contract matches Pi RPC.
 // Simulate the tool ack before the provider's malformed substantive final.
-async function runFixture(final: string, retry: string, streamed = false) {
+async function runFixture(
+  final: string,
+  retry: string,
+  streamed = false,
+  toolText: string | null = 'I will prepare the plan.',
+  delivered = false,
+) {
   const pushed: string[] = [];
   let toolCalls = 0;
   const provider: AgentProvider = {
@@ -37,15 +43,23 @@ async function runFixture(final: string, retry: string, streamed = false) {
       abort: () => {},
       events: (async function* (): AsyncGenerator<ProviderEvent> {
         yield { type: 'init', continuation: 'synthetic' };
-        toolCalls++;
-        await writeMessageOut({
-          id: 'ack',
-          kind: 'chat',
-          channel_type: 'whatsapp',
-          platform_id: 'synthetic-chat',
-          in_reply_to: 'request',
-          content: JSON.stringify({ text: 'I will prepare the plan.' }),
-        });
+        if (toolText !== null) {
+          toolCalls++;
+          await writeMessageOut({
+            id: 'ack',
+            kind: 'chat',
+            channel_type: 'whatsapp',
+            platform_id: 'synthetic-chat',
+            in_reply_to: 'request',
+            content: JSON.stringify({ text: toolText }),
+          });
+          if (delivered)
+            getInboundDb()
+              .prepare(
+                "INSERT INTO delivered (message_out_id, platform_message_id, status, delivered_at) VALUES ('ack', 'synthetic-receipt', 'delivered', ?)",
+              )
+              .run(new Date().toISOString());
+        }
         if (streamed) yield { type: 'text', text: final };
         yield { type: 'result', text: final };
         if (pushed.length) {
@@ -83,7 +97,7 @@ describe.each([false, true])('acknowledgment must not hide malformed substantive
   it.each([`${answer}</message>`, `<message>${answer}</message>`])(
     'retries malformed wrapping after tool ack: %s',
     async (final) => {
-      const result = await runFixture(final, wrapped, streamed);
+      const result = await runFixture(final, wrapped, streamed, 'I will prepare the plan.', true);
       expect(result.pushed).toHaveLength(1);
       expect(result.toolCalls).toBe(1);
       expect(result.chat.map((row) => JSON.parse(row.content).text)).toEqual(['I will prepare the plan.', answer]);
@@ -91,13 +105,30 @@ describe.each([false, true])('acknowledgment must not hide malformed substantive
     },
   );
 
-  it('exhausts one retry with a scoped failure, never raw prose', async () => {
-    const result = await runFixture(`${answer}</message>`, `${answer}</message>`, streamed);
+  it.each([`${answer}</message>`, ''])(
+    'exhausts one retry with a scoped failure, never raw prose: %s',
+    async (retry) => {
+      const result = await runFixture(`${answer}</message>`, retry, streamed);
+      expect(result.pushed).toHaveLength(1);
+      expect(result.chat.map((row) => JSON.parse(row.content).text)).toEqual([
+        'I will prepare the plan.',
+        "I couldn't complete that request or produce a reliable reply. Please try again.",
+      ]);
+    },
+  );
+
+  it('rewraps malformed output without a prior acknowledgment', async () => {
+    const result = await runFixture(`${answer}</message>`, wrapped, streamed, null);
     expect(result.pushed).toHaveLength(1);
-    expect(result.chat.map((row) => JSON.parse(row.content).text)).toEqual([
-      'I will prepare the plan.',
-      "I couldn't complete that request or produce a reliable reply. Please try again.",
-    ]);
+    expect(result.toolCalls).toBe(0);
+    expect(result.chat.map((row) => JSON.parse(row.content).text)).toEqual([answer]);
+  });
+
+  it.each([false, true])('does not duplicate substance already queued or delivered (receipt=%s)', async (delivered) => {
+    const result = await runFixture(`${answer}</message>`, wrapped, streamed, answer, delivered);
+    expect(result.pushed).toHaveLength(0);
+    expect(result.toolCalls).toBe(1);
+    expect(result.chat.map((row) => JSON.parse(row.content).text)).toEqual([answer]);
   });
 
   it.each([
