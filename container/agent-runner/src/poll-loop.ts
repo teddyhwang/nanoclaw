@@ -1432,20 +1432,23 @@ export async function processQuery(
   type QueuedTurn = {
     routing: RoutingContext;
     unwrappedNudged: boolean;
+    retryDedupSince?: string;
   };
+  let retryDedupSince: string | undefined;
   const queuedTurns: QueuedTurn[] = [];
   const adoptTurn = (next: QueuedTurn): void => {
     Object.assign(routing, next.routing);
     unwrappedNudged = next.unwrappedNudged;
+    retryDedupSince = next.retryDedupSince;
     publishReplyRoute(routing);
     answering = true;
   };
   // A retry is another provider input, behind any follow-ups already pushed.
   // Preserve its original route, prompt and retry guards until it is answered.
-  const pushRetry = (prompt: string): void => {
+  const pushRetry = (prompt: string, dedupSince?: string): void => {
     noteInput();
     query.push(prompt);
-    queuedTurns.push({ routing: { ...routing }, unwrappedNudged });
+    queuedTurns.push({ routing: { ...routing }, unwrappedNudged, retryDedupSince: dedupSince });
     archivePrompts.push(archivePrompts[0] ?? initialPrompt);
   };
 
@@ -2049,9 +2052,9 @@ export async function processQuery(
             const resultAddressed = pushAddressed[resultIndex] ?? false;
             const taskTurn = !!fireCtx && !resultAddressed;
             const scan = await deliverMidTurnBlocks(event.text, routing, turnStartSeq, midTurnTail, {
-              turnStartedAt: resultBoundaryAt,
+              turnStartedAt: retryDedupSince ?? resultBoundaryAt,
               taskTurn,
-              taskTurnDedupSince: resultBoundaryAt,
+              taskTurnDedupSince: retryDedupSince ?? resultBoundaryAt,
             });
             midTurnSent += scan.delivered;
             midTurnTail = scan.tail;
@@ -2127,10 +2130,10 @@ export async function processQuery(
               authFailure ? AUTH_FAILURE_USER_TEXT : (event.text ?? ''),
               routing,
               resultAddressed,
-              resultBoundaryAt,
+              retryDedupSince ?? resultBoundaryAt,
               compactedSinceLastResult,
               isTaskTurn,
-              resultBoundaryAt,
+              retryDedupSince ?? resultBoundaryAt,
               {
                 midTurnSent,
                 suppressDelivery: emitsMidTurnText,
@@ -2195,7 +2198,10 @@ export async function processQuery(
                   `<system>Your response was not delivered — it was not wrapped in <message to="name">...</message> blocks. ` +
                     `All output must be wrapped: use <message to="name"> for content to send, or <internal> for scratchpad. ` +
                     `Your destinations: ${names}. ` +
-                    `Please re-send your response with the correct wrapping.</system>`,
+                    `Please re-send only the missing response with the correct wrapping. ` +
+                    `Earlier tool messages may be only acknowledgments; do not repeat messages already sent or re-run tools. ` +
+                    `Keep tool results and internal notes inside <internal>.</system>`,
+                  retryDedupSince ?? resultBoundaryAt,
                 );
                 pushAddressed.push(resultAddressed);
                 pushSuperseded.push(false);
@@ -2956,7 +2962,19 @@ export async function dispatchResultText(
 
   const deliveredViaTool = !!turnStartedAt && countChatMessagesSince(turnStartedAt) > 0;
   const anythingDelivered = options.suppressDelivery ? options.turnDelivered === true : sent > 0 || deliveredViaTool;
-  const hasUnwrapped = !anythingDelivered && !!scratchpad;
+  // A tool acknowledgment proves only that a chat row was written, not that
+  // the final answer was delivered. An orphan closing tag (including a bare
+  // <message> opener with no destination) is explicit failed message intent.
+  // Retry its wrapping even after an acknowledgment, but never expose this
+  // scratchpad directly or retry an identical tool-send echo. Ordinary private
+  // bookkeeping after a successful tool send keeps its existing silent path.
+  const orphanMessageBody = scratchpad.replace(/<\/?message\b[^>]*>/g, '').trim();
+  const undeliveredMalformedMessage =
+    resultBlocks === 0 &&
+    /<\/message\s*>/.test(scratchpad) &&
+    !!orphanMessageBody &&
+    !(turnStartedAt && hasChatMessageTextSince(turnStartedAt, orphanMessageBody));
+  const hasUnwrapped = (!anythingDelivered && !!scratchpad) || undeliveredMalformedMessage;
 
   if (hasUnwrapped) {
     log('WARNING: agent output had no deliverable <message> block — suppressing unwrapped text and nudging retry');
