@@ -23,7 +23,7 @@
  */
 import { normalizeOptions, type RawOption } from '../../channels/ask-question.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
-import { createPendingApproval, deletePendingApproval, getSession, getPendingApproval } from '../../db/sessions.js';
+import { createPendingApproval, deletePendingApproval, getSession } from '../../db/sessions.js';
 import { getDeliveryAdapter } from '../../delivery.js';
 import { requestWake } from '../../request-wake.js';
 import { log } from '../../log.js';
@@ -438,96 +438,4 @@ export async function requestConfirmation(opts: RequestConfirmationOptions): Pro
 
   log.info('Confirmation requested', { action, approvalId, agentName, actorId });
   return approvalId;
-}
-
-/** Host-only owner gate. No Session, agent wake, reason capture or admin fallback. */
-export interface HostApprovalContext {
-  approval: PendingApproval;
-  userId: string;
-  outcome: 'approve' | 'reject';
-}
-type HostApprovalHandler = (context: HostApprovalContext) => Promise<void>;
-const hostApprovalHandlers = new Map<string, HostApprovalHandler>();
-export function registerHostApprovalHandler(action: string, handler: HostApprovalHandler): void {
-  if (action !== 'auto_escalation_host_dream_gate') throw new Error('Unsupported host approval action');
-  hostApprovalHandlers.set(action, handler);
-}
-export function getHostApprovalHandler(action: string): HostApprovalHandler | undefined {
-  return hostApprovalHandlers.get(action);
-}
-export async function requestHostOwnerApproval(opts: {
-  approvalId: string;
-  requestId: string;
-  approverUserId: string;
-  action: 'auto_escalation_host_dream_gate';
-  payload: Record<string, unknown>;
-  title: string;
-  question: string;
-}): Promise<'pending' | 'approved' | 'rejected' | 'unavailable'> {
-  if (
-    !hostApprovalHandlers.has(opts.action) ||
-    !opts.approverUserId ||
-    !/^appr-dream-[a-f0-9]{64}$/.test(opts.approvalId)
-  )
-    return 'unavailable';
-  const serialized = JSON.stringify(opts.payload);
-  const existing = await getPendingApproval(opts.approvalId);
-  if (existing) {
-    if (
-      existing.session_id !== null ||
-      existing.action !== opts.action ||
-      existing.request_id !== opts.requestId ||
-      existing.approver_user_id !== opts.approverUserId ||
-      existing.payload !== serialized
-    )
-      return 'unavailable';
-    return existing.status === 'pending' ? 'pending' : existing.status === 'approved' ? 'approved' : 'rejected';
-  }
-  const target = await pickApprovalDelivery([opts.approverUserId], '');
-  const adapter = getDeliveryAdapter();
-  if (!target || target.userId !== opts.approverUserId || !adapter) return 'unavailable';
-  const options = APPROVAL_OPTIONS.slice(0, 2);
-  await createPendingApproval({
-    approval_id: opts.approvalId,
-    session_id: null,
-    agent_group_id: null,
-    request_id: opts.requestId,
-    action: opts.action,
-    payload: serialized,
-    created_at: new Date().toISOString(),
-    channel_type: target.messagingGroup.channel_type,
-    platform_id: target.messagingGroup.platform_id,
-    instance: target.messagingGroup.instance ?? null,
-    title: opts.title,
-    question: opts.question,
-    options_json: JSON.stringify(normalizeOptions(options)),
-    approver_user_id: opts.approverUserId,
-  });
-  try {
-    await adapter.deliver(
-      target.messagingGroup.channel_type,
-      target.messagingGroup.platform_id,
-      null,
-      'chat-sdk',
-      JSON.stringify({
-        type: 'ask_question',
-        questionId: opts.approvalId,
-        title: opts.title,
-        question: opts.question,
-        options,
-      }),
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      target.messagingGroup.instance,
-    );
-    return 'pending';
-    // eslint-disable-next-line no-catch-all/no-catch-all -- any delivery failure is 'unavailable'; its text is never relayed
-  } catch {
-    await deletePendingApproval(opts.approvalId);
-    // Error strings may contain private transport details; never relay/log them.
-    return 'unavailable';
-  }
 }

@@ -300,9 +300,6 @@ export {
 // owner approval). Engine-side because the delivery adapter + response
 // registry live here. See knowledge/projects/sensitive-action-approvals.md.
 export {
-  requestHostOwnerApproval,
-  registerHostApprovalHandler,
-  type HostApprovalContext,
   requestApproval,
   requestConfirmation,
   registerApprovalHandler,
