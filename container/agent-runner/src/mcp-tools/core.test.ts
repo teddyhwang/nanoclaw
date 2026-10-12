@@ -379,7 +379,7 @@ describe('send_message / send_file — thread for a channel destination', () => 
     ).run();
     db.prepare(
       `INSERT INTO messages_in (seq, id, channel_type, platform_id, thread_id, kind, trigger, status, timestamp, content)
-       VALUES (2, 'incident-start-platform-id', 'discord', 'discord:gid:cid', NULL, 'chat-sdk', 1, 'completed', '2026-05-19T12:00:00Z', '{}')`,
+       VALUES (2, 'incident-start-platform-id', 'discord', 'discord:gid:cid', NULL, 'chat-sdk', 0, 'completed', '2026-05-19T12:00:00Z', '{}')`,
     ).run();
     setCurrentBatchReplyTarget(null);
 
@@ -390,7 +390,7 @@ describe('send_message / send_file — thread for a channel destination', () => 
     expect(out[0].in_reply_to).toBe('incident-start-platform-id');
   });
 
-  it('rejects explicit reply_to_message_id from a different destination', async () => {
+  it('posts without the invalid cross-destination reply and warns in the tool result', async () => {
     const db = getInboundDb();
     db.prepare(
       `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
@@ -403,11 +403,13 @@ describe('send_message / send_file — thread for a channel destination', () => 
 
     const res = await sendMessage.handler({ to: 'chan', text: 'resolved', reply_to_message_id: 2 });
 
-    expect(res.isError).toBe(true);
-    expect(getUndeliveredMessages()).toHaveLength(0);
+    expect(res.isError).not.toBe(true);
+    expect(res.content[0].text).toContain('Posting without a reply link');
+    expect(getUndeliveredMessages()).toHaveLength(1);
+    expect(getUndeliveredMessages()[0].in_reply_to).toBeNull();
   });
 
-  it('rejects an undelivered outbound message as an explicit reply target', async () => {
+  it('posts without an undelivered outbound reply target and warns', async () => {
     const db = getInboundDb();
     db.prepare(
       `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
@@ -422,8 +424,10 @@ describe('send_message / send_file — thread for a channel destination', () => 
 
     const res = await sendMessage.handler({ to: 'chan', text: 'resolved', reply_to_message_id: 3 });
 
-    expect(res.isError).toBe(true);
-    expect(getUndeliveredMessages()).toHaveLength(1);
+    expect(res.isError).not.toBe(true);
+    expect(res.content[0].text).toContain('Posting without a reply link');
+    expect(getUndeliveredMessages()).toHaveLength(2);
+    expect(getUndeliveredMessages()[1].in_reply_to).toBeNull();
   });
 });
 

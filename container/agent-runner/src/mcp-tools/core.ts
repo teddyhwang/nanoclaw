@@ -230,7 +230,8 @@ export const sendMessage: McpToolDefinition = {
     if ('error' in routing) return err(routing.error);
 
     const explicitReply = resolveExplicitReplyTarget(args.reply_to_message_id, routing);
-    if ('error' in explicitReply) return err(explicitReply.error);
+    const warning = 'error' in explicitReply ? `${explicitReply.error} Posting without a reply link.` : '';
+    if (warning) log(`WARNING: ${warning}`);
 
     const id = generateId();
     // A `sandbox:`/`file://` markdown link is a file handoff the model
@@ -240,7 +241,12 @@ export const sendMessage: McpToolDefinition = {
     const files = attachLocalFileLinks(swept.links, id, { log });
     const seq = await writeMessageOut({
       id,
-      in_reply_to: explicitReply.inReplyTo ?? resolveInReplyTo(routing.channel_type, routing.platform_id),
+      in_reply_to:
+        args.reply_to_message_id != null && args.reply_to_message_id !== ''
+          ? 'error' in explicitReply
+            ? null
+            : explicitReply.inReplyTo
+          : resolveInReplyTo(routing.channel_type, routing.platform_id),
       kind: 'chat',
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,
@@ -251,12 +257,12 @@ export const sendMessage: McpToolDefinition = {
     log(`send_message: #${seq} → ${routing.resolvedName}`);
     if (files.length > 0) {
       return ok(
-        `Message sent to ${routing.resolvedName} (id: ${seq}). ` +
-          `${files.length} local-file link(s) in your text were delivered as real attachments (${files.join(', ')}) ` +
+        `Message queued to ${routing.resolvedName} (id: ${seq}). ${warning} ` +
+          `${files.length} local-file link(s) in your text were queued as real attachments (${files.join(', ')}) ` +
           `and the unusable link markup was removed — use send_file directly next time.`,
       );
     }
-    return ok(`Message sent to ${routing.resolvedName} (id: ${seq})`);
+    return ok(`Message queued to ${routing.resolvedName} (id: ${seq}). ${warning}`);
   },
 };
 

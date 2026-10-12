@@ -352,13 +352,13 @@ describe('SQLite runner mailbox Optimus semantics', () => {
     expect(mailbox.getPendingMessages(10, false).map(({ id }) => id)).toEqual(['legacy']);
   });
 
-  test('reply targets reject accumulated/undelivered rows and require delivered platform ids', async () => {
+  test('reply targets accept accumulated chat rows and require delivered platform ids', async () => {
     const { inbound } = initTestSessionDb();
     const mailbox = new SqliteAgentMailbox();
     insertInbound(inbound, { id: 'ambient', sequence: 2, trigger: 0 });
     insertInbound(inbound, { id: 'trigger', sequence: 4 });
 
-    expect(mailbox.getReplyTargetMessageIdBySeq(2)).toBeNull();
+    expect(mailbox.getReplyTargetMessageIdBySeq(2)).toBe('ambient');
     expect(mailbox.getReplyTargetMessageIdBySeq(4)).toBe('trigger');
 
     const outboundSequence = await mailbox.writeMessageOut({ id: 'outbound', kind: 'chat', content: '{}' });

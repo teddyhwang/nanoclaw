@@ -48,6 +48,7 @@ import { createChannelDeliveryAdapter } from './channels/channel-registry.js';
 import { createDestination } from './modules/agent-to-agent/db/agent-destinations.js';
 import { getAgentMailbox } from './mailbox/index.js';
 import { log } from './log.js';
+import { engineEvents } from './engine/events.js';
 
 function openInboundDb(agentGroupId: string, sessionId: string): Database.Database {
   return new Database(inboundDbPath(agentGroupId, sessionId));
@@ -249,6 +250,10 @@ describe('deliverSessionMessages — retry and permanent failure', () => {
     const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
     insertOutbound('ag-1', session.id, 'out-flaky');
 
+    const failedEvents: string[] = [];
+    const unsubscribe = engineEvents.on('outbound.failed', ({ err }) => {
+      failedEvents.push(String(err));
+    });
     let callCount = 0;
     setDeliveryAdapter({
       async deliver() {
@@ -283,6 +288,21 @@ describe('deliverSessionMessages — retry and permanent failure', () => {
     // Verify the message is in the delivered table with 'failed' status
     const delivered = await withMailboxSession('ag-1', session.id, (mailbox) => mailbox.getDeliveredIds());
     expect(delivered.has('out-flaky')).toBe(true);
+    expect(failedEvents).toHaveLength(2);
+    expect(failedEvents[0]).toContain('Delivery retrying (out-flaky): network timeout');
+    expect(failedEvents[1]).toContain('Delivery failed (out-flaky): network timeout');
+    const db = openInboundDb('ag-1', session.id);
+    const feedback = db
+      .prepare("SELECT kind, trigger, content FROM messages_in WHERE id LIKE 'delivery-feedback:%' ORDER BY seq")
+      .all() as { kind: string; trigger: number; content: string }[];
+    db.close();
+    expect(feedback.map((row) => [row.kind, row.trigger])).toEqual([
+      ['system', 0],
+      ['system', 0],
+    ]);
+    expect(feedback.map((row) => JSON.parse(row.content).status)).toEqual(['retrying', 'failed']);
+    expect(JSON.parse(feedback[1].content).result.reason).toBe('network timeout');
+    unsubscribe();
   });
 
   it('does not acknowledge a message when no channel adapter is registered (#2995)', async () => {

@@ -12,6 +12,7 @@ import { AUTH_FAILURE_USER_TEXT } from './provider-auth-failure.js';
 import { confirmationGatePaused, noteToolResult, resetConfirmationGateState } from './confirmation-gate-state.js';
 import { MockProvider } from './providers/mock.js';
 import {
+  prependDeliveryFeedback,
   shouldSendErrorResponseForBatch,
   dispatchResultText,
   enforceDreamSessionRotation,
@@ -775,7 +776,7 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(out[0].in_reply_to).toBe('incident-start-platform-id');
   });
 
-  it('rejects explicit reply_to_message_id targeting an accumulated trigger=0 inbound row', async () => {
+  it('natively replies to an accumulated trigger=0 inbound chat row', async () => {
     insertChannelDestination('boys-night');
     getInboundDb()
       .prepare(
@@ -785,15 +786,69 @@ describe('dispatchResultText safety net (local fork patch)', () => {
       .run(ROUTING.channelType, ROUTING.platformId);
 
     const result = await dispatchResultText(
-      '<message to="boys-night" reply_to_message_id="#444">This should not reach chat.</message>',
+      '<message to="boys-night" reply_to_message_id="#444">Ambient reply.</message>',
       ROUTING,
     );
 
-    expect(result.sent).toBe(0);
-    expect(result.dispatched).toHaveLength(0);
+    expect(result.sent).toBe(1);
     const out = getUndeliveredMessages();
-    expect(out.every((row) => row.kind !== 'chat')).toBe(true);
+    expect(out[0].in_reply_to).toBe('ambient-side-comment-platform-id');
+    expect(prependDeliveryFeedback('next turn')).toBe('next turn');
   });
+
+  it('consumes host delivery failures in the next turn even after ambient context ages out', () => {
+    insertMessage(
+      'delivery-feedback:post:failed',
+      'system',
+      {
+        action: 'outbound_delivery',
+        status: 'failed',
+        result: { reason: 'adapter timeout', messageId: 'post' },
+      },
+      { trigger: 0, timestamp: '2020-01-01T00:00:00Z' },
+    );
+    expect(getPendingMessages()).toHaveLength(0);
+    expect(prependDeliveryFeedback('next turn')).toContain('adapter timeout');
+    expect(prependDeliveryFeedback('later turn')).toBe('later turn');
+  });
+
+  for (const target of ['cross-channel', 'cross-platform', 'unknown', 'reaction', 'system', 'task', 'malformed']) {
+    it(`posts without a reply link and returns context feedback for ${target} target`, async () => {
+      insertChannelDestination('boys-night');
+      if (!['unknown', 'malformed'].includes(target)) {
+        getInboundDb()
+          .prepare(
+            `INSERT INTO messages_in (seq, id, channel_type, platform_id, kind, trigger, status, timestamp, content)
+           VALUES (444, 'not-replyable', ?, ?, ?, 1, 'completed', '2026-06-04T14:15:24Z', '{}')`,
+          )
+          .run(
+            target === 'cross-platform' ? 'telegram' : ROUTING.channelType,
+            target === 'cross-channel' ? 'other-channel' : ROUTING.platformId,
+            ['reaction', 'system', 'task'].includes(target) ? target : 'chat-sdk',
+          );
+      }
+      const warnings: string[] = [];
+      const logger = spyOn(console, 'error').mockImplementation((...args) => {
+        warnings.push(args.join(' '));
+      });
+      try {
+        const result = await dispatchResultText(
+          `<message to="boys-night" reply_to_message_id="${target === 'malformed' ? 'garbage' : '#444'}">Still post this.</message>`,
+          ROUTING,
+        );
+        expect(result.sent).toBe(1);
+        const out = getUndeliveredMessages().filter((row) => row.kind === 'chat');
+        expect(out).toHaveLength(1);
+        expect(out[0].in_reply_to).toBeNull();
+        expect(JSON.parse(out[0].content).text).toBe('Still post this.');
+        expect(warnings.join(' ')).toContain('posting without a reply link');
+        expect(prependDeliveryFeedback('next turn')).toContain('posting without a reply link');
+        expect(prependDeliveryFeedback('later turn')).toBe('later turn');
+      } finally {
+        logger.mockRestore();
+      }
+    });
+  }
 
   it('same-channel dispatch reply pill stays on the turn-authoritative target even when a NEWER trigger=1 inbound exists in the channel', async () => {
     // 2026-05-23 New York Crew WhatsApp regression: while Optimus was

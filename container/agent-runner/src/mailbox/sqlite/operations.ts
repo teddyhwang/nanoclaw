@@ -128,6 +128,24 @@ export function sqliteGetPendingMessages(isFirstPoll: boolean, requestedLimit: n
   return [...wake, ...context].sort(compareMessageOrderAsc);
 }
 
+export function sqliteGetDeliveryFeedbackMessages(limit: number): MessageInRow[] {
+  const acknowledged = new Set(
+    (getOutboundDb().prepare('SELECT message_id FROM processing_ack').all() as Array<{ message_id: string }>).map(
+      ({ message_id }) => message_id,
+    ),
+  );
+  return withInboundDb(
+    (db) =>
+      db
+        .prepare(
+          "SELECT * FROM messages_in WHERE kind = 'system' AND status = 'pending' AND id GLOB 'delivery-feedback:*' ORDER BY seq ASC LIMIT ?",
+        )
+        .all(Math.max(0, limit) + acknowledged.size) as MessageInRow[],
+  )
+    .filter(({ id }) => !acknowledged.has(id))
+    .slice(0, limit);
+}
+
 function mark(ids: string[], status: string): void {
   if (ids.length === 0) return;
   const db = getOutboundDb();
@@ -321,15 +339,15 @@ export function sqliteGetMessageIdBySeq(sequence: number): string | null {
 export function sqliteGetReplyTargetMessageIdBySeq(sequence: number): string | null {
   const inboundRow = withInboundDb(
     (inbound) =>
-      inbound.prepare('SELECT id, trigger FROM messages_in WHERE seq = ?').get(sequence) as
-        | { id: string; trigger: number }
+      inbound.prepare('SELECT id, kind FROM messages_in WHERE seq = ?').get(sequence) as
+        | { id: string; kind: string }
         | undefined,
   );
-  if (inboundRow) return inboundRow.trigger === 1 ? inboundRow.id : null;
+  if (inboundRow) return ['chat', 'chat-sdk'].includes(inboundRow.kind) ? inboundRow.id : null;
 
-  const outboundRow = getOutboundDb().prepare('SELECT id FROM messages_out WHERE seq = ?').get(sequence) as
-    | { id: string }
-    | undefined;
+  const outboundRow = getOutboundDb()
+    .prepare("SELECT id FROM messages_out WHERE seq = ? AND kind = 'chat'")
+    .get(sequence) as { id: string } | undefined;
   if (!outboundRow) return null;
 
   const delivered = withInboundDb(

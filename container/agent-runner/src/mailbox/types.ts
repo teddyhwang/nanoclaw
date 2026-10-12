@@ -68,6 +68,8 @@ export interface TaskFireRecord {
 
 export interface MailboxOperations {
   getPendingMessages(limit: number, isFirstPoll: boolean): InboundMessage[];
+  /** Durable host delivery feedback; never wakes the agent or competes for chat context slots. */
+  getDeliveryFeedbackMessages?(limit: number): InboundMessage[];
   /** Optional because only schema-probing drivers need a process-lifetime test reset. */
   resetPendingMessageSchemaCacheForTesting?(): void;
   markMessages(ids: string[], status: ProcessingStatus): void;

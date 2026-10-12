@@ -462,6 +462,10 @@ async function drainSession(session: Session): Promise<void> {
     } catch (err) {
       if (destination !== null) blockedDestinations.add(destination);
 
+      if (!attemptRow || (attemptRow.attempts === 0 && attemptRow.next_attempt_at === null)) {
+        await reportDeliveryFailure(agentGroup.id, session, msg, err, 'retrying');
+      }
+
       if (isChannelUnavailableError(err)) {
         await holdForUnavailableChannel(agentGroup.id, session, msg, attemptRow, err);
         continue;
@@ -490,6 +494,60 @@ async function drainSession(session: Session): Promise<void> {
   }
 }
 
+/** Existing projection feeds Agents/activity; a non-trigger system row informs the next turn. */
+async function reportDeliveryFailure(
+  agentGroupId: string,
+  session: Session,
+  msg: OutboundMessage,
+  err: unknown,
+  status: 'retrying' | 'failed',
+): Promise<void> {
+  const reason = err instanceof Error ? err.message : String(err);
+  emitEngineEvent('outbound.failed', {
+    sessionId: session.id,
+    agentGroupId,
+    channelType: msg.channelType ?? '',
+    platformId: msg.platformId ?? '',
+    err: new Error(`Delivery ${status} (${msg.id}): ${reason}`),
+  });
+  try {
+    await withExistingMailboxSession(agentGroupId, session.id, async (mailbox) => {
+      await mailbox.insertMessage({
+        id: `delivery-feedback:${msg.id}:${status}`,
+        kind: 'system',
+        timestamp: new Date().toISOString(),
+        platformId: null,
+        channelType: null,
+        threadId: null,
+        trigger: false,
+        processAfter: null,
+        recurrence: null,
+        content: JSON.stringify({
+          action: 'outbound_delivery',
+          status,
+          result: {
+            messageId: msg.id,
+            channelType: msg.channelType,
+            platformId: msg.platformId,
+            reason,
+            guidance:
+              status === 'retrying'
+                ? 'Host will retry; do not resend this message.'
+                : 'Message was not delivered. Do not assume the audience saw it.',
+          },
+        }),
+      });
+    });
+    // eslint-disable-next-line no-catch-all/no-catch-all -- feedback must never break delivery retry/ack bookkeeping
+  } catch (feedbackErr) {
+    log.error('Failed to persist delivery feedback for agent', {
+      messageId: msg.id,
+      sessionId: session.id,
+      err: feedbackErr,
+    });
+  }
+}
+
 /**
  * Terminal failure: mark the row failed mailbox-side, clear its attempt row
  * and tell observers. Bookkeeping errors are logged, never thrown — the next
@@ -510,13 +568,7 @@ async function failPermanently(
       throw new Error(`mailbox disappeared before marking ${msg.id} failed`, { cause: err });
     }
     await clearAttemptRow(msg.id);
-    emitEngineEvent('outbound.failed', {
-      sessionId: session.id,
-      agentGroupId: session.agent_group_id,
-      channelType: msg.channelType ?? '',
-      platformId: msg.platformId ?? '',
-      err,
-    });
+    await reportDeliveryFailure(agentGroupId, session, msg, err, 'failed');
   } catch (markErr) {
     log.error('Failed to record permanent delivery failure', {
       messageId: msg.id,

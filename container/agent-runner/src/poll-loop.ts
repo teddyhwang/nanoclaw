@@ -1095,7 +1095,7 @@ function formatMessagesWithCommands(
     parts.push(formatMessages(normalBatch));
   }
 
-  return parts.join('\n\n');
+  return prependDeliveryFeedback(parts.join('\n\n'));
 }
 
 interface QueryResult {
@@ -1920,7 +1920,7 @@ export async function processQuery(
         }
 
         const keptIds = keep.map((m) => m.id);
-        let prompt = formatMessages(keep);
+        let prompt = prependDeliveryFeedback(formatMessages(keep));
         // Load inbound image attachments for the follow-up batch too —
         // operator can drop a screenshot mid-turn and the agent should see
         // it without waiting for a fresh query. Same /workspace/inbox/ path
@@ -3135,8 +3135,7 @@ function resolveDispatchReplyTarget(
   explicitRouting?: { channel_type: string; platform_id: string },
 ): string | null {
   if (explicitReplyToSeq != null && explicitRouting) {
-    const explicit = resolveExplicitReplyTarget(explicitReplyToSeq, explicitRouting);
-    if (explicit !== undefined) return explicit;
+    return resolveExplicitReplyTarget(explicitReplyToSeq, explicitRouting);
   }
   if (routing.inReplyTo == null) return null; // task / accumulate turn — never pill
   // Same-channel dispatch: routing.inReplyTo IS the authoritative target
@@ -3158,6 +3157,27 @@ function resolveDispatchReplyTarget(
     routing.platformId === explicitRouting.platform_id;
   if (sameChannel) return routing.inReplyTo;
   return destRouting?.inReplyTo ?? null;
+}
+
+/** Persist runner-side send feedback until the next initial or warm follow-up turn. */
+function recordDeliveryFeedback(detail: string): void {
+  log(`WARNING: ${detail}`);
+  const ops = getAgentMailbox().operations;
+  const previous = ops.getState('delivery_feedback')?.value;
+  ops.setState('delivery_feedback', [previous, detail].filter(Boolean).join('\n'));
+}
+
+export function prependDeliveryFeedback(prompt: string): string {
+  const ops = getAgentMailbox().operations;
+  const feedback = ops.consumeState('delivery_feedback')?.value;
+  const hostFeedback = ops.getDeliveryFeedbackMessages?.(20) ?? [];
+  if (!feedback && hostFeedback.length === 0) return prompt;
+  const notes = [feedback, ...hostFeedback.map((message) => message.content)].filter(Boolean);
+  ops.markMessages(
+    hostFeedback.map((message) => message.id),
+    'completed',
+  );
+  return `${JSON.stringify({ delivery_feedback: notes })}\n\n${prompt}`;
 }
 
 async function sendToDestination(
@@ -3182,8 +3202,9 @@ async function sendToDestination(
     platform_id: platformId,
   });
   if (explicitReplyToSeq != null && inReplyTo == null) {
-    log(`Invalid reply_to_message_id #${explicitReplyToSeq} for <message to="${dest.name}">, dropping block`);
-    return { sent: false, reason: 'invalid reply target' };
+    recordDeliveryFeedback(
+      `Invalid reply_to_message_id #${explicitReplyToSeq} for <message to="${dest.name}">; posting without a reply link.`,
+    );
   }
   const id = generateId();
   const files = attachLocalFileLinks(fileLinks, id, { log });
@@ -3191,18 +3212,26 @@ async function sendToDestination(
     // Sweeping a link-only block can empty the body. With no file to show for
     // it there is nothing to deliver — posting a blank message would just read
     // as the bot glitching.
-    log(`Nothing left to deliver to ${dest.name} after removing unusable local-file link(s), dropping block`);
+    recordDeliveryFeedback(
+      `Nothing deliverable for ${dest.name} after removing unusable local-file links; no message posted.`,
+    );
     return { sent: false, reason: 'no deliverable content after local-file-link sweep' };
   }
-  await writeMessageOut({
-    id,
-    in_reply_to: inReplyTo,
-    kind: 'chat',
-    platform_id: platformId,
-    channel_type: channelType,
-    thread_id: destRouting?.threadId ?? null,
-    content: JSON.stringify(files.length > 0 ? { text: body, files } : { text: body }),
-  });
+  try {
+    await writeMessageOut({
+      id,
+      in_reply_to: inReplyTo,
+      kind: 'chat',
+      platform_id: platformId,
+      channel_type: channelType,
+      thread_id: destRouting?.threadId ?? null,
+      content: JSON.stringify(files.length > 0 ? { text: body, files } : { text: body }),
+    });
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    recordDeliveryFeedback(`Failed to queue message to ${dest.name}: ${reason}; no message posted.`);
+    return { sent: false, reason };
+  }
   return { sent: true };
 }
 
@@ -3216,8 +3245,12 @@ function parseMessageBlock(attrs: string, rawBody: string): MessageBlock | null 
   const to = parsed.to?.trim();
   if (!to) return null;
   const replyToSeq = parseMessageSeq(parsed.reply_to_message_id);
-  if (parsed.reply_to_message_id != null && replyToSeq == null) return null;
-  return { to, replyToSeq, body: rawBody.trim() };
+  // A malformed reply attribute must not erase otherwise valid message intent.
+  return {
+    to,
+    replyToSeq: parsed.reply_to_message_id != null && replyToSeq == null ? -1 : replyToSeq,
+    body: rawBody.trim(),
+  };
 }
 
 function parseMessageSeq(value: string | null | undefined): number | null {
@@ -3231,9 +3264,9 @@ function parseMessageSeq(value: string | null | undefined): number | null {
 function resolveExplicitReplyTarget(
   seq: number,
   routing: { channel_type: string; platform_id: string },
-): string | null | undefined {
+): string | null {
   const targetRouting = getRoutingBySeq(seq);
-  if (!targetRouting) return undefined;
+  if (!targetRouting) return null;
   if (targetRouting.channel_type !== routing.channel_type || targetRouting.platform_id !== routing.platform_id) {
     return null;
   }

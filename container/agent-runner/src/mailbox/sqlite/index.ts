@@ -21,6 +21,7 @@ import {
   sqliteGetOutboundCursor,
   sqliteGetOutboundMessagesSince,
   sqliteGetPendingMessages,
+  sqliteGetDeliveryFeedbackMessages,
   sqliteGetReplyTargetMessageIdBySeq,
   sqliteGetRoutingBySeq,
   sqliteGetSessionRouting,
@@ -123,6 +124,13 @@ export class SqliteAgentMailbox implements AgentMailbox {
 
   getPendingMessages(limit: number, isFirstPoll: boolean): InboundMessage[] {
     return sqliteGetPendingMessages(isFirstPoll, limit).flatMap((row) => {
+      const message = parseInboundMessage(row);
+      return message ? [message] : [];
+    });
+  }
+
+  getDeliveryFeedbackMessages(limit: number): InboundMessage[] {
+    return sqliteGetDeliveryFeedbackMessages(limit).flatMap((row) => {
       const message = parseInboundMessage(row);
       return message ? [message] : [];
     });

@@ -253,6 +253,7 @@ describe('channel-unavailable holds', () => {
 
     await deliverSessionMessages(session);
     const firstHold = (await getDeliveryAttempt('out-stale'))?.last_attempt_at;
+    expect(failed).toEqual(['group@g.us']);
 
     // Re-tries during the window must not refresh the hold's start.
     advance(23 * HOUR_MS);
@@ -265,7 +266,8 @@ describe('channel-unavailable holds', () => {
     unsubscribe();
     expect(deliveredRow(session.id, 'out-stale')).toEqual({ status: 'failed', platform_message_id: null });
     expect(await getDeliveryAttempt('out-stale')).toBeUndefined();
-    expect(failed).toEqual(['group@g.us']);
+    // First hold is visible immediately, then terminal expiry is visible once.
+    expect(failed).toEqual(['group@g.us', 'group@g.us']);
   });
 
   it('starts the hold clock of replies queued behind a held one, so a backlog fails after ~24h, not N×24h', async () => {
