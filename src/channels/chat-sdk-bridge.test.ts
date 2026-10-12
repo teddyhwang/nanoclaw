@@ -276,6 +276,12 @@ describe('createChatSdkBridge', () => {
   // exercised by host-core.test.ts end-to-end. These tests only cover the
   // bridge's narrow, platform-adjacent surface.
 
+  it('exposes an injected exact-text capability unchanged and has none by default', () => {
+    const verbatim = { prepare: vi.fn(), send: vi.fn() };
+    expect(createChatSdkBridge({ adapter: stubAdapter({}), supportsThreads: false }).verbatim).toBeUndefined();
+    expect(createChatSdkBridge({ adapter: stubAdapter({}), supportsThreads: false, verbatim }).verbatim).toBe(verbatim);
+  });
+
   it('omits openDM when the underlying Chat SDK adapter has none', () => {
     const bridge = createChatSdkBridge({
       adapter: stubAdapter({}),

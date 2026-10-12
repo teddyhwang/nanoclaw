@@ -482,6 +482,7 @@ export function registerBridgeInboundPolicy(channelType: string, wrap: BridgeInb
 }
 
 export interface ChatSdkBridgeConfig {
+  verbatim?: ChannelAdapter['verbatim'];
   adapter: Adapter;
   /**
    * Adapter-instance name for running multiple bridges of one platform
@@ -1223,6 +1224,8 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
     channelType: adapter.name, // unchanged — semantic platform key
     instance: config.instance, // undefined ⇒ default instance
 
+    // Host-provided exact path; normal delivery intentionally never uses it.
+    verbatim: config.verbatim,
     supportsThreads: config.supportsThreads,
     defaults: config.defaults,
 

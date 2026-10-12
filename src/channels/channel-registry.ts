@@ -55,6 +55,13 @@ export function getChannelAdapterExact(key: string): ChannelAdapter | undefined 
   return activeAdapters.get(key);
 }
 
+/** Strict host posting capability: unavailable adapters and unsupported paths never fall back. */
+export function getVerbatimDelivery(instance: string) {
+  const adapter = getChannelAdapterExact(instance);
+  if (!adapter?.isConnected() || !adapter.verbatim) throw new Error('Exact-text delivery unavailable');
+  return adapter.verbatim;
+}
+
 /** Get a live adapter by instance name, falling back to any adapter of the
  *  given channel type. The fallback exists ONLY for channelType-only callers
  *  (user-id prefix resolution and cold DMs in user-dm.ts, approval delivery

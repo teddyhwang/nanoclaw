@@ -146,6 +146,29 @@ describe('channel registry', () => {
     expect(mock.isConnected()).toBe(false);
   });
 
+  it('getVerbatimDelivery is exact-instance only and fails closed', async () => {
+    const { addChannelAdapterAtRuntime, unregisterChannelAdapter, getVerbatimDelivery } =
+      await import('./channel-registry.js');
+    const setupFn = () => ({
+      conversations: [],
+      onInbound: () => {},
+      onInboundEvent: () => {},
+      onMetadata: () => {},
+      onAction: () => {},
+    });
+    const plain = createMockAdapter('plain');
+    await addChannelAdapterAtRuntime('plain-channel', { factory: () => plain }, setupFn);
+    expect(() => getVerbatimDelivery('plain')).toThrow('unavailable');
+    const verbatim = { prepare: vi.fn(), send: vi.fn() };
+    const exact = { ...createMockAdapter('exact'), verbatim };
+    await addChannelAdapterAtRuntime('exact-channel', { factory: () => exact }, setupFn);
+    expect(getVerbatimDelivery('exact')).toBe(verbatim);
+    expect(() => getVerbatimDelivery('missing')).toThrow('unavailable');
+    await unregisterChannelAdapter('exact-channel');
+    expect(() => getVerbatimDelivery('exact')).toThrow('unavailable');
+    await unregisterChannelAdapter('plain-channel');
+  });
+
   it('addChannelAdapterAtRuntime returns null when factory yields null', async () => {
     const { addChannelAdapterAtRuntime, getActiveAdapters } = await import('./channel-registry.js');
 

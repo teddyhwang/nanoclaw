@@ -306,8 +306,22 @@ export interface ChannelDefaults {
   mentions: 'platform' | 'dm-only' | 'never';
 }
 
+/** Host-only exact-text delivery. No normal outbound transforms or fallback bots. */
+export interface VerbatimProfile {
+  identity: string;
+  limit: number;
+  unit: 'utf16' | 'codepoints';
+  replyBehavior: 'none' | 'native-reply' | 'thread';
+}
+export interface VerbatimDelivery {
+  prepare(platformId: string, replyTo: string | null): Promise<VerbatimProfile>;
+  send(platformId: string, text: string, replyTo: string | null, profile: VerbatimProfile): Promise<string>;
+}
+
 /** The v2 channel adapter contract. */
 export interface ChannelAdapter {
+  /** Available only when exact text and reply behavior can be guaranteed. */
+  verbatim?: VerbatimDelivery;
   name: string;
   channelType: string;
 

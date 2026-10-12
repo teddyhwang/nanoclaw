@@ -93,6 +93,8 @@ export {
   addChannelAdapterAtRuntime,
   getActiveAdapters,
   getChannelAdapter,
+  getChannelAdapterExact,
+  getVerbatimDelivery,
   getRegisteredChannelNames,
 } from '../channels/channel-registry.js';
 export {
@@ -104,6 +106,8 @@ export {
 } from '../channels/chat-sdk-bridge.js';
 export type {
   ChannelAdapter,
+  VerbatimProfile,
+  VerbatimDelivery,
   ChannelRegistration,
   ChannelSetup,
   InboundMessage,
