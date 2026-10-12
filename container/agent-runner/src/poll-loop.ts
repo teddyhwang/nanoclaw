@@ -1418,6 +1418,9 @@ export async function processQuery(
   let turnStartSeq = maxOutboundSeq();
   let midTurnTail = '';
   let deliveredAssemblyFragment: string | undefined;
+  // Why this turn's wrapped <message> blocks were refused (streamed door);
+  // the wrapping retry names them instead of claiming nothing was wrapped.
+  let turnDropReasons: DroppedBlock[] = [];
   // Prompt queue for the exchange hook — each result event consumes the
   // oldest unanswered prompt. Retries append the original user prompt at
   // their position in the provider input queue.
@@ -2061,6 +2064,7 @@ export async function processQuery(
             midTurnSent += scan.delivered;
             midTurnTail = scan.tail;
             deliveredAssemblyFragment = scan.deliveredAssemblyFragment;
+            turnDropReasons.push(...scan.dropped);
             if (fireCtx && scan.dispatched.length > 0) fireCtx.dispatched.push(...scan.dispatched);
           }
         } else if (event.type === 'result') {
@@ -2108,6 +2112,7 @@ export async function processQuery(
             turnStartSeq = maxOutboundSeq();
             midTurnTail = '';
             deliveredAssemblyFragment = undefined;
+            turnDropReasons = [];
             const next = queuedTurns.shift();
             if (next) adoptTurn(next);
             else answering = false;
@@ -2130,7 +2135,7 @@ export async function processQuery(
             // must not append a final summary block to a destination they
             // already delivered to mid-turn via send_message/send_file.
             const isTaskTurn = !!fireCtx && !resultAddressed;
-            const { hasUnwrapped, dispatched } = await dispatchResultText(
+            const { hasUnwrapped, dispatched, dropped } = await dispatchResultText(
               authFailure ? AUTH_FAILURE_USER_TEXT : (event.text ?? ''),
               routing,
               resultAddressed,
@@ -2188,6 +2193,16 @@ export async function processQuery(
               archivePrompts.shift();
             } else {
               const willRetryWrapping = hasUnwrapped && !unwrappedNudged;
+              const refusedBlocks = uniqueDroppedBlocks([...turnDropReasons, ...dropped]);
+              if (!hasUnwrapped) {
+                // Part of the turn was delivered, so no retry fires. A block
+                // refused for its shape (no to=, unknown destination) would
+                // otherwise vanish; tell the next turn. Send-time refusals
+                // already recorded their own feedback.
+                for (const block of refusedBlocks) {
+                  if (!block.feedbackRecorded) recordDeliveryFeedback(`${block.detail}; that block was not posted.`);
+                }
+              }
               notifyExchangeComplete(onExchangeComplete, {
                 prompt: archivePrompts[0] ?? initialPrompt,
                 result: archivedResult,
@@ -2199,15 +2214,7 @@ export async function processQuery(
                 wrappingRetryInFlight = true;
                 const destinations = getAllDestinations();
                 const names = destinations.map((d) => d.name).join(', ');
-                pushRetry(
-                  `<system>Your response was not delivered — it was not wrapped in <message to="name">...</message> blocks. ` +
-                    `All output must be wrapped: use <message to="name"> for content to send, or <internal> for scratchpad. ` +
-                    `Your destinations: ${names}. ` +
-                    `Please re-send only the missing response with the correct wrapping. ` +
-                    `Earlier tool messages may be only acknowledgments; do not repeat messages already sent or re-run tools. ` +
-                    `Keep tool results and internal notes inside <internal>.</system>`,
-                  retryDedupSince ?? resultBoundaryAt,
-                );
+                pushRetry(wrappingRetryPrompt(names, refusedBlocks), retryDedupSince ?? resultBoundaryAt);
                 pushAddressed.push(resultAddressed);
                 pushSuperseded.push(false);
               } else if (hasUnwrapped && resultAddressed) {
@@ -2342,6 +2349,7 @@ export async function processQuery(
           turnStartSeq = maxOutboundSeq();
           midTurnTail = '';
           deliveredAssemblyFragment = undefined;
+          turnDropReasons = [];
           const next = queuedTurns.shift();
           if (next) adoptTurn(next);
           else answering = false;
@@ -2636,6 +2644,49 @@ export interface DispatchedMessage {
   body: string;
 }
 
+/**
+ * A wrapped `<message>` block that was refused. `feedbackRecorded` is true
+ * when the refusing path already queued next-turn delivery feedback.
+ */
+export interface DroppedBlock {
+  detail: string;
+  feedbackRecorded: boolean;
+}
+
+function uniqueDroppedBlocks(blocks: DroppedBlock[]): DroppedBlock[] {
+  const seen = new Set<string>();
+  return blocks.filter((block) => !seen.has(block.detail) && !!seen.add(block.detail));
+}
+
+/**
+ * The one wrapping retry. When the agent DID wrap its reply and a block was
+ * refused, say exactly why; claiming the output "was not wrapped" sends the
+ * model back to re-emit the identical block (AI Friends, 2026-10-11).
+ */
+export function wrappingRetryPrompt(destinationNames: string, refused: DroppedBlock[] = []): string {
+  const tail =
+    `Your destinations: ${destinationNames}. ` +
+    `Earlier tool messages may be only acknowledgments; do not repeat messages already sent or re-run tools. ` +
+    `Keep tool results and internal notes inside <internal>.</system>`;
+  if (refused.length > 0) {
+    return (
+      `<system>Your response was not delivered. Your <message> block was wrapped, but it was refused: ` +
+      `${refused.map((block) => block.detail).join('; ')}. ` +
+      `Fix that and re-send only the missing response. ` +
+      `A <message> tag takes to="name" (required) and optionally reply_to_message_id="#N" (a visible message id from that destination). ` +
+      tail
+    );
+  }
+  return (
+    `<system>Your response was not delivered — it was not wrapped in <message to="name">...</message> blocks. ` +
+    `All output must be wrapped: use <message to="name"> for content to send, or <internal> for scratchpad. ` +
+    `Please re-send only the missing response with the correct wrapping. ` +
+    tail
+  );
+}
+
+const MISSING_TO_DETAIL = 'a <message> tag had no to="name" attribute';
+
 interface MessageBlock {
   to: string;
   replyToSeq: number | null;
@@ -2658,6 +2709,8 @@ export interface MidTurnScanResult {
   delivered: number;
   tail: string;
   dispatched: DispatchedMessage[];
+  /** Wrapped blocks this scan refused, with the reason. */
+  dropped: DroppedBlock[];
 }
 
 interface MidTurnDeliveryOptions {
@@ -2814,6 +2867,7 @@ export async function deliverMidTurnBlocks(
   const messageRe = /<message\s+([^>]*)>([\s\S]*?)<\/message>/g;
   const seen = new Set<string>();
   const dispatched: DispatchedMessage[] = [];
+  const dropped: DroppedBlock[] = [];
   let delivered = 0;
   let deliveredAssemblyFragment: string | undefined;
   let match: RegExpExecArray | null;
@@ -2822,6 +2876,7 @@ export async function deliverMidTurnBlocks(
     const block = parseMessageBlock(match[1], match[2]);
     if (!block) {
       log('Mid-turn <message> block was malformed — skipped');
+      dropped.push({ detail: MISSING_TO_DETAIL, feedbackRecorded: false });
       continue;
     }
 
@@ -2834,7 +2889,11 @@ export async function deliverMidTurnBlocks(
     }
 
     const destination = findByName(block.to);
-    if (!destination) continue;
+    if (!destination) {
+      log(`Mid-turn <message to="${block.to}"> names an unknown destination — skipped`);
+      dropped.push({ detail: unknownDestinationDetail(block.to), feedbackRecorded: false });
+      continue;
+    }
 
     // The SDK result may repeat only the last fragment, not the assembled
     // block. Prove that the ENTIRE event is the suffix of this valid block;
@@ -2865,6 +2924,10 @@ export async function deliverMidTurnBlocks(
     const sent = await sendToDestination(destination, body, routing, block.replyToSeq, swept.links);
     if (!sent.sent) {
       log(`Mid-turn <message to="${block.to}"> dropped: ${sent.reason ?? 'not deliverable'}`);
+      dropped.push({
+        detail: `<message to="${block.to}"> could not be posted (${sent.reason ?? 'not deliverable'})`,
+        feedbackRecorded: true,
+      });
       continue;
     }
     recordAssembly();
@@ -2873,7 +2936,7 @@ export async function deliverMidTurnBlocks(
     log(`Mid-turn delivery: <message to="${block.to}"> (${body.length} chars)`);
   }
 
-  return { delivered, tail, dispatched, deliveredAssemblyFragment };
+  return { delivered, tail, dispatched, deliveredAssemblyFragment, dropped };
 }
 
 /**
@@ -2892,7 +2955,13 @@ export async function dispatchResultText(
   taskTurn = false,
   taskTurnDedupSince = turnStartedAt,
   options: ResultDispatchOptions = {},
-): Promise<{ sent: number; hasUnwrapped: boolean; dispatched: DispatchedMessage[]; resultBlocks: number }> {
+): Promise<{
+  sent: number;
+  hasUnwrapped: boolean;
+  dispatched: DispatchedMessage[];
+  resultBlocks: number;
+  dropped: DroppedBlock[];
+}> {
   const originalText = text;
   const visibleText = stripInternalSpansForDelivery(text);
   const messageRe = /<message\s+([^>]*)>([\s\S]*?)<\/message>/g;
@@ -2917,6 +2986,7 @@ export async function dispatchResultText(
   let lastIndex = 0;
   const scratchpadParts: string[] = [];
   const dispatched: DispatchedMessage[] = [];
+  const dropped: DroppedBlock[] = [];
   const seen = new Set<string>();
 
   while ((match = messageRe.exec(normalizedText)) !== null) {
@@ -2927,6 +2997,7 @@ export async function dispatchResultText(
     const block = parseMessageBlock(match[1], match[2]);
     if (!block) {
       scratchpadParts.push(`[dropped: malformed <message> block] ${match[2].trim()}`);
+      dropped.push({ detail: MISSING_TO_DETAIL, feedbackRecorded: false });
       continue;
     }
 
@@ -2937,6 +3008,7 @@ export async function dispatchResultText(
     if (!destination) {
       log(`Unknown destination in <message to="${block.to}">, dropping block`);
       scratchpadParts.push(`[dropped: unknown destination "${block.to}"] ${body}`);
+      dropped.push({ detail: unknownDestinationDetail(block.to), feedbackRecorded: false });
       continue;
     }
     if (!body && swept.links.length === 0) {
@@ -2967,6 +3039,10 @@ export async function dispatchResultText(
     const delivered = await sendToDestination(destination, body, routing, block.replyToSeq, swept.links);
     if (!delivered.sent) {
       scratchpadParts.push(`[dropped: ${delivered.reason} for "${block.to}"] ${rawBody}`);
+      dropped.push({
+        detail: `<message to="${block.to}"> could not be posted (${delivered.reason ?? 'not deliverable'})`,
+        feedbackRecorded: true,
+      });
       continue;
     }
     dispatched.push({ destination: block.to, body });
@@ -3002,10 +3078,10 @@ export async function dispatchResultText(
   if (hasUnwrapped) {
     log('WARNING: agent output had no deliverable <message> block — suppressing unwrapped text and nudging retry');
     if (!options.errorResult) await emitSilentTurnComplete();
-    return { sent, hasUnwrapped: true, dispatched, resultBlocks };
+    return { sent, hasUnwrapped: true, dispatched, resultBlocks, dropped };
   }
 
-  if (options.errorResult) return { sent, hasUnwrapped, dispatched, resultBlocks };
+  if (options.errorResult) return { sent, hasUnwrapped, dispatched, resultBlocks, dropped };
 
   if (sent === 0 && !anythingDelivered) {
     // The destination contract gives the model one unambiguous way to say
@@ -3016,7 +3092,7 @@ export async function dispatchResultText(
     if (explicitlySilent) {
       log('Explicit silent-turn marker — suppressing degraded fallback');
       await emitSilentTurnComplete();
-      return { sent, hasUnwrapped, dispatched, resultBlocks };
+      return { sent, hasUnwrapped, dispatched, resultBlocks, dropped };
     }
 
     if (addressed && compactedDuringTurn) {
@@ -3029,7 +3105,7 @@ export async function dispatchResultText(
         if (delivered.sent) {
           dispatched.push({ destination: destination.name, body });
           sent++;
-          return { sent, hasUnwrapped, dispatched, resultBlocks };
+          return { sent, hasUnwrapped, dispatched, resultBlocks, dropped };
         }
       }
     }
@@ -3037,7 +3113,7 @@ export async function dispatchResultText(
     if (addressed && (confirmationGatePaused() || isAwaitingSensitiveConfirmation(originalText))) {
       log('Addressed turn is awaiting sensitive confirmation — suppressing degraded fallback');
       await emitSilentTurnComplete();
-      return { sent, hasUnwrapped, dispatched, resultBlocks };
+      return { sent, hasUnwrapped, dispatched, resultBlocks, dropped };
     }
 
     if (addressed) {
@@ -3049,7 +3125,7 @@ export async function dispatchResultText(
           log('WARNING: addressed turn produced no deliverable output — sent scoped failure fallback');
           dispatched.push({ destination: destination.name, body });
           sent++;
-          return { sent, hasUnwrapped, dispatched, resultBlocks };
+          return { sent, hasUnwrapped, dispatched, resultBlocks, dropped };
         }
       }
       log('WARNING: addressed turn produced no deliverable output and had no valid reply destination');
@@ -3060,7 +3136,7 @@ export async function dispatchResultText(
     await emitSilentTurnComplete();
   }
 
-  return { sent, hasUnwrapped, dispatched, resultBlocks };
+  return { sent, hasUnwrapped, dispatched, resultBlocks, dropped };
 }
 
 /**
@@ -3235,12 +3311,17 @@ async function sendToDestination(
   return { sent: true };
 }
 
+function unknownDestinationDetail(name: string): string {
+  return `to="${name}" is not one of your destinations`;
+}
+
 function parseMessageBlock(attrs: string, rawBody: string): MessageBlock | null {
   const parsed: Record<string, string> = {};
-  const attrRe = /([A-Za-z_][\w:-]*)="([^"]*)"/g;
+  // Double or single quotes: `to='name'` is the same intent, not a missing `to`.
+  const attrRe = /([A-Za-z_][\w:-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
   let match: RegExpExecArray | null;
   while ((match = attrRe.exec(attrs)) !== null) {
-    parsed[match[1]] = match[2];
+    parsed[match[1]] = match[2] ?? match[3];
   }
   const to = parsed.to?.trim();
   if (!to) return null;
