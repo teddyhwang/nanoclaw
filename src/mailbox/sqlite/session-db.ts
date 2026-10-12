@@ -574,6 +574,28 @@ export function migrateMessagesInTable(db: Database.Database): void {
 }
 
 /**
+ * True when `messageId` names an inbound row that is not a real platform
+ * message: a host-synthesized wake (`sender`/`senderId: 'system'` — operator
+ * nudges, escalation resumes, approval notes), a task/system/webhook row, or a
+ * cross-session echo. Unknown ids (raw delivered platform ids used as explicit
+ * targets) are not synthetic.
+ */
+export function isSyntheticInboundMessage(db: Database.Database, messageId: string): boolean {
+  const row = db.prepare('SELECT kind, content, source_session_id FROM messages_in WHERE id = ?').get(messageId) as
+    | { kind: string; content: string | null; source_session_id: string | null }
+    | undefined;
+  if (!row) return false;
+  // Reactions resolve to the reacted-to message (an established anchor).
+  if (!['chat', 'chat-sdk', 'reaction'].includes(row.kind) || row.source_session_id) return true;
+  try {
+    const content = JSON.parse(row.content ?? '') as { sender?: unknown; senderId?: unknown } | null;
+    return content?.senderId === 'system' || content?.sender === 'system';
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Look up an inbound row's source_session_id by its message id. Returns null
  * if the row doesn't exist or the column is NULL (channel inbound or
  * pre-migration a2a inbound). Used by a2a routing to route replies back to

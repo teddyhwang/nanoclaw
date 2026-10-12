@@ -1,4 +1,5 @@
 import { getOutboundDb, openInboundDb, withInboundDb } from './connection.js';
+import { isInheritableReplyTarget, isPlatformReplyTarget } from '../../reply-target.js';
 import type { MessageInRow } from '../../db/messages-in.js';
 import type { MessageOutRow } from '../../db/messages-out.js';
 import {
@@ -339,11 +340,11 @@ export function sqliteGetMessageIdBySeq(sequence: number): string | null {
 export function sqliteGetReplyTargetMessageIdBySeq(sequence: number): string | null {
   const inboundRow = withInboundDb(
     (inbound) =>
-      inbound.prepare('SELECT id, kind FROM messages_in WHERE seq = ?').get(sequence) as
-        | { id: string; kind: string }
+      inbound.prepare('SELECT id, kind, content FROM messages_in WHERE seq = ?').get(sequence) as
+        | { id: string; kind: string; content: string | null }
         | undefined,
   );
-  if (inboundRow) return ['chat', 'chat-sdk'].includes(inboundRow.kind) ? inboundRow.id : null;
+  if (inboundRow) return isPlatformReplyTarget(inboundRow) ? inboundRow.id : null;
 
   const outboundRow = getOutboundDb()
     .prepare("SELECT id FROM messages_out WHERE seq = ? AND kind = 'chat'")
@@ -381,20 +382,24 @@ export function sqliteGetRoutingBySeq(
 export function sqliteGetLatestInboundRoute(
   channelType: string,
   platformId: string,
-): { threadId: string | null; inReplyTo: string } | null {
+): { threadId: string | null; inReplyTo: string | null } | null {
   const row = withInboundDb(
     (inbound) =>
       inbound
         .prepare(
-          `SELECT id, thread_id FROM messages_in
+          `SELECT id, kind, thread_id, content FROM messages_in
            WHERE channel_type = ? AND platform_id = ?
              AND kind != 'task' AND trigger = 1
            ORDER BY seq DESC, timestamp DESC, rowid DESC
            LIMIT 1`,
         )
-        .get(channelType, platformId) as { id: string; thread_id: string | null } | undefined,
+        .get(channelType, platformId) as
+        | { id: string; kind: string; thread_id: string | null; content: string | null }
+        | undefined,
   );
-  return row ? { threadId: row.thread_id, inReplyTo: row.id } : null;
+  // The newest waking row keeps its thread; a host-synthesized one is not a
+  // platform message, so it yields no reply target (never an older one).
+  return row ? { threadId: row.thread_id, inReplyTo: isInheritableReplyTarget(row) ? row.id : null } : null;
 }
 
 export function sqliteGetUndeliveredMessages(): MessageOutRow[] {

@@ -415,6 +415,75 @@ describe('deliverSessionMessages — native reply target', () => {
   });
 });
 
+describe('deliverSessionMessages — host-synthesized reply references (2026-10-11 chief-nudge)', () => {
+  function insertInboundRow(
+    sessionId: string,
+    id: string,
+    content: object,
+    extra: { kind?: string; source?: string } = {},
+  ) {
+    const db = openInboundDb('ag-1', sessionId);
+    db.prepare(
+      `INSERT INTO messages_in (id, seq, kind, timestamp, status, trigger, platform_id, channel_type, content, source_session_id)
+       VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 2 FROM messages_in), ?, datetime('now'), 'completed', 1, 'telegram:123', 'telegram', ?, ?)`,
+    ).run(id, extra.kind ?? 'chat', JSON.stringify(content), extra.source ?? null);
+    db.close();
+  }
+
+  it.each([
+    ['operator nudge', 'chief-nudge:appr_f43d0400', { text: 'note', sender: 'system', senderId: 'system' }, {}],
+    ['escalation resume', 'sys-escresume-autoesc-1', { text: 'retry', sender: 'system', senderId: 'system' }, {}],
+    ['cross-session echo', 'echo-1', { text: 'elsewhere', senderId: 'discord:7' }, { source: 'sess-other' }],
+    ['scheduled task', 'task-uuid-1', { prompt: 'rss' }, { kind: 'task' }],
+  ] as const)('drops a %s reference, posts once unthreaded, no failure', async (_label, id, content, extra) => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertInboundRow(session.id, id, content, extra);
+    insertOutbound('ag-1', session.id, 'out-nudge-reply', id);
+    const failed: unknown[] = [];
+    const unsubscribe = engineEvents.on('outbound.failed', (event) => {
+      failed.push(event);
+    });
+    const replyTargets: Array<string | null | undefined> = [];
+    setDeliveryAdapter({
+      async deliver(_ct, _pid, _tid, _kind, _content, _files, inReplyTo) {
+        replyTargets.push(inReplyTo);
+        return 'plat-1';
+      },
+    });
+
+    await deliverSessionMessages(session);
+    await deliverSessionMessages(session);
+    unsubscribe();
+
+    expect(replyTargets).toEqual([null]);
+    expect(failed).toEqual([]);
+  });
+
+  it.each([
+    ['router-namespaced Discord inbound', '1558991246817628182:ag-1', 'chat'],
+    ['reaction (resolves to the reacted-to message)', '1558991246817628182:rx:add:fire:ag-1', 'reaction'],
+    ['raw delivered platform id (explicit outbound target)', '1558991246817628100', null],
+  ] as const)('passes a %s reference through unchanged', async (_label, id, inbound) => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    if (inbound)
+      insertInboundRow(session.id, id, { text: 'hi', sender: 'Teddy', senderId: 'discord:4242' }, { kind: inbound });
+    insertOutbound('ag-1', session.id, 'out-real-reply', id);
+    const replyTargets: Array<string | null | undefined> = [];
+    setDeliveryAdapter({
+      async deliver(_ct, _pid, _tid, _kind, _content, _files, inReplyTo) {
+        replyTargets.push(inReplyTo);
+        return 'plat-2';
+      },
+    });
+
+    await deliverSessionMessages(session);
+
+    expect(replyTargets).toEqual([id]);
+  });
+});
+
 describe('deliverSessionMessages — transient outbound.db journal race', () => {
   // The host opens outbound.db readonly; the container writes it in
   // journal_mode=DELETE. A container torn down mid-write leaves a hot

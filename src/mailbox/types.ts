@@ -147,6 +147,8 @@ export interface InboundMailbox {
   markDelivered(messageOutId: string, platformMessageId: string | null): void;
   markDeliveryFailed(messageOutId: string): void;
   getInboundSourceSessionId(messageId: string): string | null;
+  /** The id names a host-synthesized/non-platform inbound row (never a native reply target). */
+  isSyntheticInboundMessage(messageId: string): boolean;
   getMostRecentPeerSourceSessionId(peerAgentGroupId: string): string | null;
   insertTask(task: Task): Promise<void>;
   hasLiveTaskOccurrence(seriesId: string): boolean;

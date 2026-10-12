@@ -85,7 +85,10 @@ export interface MailboxOperations {
   getMessageIdBySeq(sequence: number): string | null;
   getReplyTargetMessageIdBySeq(sequence: number): string | null;
   getRoutingBySeq(sequence: number): SessionRouting | null;
-  getLatestInboundRoute(channelType: string, platformId: string): { threadId: string | null; inReplyTo: string } | null;
+  getLatestInboundRoute(
+    channelType: string,
+    platformId: string,
+  ): { threadId: string | null; inReplyTo: string | null } | null;
   getUndeliveredMessages(): OutboundMessage[];
   /** Opaque cursor used to scope outbound queries to one push/turn. */
   getOutboundCursor(): string;

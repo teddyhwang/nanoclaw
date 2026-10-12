@@ -416,7 +416,7 @@ async function drainSession(session: Session): Promise<void> {
         pauseTypingRefreshAfterDelivery(session.id);
       }
 
-      const platformMsgId = await deliverMessage(msg, session);
+      const platformMsgId = await deliverMessage(await withPlatformReplyTarget(agentGroup.id, session, msg), session);
       const marked = await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) => {
         mailbox.markDelivered(msg.id, platformMsgId ?? null);
         return true;
@@ -638,6 +638,31 @@ async function holdForUnavailableChannel(
   if (attemptRow?.last_error !== reason)
     log.warn('Channel unavailable — holding message without spending an attempt', fields);
   else log.debug('Channel still unavailable — message held', fields);
+}
+
+/**
+ * Never hand a channel adapter a reply reference that is not a platform
+ * message. Containers built before the runner-side guard can still inherit a
+ * host-synthesized wake id (`chief-nudge:<approval>`); Discord then rejects
+ * the whole post ("not snowflake") and retries exhaust. Drop just the
+ * reference and post unthreaded. Router-namespaced platform ids and raw
+ * delivered ids pass through unchanged; agent-to-agent routing keeps its id.
+ */
+async function withPlatformReplyTarget<
+  T extends { id: string; kind: string; channelType: string | null; inReplyTo: string | null },
+>(agentGroupId: string, session: Session, msg: T): Promise<T> {
+  if (!msg.inReplyTo || msg.kind === 'system' || msg.kind === 'task_log' || msg.channelType === 'agent') return msg;
+  const replyTo = msg.inReplyTo;
+  const synthetic = await withExistingMailboxSession(agentGroupId, session.id, (mailbox) =>
+    mailbox.isSyntheticInboundMessage(replyTo),
+  );
+  if (!synthetic) return msg;
+  log.warn('Dropping non-platform reply reference; posting unthreaded', {
+    messageId: msg.id,
+    sessionId: session.id,
+    inReplyTo: replyTo,
+  });
+  return { ...msg, inReplyTo: null };
 }
 
 async function deliverMessage(

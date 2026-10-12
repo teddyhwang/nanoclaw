@@ -47,8 +47,8 @@ interface ProviderOptions {
   mcpServers?: Record<string, McpServerConfig>;
   env?: Record<string, string | undefined>;
   additionalDirectories?: string[];
-  model?: string;   // alias (sonnet/opus/haiku) or full model ID
-  effort?: string;  // low | medium | high | xhigh | max
+  model?: string; // alias (sonnet/opus/haiku) or full model ID
+  effort?: string; // low | medium | high | xhigh | max
 }
 
 interface QueryInput {
@@ -123,6 +123,7 @@ Different-body summaries are not assumed to be duplicates: the agent is instruct
 to finish internally when a tool already sent the complete outcome, and otherwise
 to report success/failure/blocked status after every acknowledgment. Outbox
 persistence is not proof of platform delivery; verify the host receipt separately.
+
 ## Runtime provider contract
 
 Besides implementing `AgentProvider`, every provider declares a **runtime contract**
@@ -204,7 +205,7 @@ class ClaudeProvider implements AgentProvider {
   //    .model, .effort, .assistantName...
 
   query(input: QueryInput): AgentQuery {
-    const stream = new MessageStream();  // AsyncIterable<SDKUserMessage>
+    const stream = new MessageStream(); // AsyncIterable<SDKUserMessage>
     stream.push(input.prompt);
 
     const sdkResult = sdkQuery({
@@ -244,7 +245,10 @@ class ClaudeProvider implements AgentProvider {
       end: () => stream.end(),
       // Abort doesn't call into the SDK — it flips a flag the event generator
       // checks and ends the input stream so the query drains and stops.
-      abort: () => { aborted = true; stream.end(); },
+      abort: () => {
+        aborted = true;
+        stream.end();
+      },
       events: translateEvents(sdkResult, () => aborted),
     };
   }
@@ -253,6 +257,7 @@ class ClaudeProvider implements AgentProvider {
 
 `translateEvents` is an async generator that yields `{ type: 'activity' }` for **every**
 SDK message (so the idle timer stays honest) and maps recognized messages to `ProviderEvent`:
+
 - `system`/`init` → `{ type: 'init', continuation: session_id }`
 - `result` → `{ type: 'result', text, isError }` — `text` is `result.result`, or the joined `result.errors[]` on error subtypes (billing/quota), so the notice still reaches the user
 - `system`/`api_retry` → `{ type: 'error', retryable: true }`
@@ -262,6 +267,7 @@ SDK message (so the idle timer stays honest) and maps recognized messages to `Pr
 - when the `aborted` flag is set → the generator returns immediately
 
 **Claude-specific behavior inside the provider:**
+
 - `MessageStream` for async iterable input (push-based follow-ups)
 - Resume via the SDK `resume` option keyed on the stored `continuation` (the SDK session ID) — no separate resume-at cursor
 - `TOOL_ALLOWLIST` (Bash, Read, Write, Edit, Glob, Grep, WebSearch, WebFetch, Task, Skill, …) extended at the call site with a `mcp__<server>__*` pattern per registered MCP server; `SDK_DISALLOWED_TOOLS` blocks SDK builtins that collide with NanoClaw's own scheduling/interaction model (CronCreate/Delete/List, ScheduleWakeup, AskUserQuestion, Enter/ExitPlanMode, Enter/ExitWorktree)
@@ -293,7 +299,9 @@ class CodexProvider implements AgentProvider {
         pendingFollowUp = msg;
         abortController.abort();
       },
-      end: () => { /* no-op — Codex turns end naturally */ },
+      end: () => {
+        /* no-op — Codex turns end naturally */
+      },
       abort: () => abortController.abort(),
       events: this.run(thread, input.prompt, abortController, () => pendingFollowUp),
     };
@@ -351,6 +359,7 @@ class CodexProvider implements AgentProvider {
 ```
 
 **Codex-specific behavior inside the provider:**
+
 - `developer_instructions` for system prompt (loaded from CLAUDE.md)
 - `git init` in workspace (Codex requires a git repo)
 - Abort+restart pattern for follow-up messages
@@ -374,10 +383,15 @@ class OpenCodeProvider implements AgentProvider {
     return {
       push: (msg) => {
         pendingFollowUp = msg;
-        server.close();  // interrupt current query
+        server.close(); // interrupt current query
       },
-      end: () => { /* no-op */ },
-      abort: () => { aborted = true; server.close(); },
+      end: () => {
+        /* no-op */
+      },
+      abort: () => {
+        aborted = true;
+        server.close();
+      },
       events: this.run(client, server, stream, input, () => pendingFollowUp),
     };
   }
@@ -419,6 +433,7 @@ class OpenCodeProvider implements AgentProvider {
 ```
 
 **OpenCode-specific behavior inside the provider:**
+
 - Local gRPC/HTTP server lifecycle (`server.close()`)
 - SSE event stream for output
 - Provider/model selection via config (`OPENCODE_PROVIDER`, `OPENCODE_MODEL`)
@@ -465,6 +480,7 @@ Everything below is handled by the agent-runner, not the provider.
 **Idle behavior:** When no messages are pending and no query is active, the agent-runner sleeps briefly (1s) and re-polls. The container stays warm until the host kills it (idle timeout).
 
 **Idle detection exceptions:** The container should NOT be considered idle when:
+
 - An `ask_user_question` tool call is pending (waiting for user response in messages_in)
 - The agent is actively working (tool calls in progress, subagents running)
 
@@ -483,9 +499,11 @@ the destination map), so the agent always knows where a message came from — ro
 themselves are never shown.
 
 - **`chat`** — one `<message>` per row:
+
   ```xml
   <message id="5" from="family" sender="John" time="Jan 1, 10:00 AM">Check this PR</message>
   ```
+
   A reply carries a `reply_to` attribute and an inline `<quoted_message from="…">…</quoted_message>`.
 
 - **`chat-sdk`** — same `<message>` shape, fields extracted from the serialized Chat SDK
@@ -494,6 +512,7 @@ themselves are never shown.
   natively are also passed as content blocks (see Media Handling below).
 
 - **`task`** — a `<task>` element, script output first when present:
+
   ```xml
   <task from="scheduler" time="Jan 1, 9:00 AM" current_time="Thursday, January 1, 2026 at 9:01 AM">Script output:
   {"data": …}
@@ -509,6 +528,7 @@ themselves are never shown.
   timezone.
 
 - **`webhook`** — a `<webhook>` element wrapping the JSON payload:
+
   ```xml
   <webhook from="github" source="github" event="pull_request">{"action": "opened", …}</webhook>
   ```
@@ -546,7 +566,7 @@ interface RoutingContext {
   platformId: string | null;
   channelType: string | null;
   threadId: string | null;
-  inReplyTo: string | null;  // messages_in.id of the triggering message
+  inReplyTo: string | null; // messages_in.id of the triggering message
 }
 ```
 
@@ -628,6 +648,7 @@ Send a file to a named destination (same destination model as `send_message`).
 ```
 
 Implementation:
+
 1. Resolve routing via `resolveRouting(to)` (as `send_message`)
 2. Generate a message ID and create `/workspace/outbox/{messageId}/`
 3. Copy the file into that outbox directory
@@ -691,6 +712,7 @@ Send an interactive question and wait for the user's response. This is a **block
 ```
 
 Implementation:
+
 1. Generate a `questionId` and normalize each option to `{ label, selectedLabel, value }`
 2. Write a `messages_out` row with `kind: 'chat-sdk'` and content `{ type: 'ask_question', questionId, title, question, options }`
 3. Poll `inbound.db` (read-only) for a pending `messages_in` row whose content carries the matching `questionId` (`findQuestionResponse`), skipping any already in `processing_ack`
@@ -813,12 +835,12 @@ The agent-runner inspects attachments in chat/chat-sdk messages and handles them
 
 **Provider-native content blocks:**
 
-| Type | Claude | Codex / OpenCode |
-|------|--------|------------------|
-| Images (JPEG, PNG, GIF, WebP) | Native image content block | Save to disk |
-| PDFs | Native document content block | Save to disk |
-| Audio | Native audio content block | Save to disk |
-| Other files (code, data, video, archives) | Save to disk | Save to disk |
+| Type                                      | Claude                        | Codex / OpenCode |
+| ----------------------------------------- | ----------------------------- | ---------------- |
+| Images (JPEG, PNG, GIF, WebP)             | Native image content block    | Save to disk     |
+| PDFs                                      | Native document content block | Save to disk     |
+| Audio                                     | Native audio content block    | Save to disk     |
+| Other files (code, data, video, archives) | Save to disk                  | Save to disk     |
 
 **"Save to disk"** means: download to `/workspace/downloads/{messageId}/`, reference in the prompt text:
 
@@ -914,7 +936,6 @@ The provider name comes from the `provider` key in `/workspace/agent/container.j
 - **[architecture.md](architecture.md)** — High-level architecture (session DB schema, central DB, channel adapters, message flow)
 - **[api-details.md](api-details.md)** — Channel adapter interface, message content examples, host delivery logic
 
-
 ### Embedded Optimus compatibility (2026-09-11)
 
 - Load host provider plugins before validating the configured provider name. The persisted `pi_rpc` ID remains a legacy exception to new kebab-case IDs.
@@ -927,6 +948,7 @@ The provider name comes from the `provider` key in `/workspace/agent/container.j
 ## Explicit replies and delivery feedback
 
 - `reply_to_message_id` may reference a same-channel, same-platform inbound `chat`/`chat-sdk` row regardless of its `trigger` flag, or an already delivered outbound chat with a native platform message id. Reactions, tasks, system rows, unknown ids and cross-destination references are not native reply targets.
+- Host-synthesized wake rows (`sender`/`senderId: 'system'`: operator nudges `chief-nudge:*`, escalation resumes `sys-escresume-*`, approval notes, Chats bridge wakes) are never native reply targets. The newest waking row still chooses the route, but a synthetic one yields no `in_reply_to` (never an older human message instead), and explicit replies to them post unthreaded. The host re-checks at delivery: a reference naming a synthetic, non-chat or echo inbound row is dropped with a warning before the channel adapter sees it, which also covers containers on older runner images. Router-namespaced (`<platform-id>:<agent-group>`) and raw delivered platform ids pass unchanged.
 - A bad explicit target does not discard the post or inherit a different implicit reply. Envelope dispatch queues a standalone message, logs a warning, and persists a one-shot next-turn notice. `send_message` also queues standalone and returns the warning in its tool result. No explicit target keeps the existing authoritative task/chat threading rules.
 - Outbox acceptance is not channel delivery. Host adapter errors retain the existing retry/backoff/hold policy. First failures (retrying) and terminal failures emit `outbound.failed` and write non-trigger `delivery-feedback:*` system rows. The runner consumes these separately in its next initial or warm follow-up prompt, with completion acknowledgments; they do not wake it, compete for ordinary context slots, or age out like ambient chat.
-- Cybertron's existing Agents activity reader includes the projected `deliveries` failures with explicit delivery-failure labels, the same workspace/agent visibility checks, and mixed-source cursors. These are local diagnostics, never posts to the affected audience. No new page, live resend or automatic agent wake is introduced.
+- Cybertron's existing Agents activity reader includes the projected `deliveries` failures with explicit delivery-failure labels, credential-redacted reasons (token patterns, webhook/bot tokens, secret query parameters), the same workspace/agent visibility checks, and mixed-source cursors. These are local diagnostics, never posts to the affected audience. No new page, live resend or automatic agent wake is introduced.

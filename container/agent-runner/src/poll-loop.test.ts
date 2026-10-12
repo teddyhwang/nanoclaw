@@ -6,6 +6,7 @@ import path from 'path';
 import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './mailbox/sqlite/connection.js';
 import { getPendingMessages, markCompleted, type MessageInRow } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
+import { getAgentMailbox } from './mailbox/index.js';
 import { formatMessages, extractRouting, isClearCommand, isRunnerCommand } from './formatter.js';
 import { isHandledErrorResultEcho, processQuery } from './poll-loop.js';
 import { AUTH_FAILURE_USER_TEXT } from './provider-auth-failure.js';
@@ -774,6 +775,62 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(out).toHaveLength(1);
     expect(JSON.parse(out[0].content).text).toContain('AI status resolved');
     expect(out[0].in_reply_to).toBe('incident-start-platform-id');
+  });
+
+  describe('inherited reply target from a host-synthesized wake (2026-10-11 ai-friends "chief-nudge")', () => {
+    function insertWake(seq: number, id: string, content: object): void {
+      getInboundDb()
+        .prepare(
+          `INSERT INTO messages_in (seq, id, channel_type, platform_id, thread_id, kind, trigger, status, timestamp, content)
+           VALUES (?, ?, ?, ?, NULL, 'chat', 1, 'pending', '2026-10-12T00:33:00Z', ?)`,
+        )
+        .run(seq, id, ROUTING.channelType, ROUTING.platformId, JSON.stringify(content));
+    }
+
+    it('posts a plain operator-nudge reply exactly once, unthreaded, in the nudged chat', async () => {
+      insertChannelDestination('ai-friends');
+      insertWake(6545, 'chief-nudge:appr_f43d0400-d580-4d0d-a420-81a29872815c', {
+        text: '[Operator note from Teddy via Dashboard Chats — instructions for you]\nPost the summary.',
+        sender: 'system',
+        senderId: 'system',
+        senderName: 'Operator (Dashboard Chats)',
+        source: 'dashboard_operator_nudge',
+      });
+      const routing = extractRouting(getPendingMessages());
+      expect(routing.platformId).toBe(ROUTING.platformId);
+      expect(routing.channelType).toBe('discord');
+      expect(routing.inReplyTo).toBeNull();
+
+      const result = await dispatchResultText('<message to="ai-friends">Summary post.</message>', routing);
+      expect(result.sent).toBe(1);
+      const out = getUndeliveredMessages().filter((row) => row.kind === 'chat');
+      expect(out).toHaveLength(1);
+      expect(out[0].in_reply_to).toBeNull();
+      expect(out[0].platform_id).toBe(ROUTING.platformId);
+      expect(JSON.parse(out[0].content).text).toBe('Summary post.');
+      // The MCP/destination fallback sees the same newest wake: no reference,
+      // and never an older human message instead.
+      expect(getAgentMailbox().operations.getLatestInboundRoute('discord', ROUTING.platformId!)).toEqual({
+        threadId: null,
+        inReplyTo: null,
+      });
+      // An explicit reply to the wake's seq is refused (posts unthreaded).
+      expect(getAgentMailbox().operations.getReplyTargetMessageIdBySeq(6545)).toBeNull();
+    });
+
+    it('keeps a valid router-namespaced Discord reply reference unchanged', async () => {
+      insertChannelDestination('ai-friends');
+      const id = '1558991246817628182:ag-1778154011329-g9zust';
+      insertWake(6546, id, { text: 'what do you think?', sender: 'Teddy', senderId: 'discord:4242' });
+      const routing = extractRouting(getPendingMessages());
+      expect(routing.inReplyTo).toBe(id);
+      await dispatchResultText('<message to="ai-friends">Reply.</message>', routing);
+      const out = getUndeliveredMessages().filter((row) => row.kind === 'chat');
+      expect(out).toHaveLength(1);
+      expect(out[0].in_reply_to).toBe(id);
+      expect(getAgentMailbox().operations.getLatestInboundRoute('discord', ROUTING.platformId!)?.inReplyTo).toBe(id);
+      expect(getAgentMailbox().operations.getReplyTargetMessageIdBySeq(6546)).toBe(id);
+    });
   });
 
   it('natively replies to an accumulated trigger=0 inbound chat row', async () => {

@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { findByRouting } from './destinations.js';
+import { isInheritableReplyTarget } from './reply-target.js';
 import { readLatestTaskFire } from './db/task-fires.js';
 import type { MessageInRow } from './db/messages-in.js';
 import { TIMEZONE, formatLocalTime, formatLocalStamp } from './timezone.js';
@@ -297,7 +298,10 @@ export function extractRouting(messages: MessageInRow[]): RoutingContext {
     platformId: routeSource?.platform_id ?? null,
     channelType: routeSource?.channel_type ?? null,
     threadId: routeSource?.thread_id ?? null,
-    inReplyTo: replyTarget?.id ?? null,
+    // The newest waking row still decides the route; a host-synthesized one
+    // (operator nudge, escalation resume) is not a platform message, so the
+    // post goes out unthreaded instead of naming a non-existent message.
+    inReplyTo: replyTarget && isInheritableReplyTarget(replyTarget) ? replyTarget.id : null,
     // Echo rows riding along with a task remain ambient context and do not
     // change the local task-fire semantics. Echo-only batches are not tasks.
     taskFire: messages.some((m) => m.kind === 'task') && messages.every((m) => m.kind === 'task' || isSessionEcho(m)),
