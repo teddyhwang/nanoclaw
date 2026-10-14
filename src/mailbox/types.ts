@@ -187,6 +187,8 @@ export interface TaskFireOutcome {
   firedAt: string;
   status: string;
   hasOutput: boolean;
+  /** Runner-recorded error text (bounded). Embedders must sanitize before display. */
+  errorMessage?: string;
 }
 
 /** Host-visible outbound mailbox behavior. Storage layout and lifecycle are implementation-private. */

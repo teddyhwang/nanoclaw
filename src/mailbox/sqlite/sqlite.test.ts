@@ -30,6 +30,19 @@ describe('SQLite mailbox canonical serialization', () => {
     expect(mailbox.getLatestTaskFire('missing')).toBeUndefined();
   });
 
+  it('returns bounded runner error text when the column exists', () => {
+    const db = new Database(':memory:');
+    databases.push(db);
+    db.exec(`CREATE TABLE task_fires (task_id TEXT, series_id TEXT, fired_at TEXT, status TEXT, assistant_text TEXT, error_message TEXT);
+      INSERT INTO task_fires VALUES ('a', 'dream-test', '2026-10-14 08:00:12', 'error', NULL, 'boom ${'x'.repeat(3000)}');
+      INSERT INTO task_fires VALUES ('b', 'ok', '2026-10-14 08:00:12', 'silent', 'summary', NULL);`);
+    const mailbox = wrapSqliteOutbound(db);
+    const fire = mailbox.getLatestTaskFire('dream-test');
+    expect(fire?.errorMessage?.startsWith('boom ')).toBe(true);
+    expect(fire?.errorMessage).toHaveLength(2000);
+    expect(mailbox.getLatestTaskFire('ok')).not.toHaveProperty('errorMessage');
+  });
+
   it('round-trips full lifecycle records through the SQLite adapter', async () => {
     const inboundDb = new Database(':memory:');
     const outboundDb = new Database(':memory:');

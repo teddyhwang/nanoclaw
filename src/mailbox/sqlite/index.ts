@@ -381,14 +381,27 @@ export function wrapSqliteOutbound(
       const db = readable();
       // Old mailboxes predate runner-owned telemetry. Missing is not success.
       if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_fires'").get()) return undefined;
+      const hasErrorColumn = Boolean(
+        db.prepare("SELECT 1 FROM pragma_table_info('task_fires') WHERE name = 'error_message'").get(),
+      );
       const row = db
         .prepare(
           `SELECT task_id AS taskId, fired_at AS firedAt, status,
-                length(trim(coalesce(assistant_text, ''))) > 0 AS hasOutput
+                length(trim(coalesce(assistant_text, ''))) > 0 AS hasOutput,
+                ${hasErrorColumn ? 'substr(error_message, 1, 2000)' : 'NULL'} AS errorMessage
            FROM task_fires WHERE series_id = ? ORDER BY fired_at DESC, rowid DESC LIMIT 1`,
         )
-        .get(seriesId) as (Omit<TaskFireOutcome, 'hasOutput'> & { hasOutput: number }) | undefined;
-      return row && { ...row, firedAt: sqliteTimestamp(row.firedAt), hasOutput: Boolean(row.hasOutput) };
+        .get(seriesId) as
+        | (Omit<TaskFireOutcome, 'hasOutput' | 'errorMessage'> & { hasOutput: number; errorMessage: string | null })
+        | undefined;
+      if (!row) return undefined;
+      const { errorMessage, ...rest } = row;
+      return {
+        ...rest,
+        firedAt: sqliteTimestamp(row.firedAt),
+        hasOutput: Boolean(row.hasOutput),
+        ...(errorMessage ? { errorMessage } : {}),
+      };
     },
     getTerminalProcessingAcks: () =>
       (
