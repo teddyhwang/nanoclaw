@@ -133,8 +133,8 @@ export function buildRotationNotice(reason: string): string {
   return (
     `Your previous conversation thread was rotated (${reason}) before this turn. ` +
     `Recent conversational context may be missing. In-flight work is recorded under ` +
-    `"Open items" in your memory index (already loaded) and archived transcripts are in ` +
-    `conversations/. Consult them before answering anything ` +
+    `"Open items" in your memory index (already loaded); use search_conversations for ` +
+    `recent chat. Consult them before answering anything ` +
     `that depends on recent conversation state, and do not mention this housekeeping ` +
     `to users unless asked.`
   );

@@ -100,7 +100,7 @@ describe('buildRotationNotice', () => {
   it('names the reason and points at both context bridges', () => {
     expect(notice).toContain('context pressure');
     expect(notice).toContain('Open items');
-    expect(notice).toContain('conversations/');
+    expect(notice).toContain('search_conversations');
   });
 
   it('tells the agent not to surface the housekeeping', () => {
