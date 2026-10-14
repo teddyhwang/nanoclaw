@@ -147,24 +147,52 @@ describe('stopOrphanedSessions', () => {
 });
 
 describe('a delete that lands mid-spawn', () => {
-  it('leaves a spawn mid-start alone, then stops it on the next tick', async () => {
-    await ensureContainerConfig('ag-1');
-    let started!: () => void;
-    const startGate = new Promise<void>((resolve) => {
-      started = resolve;
-    });
-    const { handle, stop } = fakeHandle('sess-1', () => startGate);
-    prepare.mockResolvedValue(handle);
+  it.each([0, 1_100])(
+    'leaves a spawn mid-start alone, then stops it on the next tick (prepare delay: %i ms)',
+    async (prepareDelayMs) => {
+      await ensureContainerConfig('ag-1');
+      let releaseStart!: () => void;
+      const startGate = new Promise<void>((resolve) => {
+        releaseStart = resolve;
+      });
+      let enteredStart!: () => void;
+      const startEntered = new Promise<void>((resolve) => {
+        enteredStart = resolve;
+      });
+      const { handle, stop } = fakeHandle('sess-1', () => {
+        enteredStart();
+        return startGate;
+      });
+      prepare.mockImplementation(async () => {
+        // Exercise setup slower than vi.waitFor's default one-second timeout.
+        if (prepareDelayMs) await new Promise((resolve) => setTimeout(resolve, prepareDelayMs));
+        return handle;
+      });
 
-    const spawning = wakeContainer(session('sess-1'));
-    await vi.waitFor(() => expect(isContainerRunning('sess-1')).toBe(true));
-    await getDb().run('DELETE FROM sessions WHERE id = ?', 'sess-1');
-    expect(await stopOrphanedSessions()).toBe(0);
-    expect(stop).not.toHaveBeenCalled();
+      const spawning = wakeContainer(session('sess-1'));
+      try {
+        // Synchronize on the lifecycle event, not startup's wall-clock speed.
+        // A failed wake must fail this test rather than leave the barrier hanging.
+        await Promise.race([
+          startEntered,
+          spawning.then(() => {
+            throw new Error('Wake completed without entering start');
+          }),
+        ]);
+        expect(isContainerRunning('sess-1')).toBe(true);
+        await getDb().run('DELETE FROM sessions WHERE id = ?', 'sess-1');
+        expect(await stopOrphanedSessions()).toBe(0);
+        expect(stop).not.toHaveBeenCalled();
+      } finally {
+        // Even a failed assertion must settle the wake before teardown closes DB.
+        releaseStart();
+        await spawning;
+      }
 
-    started();
-    expect(await spawning).toBe(true);
-    expect(await stopOrphanedSessions()).toBe(1);
-    expect(stop).toHaveBeenCalledWith('orphaned');
-  });
+      expect(await spawning).toBe(true);
+      expect(await stopOrphanedSessions()).toBe(1);
+      expect(stop).toHaveBeenCalledWith('orphaned');
+    },
+    10_000,
+  );
 });
