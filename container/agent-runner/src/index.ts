@@ -92,7 +92,7 @@ async function main(): Promise<void> {
     // answer), plus the live destinations map. Everything else is loaded from
     // /workspace/agent/CLAUDE.md — one flat file the host composes per spawn
     // with every instruction source inlined, no imports. Per-group memory lives
-    // in /workspace/agent/CLAUDE.local.md and is loaded by the provider hook.
+    // in /workspace/agent/memory/ and is injected by the memory session hook.
     const instructions = buildSystemPromptAddendum(config.assistantName || undefined, {
       provider: providerName,
       model: config.model,

@@ -173,19 +173,16 @@ describe('composeGroupProjectDoc delivery', () => {
     expect(fs.existsSync(path.join(groupDirOf(ag.folder), 'CLAUDE.md'))).toBe(false);
   });
 
-  it('inlines IDENTITY, CURRENT, and KNOWLEDGE in order but never AGENTS', async () => {
+  it('inlines no legacy group kernel files (memory reaches agents via the memory hook)', async () => {
     const ag = await seed('ag-kernel', 'kernel-group');
     const dir = groupDirOf(ag.folder);
-    fs.writeFileSync(path.join(dir, 'IDENTITY.md'), 'IDENTITY_BODY');
-    fs.writeFileSync(path.join(dir, 'CURRENT.md'), 'CURRENT_BODY');
-    fs.writeFileSync(path.join(dir, 'KNOWLEDGE.md'), 'KNOWLEDGE_BODY');
-    fs.writeFileSync(path.join(dir, 'AGENTS.md'), 'AGENTS_MUST_NOT_INLINE');
+    for (const name of ['IDENTITY.md', 'CURRENT.md', 'KNOWLEDGE.md', 'AGENTS.md']) {
+      fs.writeFileSync(path.join(dir, name), `${name}_MUST_NOT_INLINE`);
+    }
 
     const doc = await compose(ag);
 
-    expect(doc.indexOf('IDENTITY_BODY')).toBeLessThan(doc.indexOf('CURRENT_BODY'));
-    expect(doc.indexOf('CURRENT_BODY')).toBeLessThan(doc.indexOf('KNOWLEDGE_BODY'));
-    expect(doc).not.toContain('AGENTS_MUST_NOT_INLINE');
+    expect(doc).not.toContain('_MUST_NOT_INLINE');
   });
 
   it('inlines filtered extra-skill instructions and async host context fragments', async () => {
@@ -209,21 +206,6 @@ describe('composeGroupProjectDoc delivery', () => {
     expect(doc).not.toContain('BLOCKED_HOST_SKILL');
     expect(doc).toContain('# Host Context: workspace-state');
     expect(doc).toContain('HOST_CONTEXT_FOR_ag-host-context');
-  });
-
-  it('refuses a symlinked group kernel file', async () => {
-    const ag = await seed('ag-kernel-link', 'kernel-link-group');
-    const victim = path.join(TEST_ROOT, 'kernel-victim.md');
-    fs.writeFileSync(victim, 'SYMLINKED_KERNEL_MUST_NOT_INLINE');
-    fs.symlinkSync(victim, path.join(groupDirOf(ag.folder), 'CURRENT.md'));
-
-    const doc = await compose(ag);
-
-    expect(doc).not.toContain('SYMLINKED_KERNEL_MUST_NOT_INLINE');
-    expect(log.warn).toHaveBeenCalledWith(
-      expect.stringContaining('unsafe group kernel source'),
-      expect.objectContaining({ reason: 'symlink' }),
-    );
   });
 
   it('inlines MCP server instructions from the container config', async () => {

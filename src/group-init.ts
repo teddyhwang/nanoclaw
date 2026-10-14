@@ -53,8 +53,6 @@ export async function initGroupFilesystem(
     initialized.push('groupDir');
   }
 
-  scaffoldKernel(groupDir, initialized);
-
   // plugins/ always exists (even for plugin-less groups) so the read-only
   // plugins mount in container-runner.ts is unconditional.
   const pluginsDir = path.join(groupDir, 'plugins');
@@ -108,36 +106,5 @@ export async function initGroupFilesystem(
       id: group.id,
       steps: initialized,
     });
-  }
-}
-
-const KERNEL_STUBS: Record<string, string> = {
-  'IDENTITY.md':
-    '# Identity\n\n' +
-    'Who you are in this group: voice, scope, permissions, who you talk to and how.\n' +
-    'Update only when a stable property of the group changes.\n',
-  'CURRENT.md':
-    '# Current\n\n' +
-    'Open items and recent context for fast session cold-starts. Updated each session.\n\n' +
-    '## Open Items\n\n## Recent Context\n',
-  'KNOWLEDGE.md':
-    '# Knowledge Index\n\n' +
-    'Files in `knowledge/` for lazy-loading. Add an entry whenever you create a structured-knowledge file.\n',
-};
-
-function scaffoldKernel(groupDir: string, initialized: string[]): void {
-  for (const [name, content] of Object.entries(KERNEL_STUBS)) {
-    const target = path.join(groupDir, name);
-    if (!fs.existsSync(target)) {
-      fs.writeFileSync(target, content);
-      initialized.push(name);
-    }
-  }
-  for (const sub of ['knowledge', 'notes']) {
-    const target = path.join(groupDir, sub);
-    if (!fs.existsSync(target)) {
-      fs.mkdirSync(target, { recursive: true });
-      initialized.push(`${sub}/`);
-    }
   }
 }

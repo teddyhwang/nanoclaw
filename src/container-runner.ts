@@ -28,7 +28,7 @@ import { CONTAINER_PLUGINS_DIR, materializeContainerJson } from './container-con
 import { getContainerConfig } from './db/container-configs.js';
 import { updateContainerConfigScalars } from './db/container-configs.js';
 import { CONTAINER_RUNTIME_BIN } from './container-runtime.js';
-import { getDocsRoot, getSharedDreamSource } from './engine/composer-hooks.js';
+import { getDocsRoot } from './engine/composer-hooks.js';
 import { emitEngineEvent } from './engine/events.js';
 import { acquireSpawnAdmission } from './engine/spawn-admission.js';
 import { getEnginePaths, resolveGroupDir } from './engine/paths.js';
@@ -775,12 +775,6 @@ async function finish(sessionId: string, runtime: ActiveSessionRuntime, failure?
   }
 
   try {
-    const agentGroup = await getAgentGroup(runtime.handle.key.agentGroupId);
-    if (agentGroup) cleanupSeededDream(agentGroup);
-  } catch (err) {
-    log.warn('Failed to resolve group during container finalization', { sessionId, err });
-  }
-  try {
     emitEngineEvent('container.stop', {
       sessionId,
       agentGroupId: runtime.handle.key.agentGroupId,
@@ -821,19 +815,6 @@ function containerStopEventReason(
   if (stopReason === 'shutdown') return 'shutdown';
   if (stopReason?.includes('idle')) return 'idle';
   return stopReason ? 'killed' : 'idle';
-}
-
-/** Remove a seeded DREAM.md only while it still matches the canonical source. */
-function cleanupSeededDream(agentGroup: AgentGroup): void {
-  try {
-    const sharedDream = getSharedDreamSource();
-    if (!sharedDream || !fs.existsSync(sharedDream.hostPath)) return;
-    const perGroupDream = path.join(resolveGroupDir(agentGroup), 'DREAM.md');
-    if (!fs.existsSync(perGroupDream)) return;
-    if (fs.readFileSync(perGroupDream).equals(fs.readFileSync(sharedDream.hostPath))) fs.unlinkSync(perGroupDream);
-  } catch (err) {
-    log.warn('Failed to clean up seeded DREAM.md', { agentGroupId: agentGroup.id, err });
-  }
 }
 
 /** Kill a container for a session. */
@@ -1352,23 +1333,6 @@ export async function buildMounts(
     });
   }
 
-  const sharedDream = getSharedDreamSource();
-  const perGroupDream = path.join(groupDir, 'DREAM.md');
-  if (sharedDream && fs.existsSync(sharedDream.hostPath)) {
-    try {
-      fs.copyFileSync(sharedDream.hostPath, perGroupDream);
-    } catch (err) {
-      log.warn('Failed to seed per-group DREAM.md before mount', { groupDir, err });
-    }
-    mounts.push({
-      hostPath: fs.realpathSync(sharedDream.hostPath),
-      containerPath: '/workspace/agent/DREAM.md',
-      readonly: true,
-      mountClass: 'allowlisted-extra',
-      scope,
-    });
-  }
-
   const globalDir = path.join(GROUPS_DIR, 'global');
   if (fs.existsSync(globalDir)) {
     mounts.push({
@@ -1404,7 +1368,7 @@ export async function buildMounts(
     const sharedDir = fs.existsSync(unresolved) ? fs.realpathSync(unresolved) : path.resolve(unresolved);
     for (const [name, target] of [
       ['memory', 'memory'],
-      ['IDENTITY.md', 'IDENTITY.md'],
+      ['instructions.prepend.md', 'instructions.prepend.md'],
       ['CLAUDE.md', 'CLAUDE.md'],
     ] as const) {
       const hostPath = path.join(sharedDir, name);

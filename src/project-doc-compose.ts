@@ -121,7 +121,6 @@ export function renderNativeSkillsSection(
  * unreachable in normal use; it is here so the pathological case is loud.
  */
 const CLAUDE_PROJECT_DOC_MAX_BYTES = 4 * 1024 * 1024;
-const GROUP_AUTHORED_SOURCE_MAX_BYTES = 4 * 1024 * 1024;
 
 export const DEFAULT_PROJECT_DOC: ProjectDocSpec = {
   fileName: 'CLAUDE.md',
@@ -133,7 +132,6 @@ export const DEFAULT_PROJECT_DOC: ProjectDocSpec = {
 const COMPOSED_HEADER =
   '<!-- Composed at spawn - do not edit. Standing instructions: instructions.prepend.md. Memory: memory/. -->';
 const BASE_DOC_SECTION = 'NanoClaw Runtime Contract';
-const KERNEL_FILES = ['IDENTITY.md', 'CURRENT.md', 'KNOWLEDGE.md'] as const;
 const NCL_DEPENDENT_MODULES = new Set(['cli', 'scheduling']);
 
 /** Resolve container sources the same way container-runner does for embedded hosts. */
@@ -153,60 +151,6 @@ function resolveBaseDocPath(baseDocPath: string, containerSourceDir: string): st
     ? path.resolve(process.env.NANOCLAW_PROJECT_ROOT)
     : process.cwd();
   return path.resolve(projectRoot, baseDocPath);
-}
-
-/**
- * Read an optional group-writable kernel file without following a symlink.
- * Explicit per-source accounting bounds host memory even for an agent-planted
- * multi-gigabyte file; the document-level cap remains a separate final guard.
- */
-function readGroupKernelFile(filePath: string, group: AgentGroup, sourceCap: number): string | null {
-  let stat: fs.Stats;
-  try {
-    stat = fs.lstatSync(filePath);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    throw err;
-  }
-  if (stat.isSymbolicLink() || !stat.isFile()) {
-    log.warn('Skipped unsafe group kernel source while composing project document', {
-      group: group.name,
-      file: filePath,
-      reason: stat.isSymbolicLink() ? 'symlink' : 'not a regular file',
-    });
-    return null;
-  }
-  if (stat.size > sourceCap) {
-    log.error('Skipped oversized group kernel source while composing project document', {
-      group: group.name,
-      file: filePath,
-      bytes: stat.size,
-      maxBytes: sourceCap,
-    });
-    return null;
-  }
-
-  let fd: number | undefined;
-  try {
-    fd = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-    const opened = fs.fstatSync(fd);
-    if (!opened.isFile() || opened.size > sourceCap) throw new Error('kernel source changed during safe open');
-    const content = fs.readFileSync(fd, 'utf-8');
-    const bytes = Buffer.byteLength(content, 'utf-8');
-    if (bytes > sourceCap) throw new Error(`kernel source exceeds ${sourceCap} bytes`);
-    return content;
-    // All failures are contained: a hostile kernel source must not dark a group.
-    // eslint-disable-next-line no-catch-all/no-catch-all
-  } catch (err) {
-    log.warn('Could not safely read group kernel source while composing project document', {
-      group: group.name,
-      file: filePath,
-      err,
-    });
-    return null;
-  } finally {
-    if (fd !== undefined) fs.closeSync(fd);
-  }
 }
 
 /** Regenerate one flat provider document from every enabled instruction source. */
@@ -253,14 +197,6 @@ export async function composeGroupProjectDoc(
       group: group.name,
       baseDoc,
     });
-  }
-
-  // Intentional Optimus exception to upstream's persona-only group input:
-  // live kernel state is part of the runtime contract. AGENTS.md is excluded.
-  const kernelSourceCap = Math.min(spec.maxBytes ?? GROUP_AUTHORED_SOURCE_MAX_BYTES, GROUP_AUTHORED_SOURCE_MAX_BYTES);
-  for (const fileName of KERNEL_FILES) {
-    const body = readGroupKernelFile(path.join(groupDir, fileName), group, kernelSourceCap);
-    if (body !== null) push(fileName, body);
   }
 
   for (const extra of spec.extraSections ?? []) push(extra.name, extra.body);

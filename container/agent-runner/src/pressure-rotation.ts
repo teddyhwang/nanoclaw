@@ -21,7 +21,7 @@
  *   2. When a turn ends above the pressure threshold (default 70% of the
  *      auto-compact window), the poll-loop pushes one HANDOFF turn into
  *      the still-warm query: the agent writes a handoff note to its
- *      notes/ + memory — durable kernel files that survive rotation by
+ *      memory/ (the Open items section of memory/index.md) — durable files that survive rotation by
  *      design — and replies `<internal>`-only.
  *   3. When the handoff turn's result arrives, the poll-loop itself
  *      clears the continuation state (rotation is deterministic — it does
@@ -110,11 +110,11 @@ export function buildPressureHandoffPrompt(tokensUsed: number, thresholdTokens: 
     `(threshold ${thresholdTokens.toLocaleString()}) and will be ROTATED to a fresh thread ` +
     `after this turn. Before rotation, write a concise handoff so the fresh thread keeps ` +
     `working context:\n` +
-    `1. Append a "## Handoff" section to today's note in your notes/ directory (create the ` +
-    `file if needed) capturing: conversations and commitments in flight, who asked for what ` +
-    `and what is still owed, decisions made on this thread, and any state a fresh thread ` +
-    `would need to continue seamlessly.\n` +
-    `2. Update your memory files if this thread surfaced durable facts not yet recorded.\n` +
+    `1. Update the "Open items" section of /workspace/agent/memory/index.md (it is reloaded ` +
+    `into every fresh thread) with what is in flight: conversations and commitments, who ` +
+    `asked for what and what is still owed, decisions made on this thread, and any state a ` +
+    `fresh thread would need to continue seamlessly. Keep it short; remove items that are done.\n` +
+    `2. Store any durable facts this thread surfaced in memory/ (follow memory/system/definition.md).\n` +
     `3. Do NOT send any channel messages for this maintenance turn — respond with a single ` +
     `<internal> block summarizing what you wrote. Rotation happens automatically after this ` +
     `turn; you do not need to call rotate_session.</system>`
@@ -125,16 +125,16 @@ export function buildPressureHandoffPrompt(tokensUsed: number, thresholdTokens: 
  * Notice stored in session_state at rotation time and prepended (wrapped
  * in `<system>`) to the fresh thread's first prompt, so the new thread
  * knows context was rotated and where the handoff lives. Without this the
- * fresh thread's only bridge is passive discoverability of notes/ and
+ * fresh thread's only bridge is passive discoverability of memory/ and
  * conversations/ — the "it compacted and then forgot everything"
  * experience.
  */
 export function buildRotationNotice(reason: string): string {
   return (
     `Your previous conversation thread was rotated (${reason}) before this turn. ` +
-    `Recent conversational context may be missing. A handoff note may exist in your ` +
-    `notes/ directory (look for a "## Handoff" section in the most recent note) and ` +
-    `archived transcripts in conversations/. Consult them before answering anything ` +
+    `Recent conversational context may be missing. In-flight work is recorded under ` +
+    `"Open items" in your memory index (already loaded) and archived transcripts are in ` +
+    `conversations/. Consult them before answering anything ` +
     `that depends on recent conversation state, and do not mention this housekeeping ` +
     `to users unless asked.`
   );

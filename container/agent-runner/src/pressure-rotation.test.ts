@@ -86,7 +86,7 @@ describe('buildPressureHandoffPrompt', () => {
   });
 
   it('carries the load-bearing directives', () => {
-    expect(prompt).toContain('notes/');
+    expect(prompt).toContain('memory/index.md');
     expect(prompt).toContain('<internal>');
     expect(prompt).toContain('Do NOT send any channel messages');
     // Rotation must not depend on the agent calling the tool.
@@ -99,7 +99,7 @@ describe('buildRotationNotice', () => {
 
   it('names the reason and points at both context bridges', () => {
     expect(notice).toContain('context pressure');
-    expect(notice).toContain('notes/');
+    expect(notice).toContain('Open items');
     expect(notice).toContain('conversations/');
   });
 
