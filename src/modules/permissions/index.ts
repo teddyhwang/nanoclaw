@@ -708,6 +708,9 @@ addMessageInterceptor(async (event: InboundEvent): Promise<boolean> => {
 
   const adapter = getDeliveryAdapter();
   if (adapter) {
+    // `instance` is the 11th positional arg. Passing it in the 7th slot
+    // (inReplyTo) made Discord reject the confirmation (message_reference
+    // "discord" is not a snowflake), so the approver never heard back.
     adapter
       .deliver(
         event.channelType,
@@ -720,9 +723,19 @@ addMessageInterceptor(async (event: InboundEvent): Promise<boolean> => {
             : `⚠️ Agent "${ag.name}" was created but the channel couldn't be connected — check the host logs.`,
         }),
         undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
         event.instance,
       )
-      .catch(() => {});
+      .catch((err) => {
+        log.error('Channel registration: new-agent confirmation delivery failed', {
+          messagingGroupId: row.messaging_group_id,
+          agentGroupId: ag.id,
+          err,
+        });
+      });
   }
   return true;
 });

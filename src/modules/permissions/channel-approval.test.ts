@@ -859,6 +859,57 @@ describe('unknown-channel registration flow', () => {
     expect(stillPending).toBe(0);
   });
 
+  it('create new agent: confirms to the approver with instance in the instance slot, not inReplyTo', async () => {
+    // Regression (2026-10-16): the confirmation passed `event.instance` as
+    // the 7th positional arg (inReplyTo). Discord rejected the reply
+    // reference ("discord" is not a snowflake) and the error was swallowed,
+    // so the approver saw nothing after typing the name.
+    const { routeInbound } = await import('../../router.js');
+    const { getResponseHandlers } = await import('../../response-registry.js');
+
+    await expectAsyncDelivery(() => routeInbound(groupMention('chat-confirm')));
+    const pending = (await getDb().get<{ messaging_group_id: string }>(
+      'SELECT messaging_group_id FROM pending_channel_approvals',
+    ))!;
+
+    for (const handler of getResponseHandlers()) {
+      const claimed = await handler({
+        questionId: pending.messaging_group_id,
+        value: 'new_agent',
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      });
+      if (claimed) break;
+    }
+
+    deliverMock.mockClear();
+    await routeInbound({
+      channelType: 'telegram',
+      platformId: 'dm-owner',
+      threadId: null,
+      instance: 'telegram',
+      message: {
+        id: 'name-reply-confirm',
+        kind: 'chat' as const,
+        content: JSON.stringify({ senderId: 'owner', senderName: 'Owner', text: 'Jon' }),
+        timestamp: now(),
+      },
+    });
+
+    const confirm = await vi.waitFor(() => {
+      const call = deliverMock.mock.calls.find(
+        (c) => c[1] === 'dm-owner' && String(c[4]).includes('created and connected'),
+      );
+      expect(call).toBeDefined();
+      return call!;
+    });
+    expect(confirm[0]).toBe('telegram');
+    expect(confirm[6]).toBeUndefined(); // inReplyTo
+    expect(confirm[10]).toBe('telegram'); // instance
+  });
+
   it('a name reply after the registration vanished is consumed without creating anything', async () => {
     const { routeInbound } = await import('../../router.js');
     const { getResponseHandlers } = await import('../../response-registry.js');
