@@ -79,14 +79,15 @@ const awaitingNameInput = new Map<string, PendingNameInput>();
 export const NAME_PROMPT_TEXT = "Reply with the name for your new agent (or 'cancel' to go back):";
 
 // Replies that abort the name step instead of naming an agent. Compared after
-// lowercasing and stripping everything but letters/spaces, so "Cancel.",
+// lowercasing and stripping everything but letters/digits/spaces (so "Stop2"
+// stays a name), so "Cancel.",
 // " BACK!" and "go back" all match. No agent may ever be named one of these.
 const ABORT_WORDS = new Set(['cancel', 'go back', 'back', 'stop']);
 
 export function isAbortReply(text: string): boolean {
   const normalized = text
     .toLowerCase()
-    .replace(/[^a-z\s]/g, ' ')
+    .replace(/[^a-z0-9\s]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
   return ABORT_WORDS.has(normalized);

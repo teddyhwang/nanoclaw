@@ -902,6 +902,16 @@ describe('unknown-channel registration flow', () => {
     });
   });
 
+  it('isAbortReply matches only the bare abort words, not names that contain them', async () => {
+    const { isAbortReply } = await import('./index.js');
+    for (const abort of ['cancel', ' Cancel. ', 'GO BACK', 'go   back!', 'Back?', 'stop']) {
+      expect(isAbortReply(abort), abort).toBe(true);
+    }
+    for (const name of ['Stop Sign Bot', 'Backend', 'Cancellation Bot', 'Stop2', 'Back 4', 'Jon']) {
+      expect(isAbortReply(name), name).toBe(false);
+    }
+  });
+
   it.each([' Cancel. ', 'go back', 'BACK!', 'stop'])(
     'create new agent: %j at the name prompt aborts, creates and wires nothing, and re-shows the choices',
     async (reply) => {
