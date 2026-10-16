@@ -1592,6 +1592,39 @@ it('does not push accumulated-only follow-ups into an active query', async () =>
 });
 
 describe('error result with no <message> envelope', () => {
+  it('a resend into the still-open query retires that route marker', async () => {
+    const pushes: string[] = [];
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 'sess-1' };
+      yield { type: 'result', text: null, isError: true };
+      expect(getAgentMailbox().operations.getState(FAILED_TURN_KEY)?.value).toContain('prompt');
+      insertMessage('m2', 'chat', { sender: 'A', text: 'resend' });
+      getInboundDb()
+        .prepare("UPDATE messages_in SET platform_id = 'chan-1', channel_type = 'discord' WHERE id = 'm2'")
+        .run();
+      const deadline = Date.now() + 2500;
+      while (pushes.length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+      yield { type: 'result', text: '<message to="discord-test">answered</message>' };
+    }
+    await processQuery(
+      { push: (m) => pushes.push(m), end: () => {}, events: events(), abort: () => {} },
+      { ...ERR_ROUTING },
+      ['m1'],
+      'claude',
+      null,
+      false,
+      'TestBot',
+      [],
+      null,
+      undefined,
+      '<message id="1">prompt</message>',
+      undefined,
+    );
+    expect(pushes[0]).toContain('resend');
+    expect(pushes.some((p) => p.includes('<failed_request>'))).toBe(false);
+    expect(getAgentMailbox().operations.getState(FAILED_TURN_KEY)).toBeUndefined();
+  });
+
   it('delivers a safe failure notice to the triggering channel and does not nudge', async () => {
     const budgetText = 'Spending limit reached. Add your own key at https://example.com/keys';
     const { query, pushes } = makeResultQuery({ type: 'result', text: budgetText, isError: true });
@@ -1607,7 +1640,7 @@ describe('error result with no <message> envelope', () => {
       [],
       null,
       undefined,
-      'prompt',
+      '<message id="1">prompt</message>',
       undefined,
     );
 
@@ -1625,7 +1658,9 @@ describe('error result with no <message> envelope', () => {
     // B(ii) prototype: the failed request is remembered for the next turn on
     // this route only, and nothing is sent or retried on its own.
     expect(getAgentMailbox().operations.getState(FAILED_TURN_KEY)).toBeDefined();
-    expect(consumeFailedTurnNotice(ERR_ROUTING)).toContain('<failed_request>\nprompt\n</failed_request>');
+    expect(consumeFailedTurnNotice(ERR_ROUTING)).toContain(
+      '<failed_request>\n<message id="1">prompt</message>\n</failed_request>',
+    );
     expect(getUndeliveredMessages().filter((row) => row.kind === 'chat')).toHaveLength(1);
   });
 

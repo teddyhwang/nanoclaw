@@ -45,6 +45,7 @@ import {
 import {
   buildFailedTurnRecord,
   clearFailedTurn,
+  clearFailedTurnFor,
   consumeFailedTurnNotice,
   failedTurnEligible,
   recordFailedTurn,
@@ -850,8 +851,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     // One-shot pickup of a request whose reply failed on this route
     // (failed-turn-notice.ts). Interactive turns only: Dream and task-only
-    // turns neither consume nor see it. Works on resumed and fresh threads.
-    if (!config.isDreamRun && taskFireContexts.length === 0) {
+    // turns neither consume nor see it, nor do routes that could never have
+    // recorded one (a2a, failure-notice wakes). Works on resumed and fresh threads.
+    if (!config.isDreamRun && taskFireContexts.length === 0 && failedTurnEligible(routing, false)) {
       const failedNotice = consumeFailedTurnNotice(routing);
       if (failedNotice) {
         log('Prepending failed-turn notice to prompt');
@@ -1445,10 +1447,16 @@ export async function processQuery(
   };
   let retryDedupSince: string | undefined;
   const queuedTurns: QueuedTurn[] = [];
+  // The user request the turn being answered still owes, for the failed-turn
+  // reminder. Tracked explicitly: archivePrompts is shifted at each result and
+  // its head may already be the NEXT turn's prompt. A pressure-handoff turn
+  // owes none (undefined), so it never re-raises an answered request.
+  let answeringPrompt: string | undefined = initialPrompt || undefined;
   const adoptTurn = (next: QueuedTurn): void => {
     Object.assign(routing, next.routing);
     unwrappedNudged = next.unwrappedNudged;
     retryDedupSince = next.retryDedupSince;
+    answeringPrompt = next.prompt;
     publishReplyRoute(routing);
     answering = true;
   };
@@ -1991,6 +1999,12 @@ export async function processQuery(
           unwrappedNudged: false,
           prompt,
         };
+        // The user wrote again on a route with an unfinished-request marker:
+        // this still-open thread already holds the failed turn, so retire the
+        // marker rather than let a later fresh thread resurface it.
+        if (keep.some((m) => m.kind === 'chat' || m.kind === 'chat-sdk') && failedTurnEligible(next.routing, false)) {
+          clearFailedTurnFor(next.routing);
+        }
         if (answering) queuedTurns.push(next);
         else adoptTurn(next);
         markCompleted(keptIds);
@@ -2129,7 +2143,10 @@ export async function processQuery(
             turnDropReasons = [];
             const next = queuedTurns.shift();
             if (next) adoptTurn(next);
-            else answering = false;
+            else {
+              answering = false;
+              answeringPrompt = undefined;
+            }
             dispatchingResult = false;
             continue;
           }
@@ -2193,7 +2210,7 @@ export async function processQuery(
                   routing,
                   authFailure ? AUTH_FAILURE_USER_TEXT : (event.error ?? FAILED_RUN_USER_TEXT),
                 );
-                rememberFailedTurn(routing, isTaskTurn, [archivePrompts[0] ?? initialPrompt]);
+                rememberFailedTurn(routing, isTaskTurn, [answeringPrompt]);
               }
               notifyExchangeComplete(onExchangeComplete, {
                 prompt: archivePrompts[0] ?? initialPrompt,
@@ -2228,7 +2245,7 @@ export async function processQuery(
                 pushRetry(
                   wrappingRetryPrompt(names, refusedBlocks),
                   retryDedupSince ?? resultBoundaryAt,
-                  archivePrompts[0] ?? initialPrompt,
+                  answeringPrompt,
                 );
                 pushAddressed.push(resultAddressed);
                 pushSuperseded.push(false);
@@ -2367,7 +2384,10 @@ export async function processQuery(
           turnDropReasons = [];
           const next = queuedTurns.shift();
           if (next) adoptTurn(next);
-          else answering = false;
+          else {
+            answering = false;
+            answeringPrompt = undefined;
+          }
           dispatchingResult = false;
         } else if (event.type === 'progress' && event.message.startsWith('Context compacted')) {
           compactedSinceLastResult = true;
@@ -2440,7 +2460,7 @@ export async function processQuery(
       // follow-ups in push order) for the next-turn reminder. A retry
       // re-queues the original prompt, so identical prompts collapse.
       const failedPrompts = [
-        ...(answering ? [{ routing, prompt: archivePrompts[0] ?? initialPrompt }] : []),
+        ...(answering ? [{ routing, prompt: answeringPrompt }] : []),
         ...queuedTurns.map((turn) => ({ routing: turn.routing, prompt: turn.prompt })),
       ];
       const promptsFor = (target: RoutingContext): string[] => [

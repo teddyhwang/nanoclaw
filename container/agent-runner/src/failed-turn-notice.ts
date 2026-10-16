@@ -50,18 +50,17 @@ export function failedTurnEligible(routing: RoutingContext, isTaskTurn: boolean)
 const MESSAGE_BLOCK = /<message\b[^>]*>[\s\S]*?<\/message>/g;
 
 /**
- * The user's request only: the formatted `<message>` blocks (their text is
- * XML-escaped, so a block can't end early). Drops the `<context>` header and
- * any runner `<system>` notices. Falls back to the prompt with those removed.
+ * The user's request only: the formatter's `<message>` blocks, whose text is
+ * XML-escaped so a block can't end early or smuggle markup. Drops the
+ * `<context>` header and runner `<system>` notices (stripped first, so an
+ * earlier reminder's quoted request is never re-recorded). A prompt with no
+ * `<message>` blocks (e.g. raw webhook JSON) records nothing: its text is not
+ * escaped and must never be echoed into a <system> reminder.
  */
 export function requestExcerpt(prompt: string): string {
-  const blocks = prompt.match(MESSAGE_BLOCK);
-  const text = blocks
-    ? blocks.join('\n')
-    : prompt
-        .replace(/<context\b[^>]*\/>/g, '')
-        .replace(/<system>[\s\S]*?<\/system>/g, '')
-        .trim();
+  const blocks = prompt.replace(/<system>[\s\S]*?<\/system>/g, '').match(MESSAGE_BLOCK);
+  if (!blocks) return '';
+  const text = blocks.join('\n');
   return text.length > FAILED_TURN_EXCERPT_CHARS ? `${text.slice(0, FAILED_TURN_EXCERPT_CHARS)}…` : text;
 }
 
@@ -140,6 +139,17 @@ export function recordFailedTurn(record: FailedTurnRecord): void {
 
 export function clearFailedTurn(): void {
   getAgentMailbox().operations.deleteState(FAILED_TURN_KEY);
+}
+
+/**
+ * Drop one route's marker without delivering it: the user already wrote
+ * again into the still-open query, whose thread holds the failed turn, so a
+ * later fresh thread must not resurface it.
+ */
+export function clearFailedTurnFor(routing: RoutingContext): void {
+  const records = readRecords();
+  const kept = records.filter((r) => !sameRoute(r, routing));
+  if (kept.length !== records.length) writeRecords(kept);
 }
 
 /**

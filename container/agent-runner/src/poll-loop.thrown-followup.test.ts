@@ -64,6 +64,7 @@ afterEach(() => closeSessionDb());
 async function runFailure(
   events: (pushes: string[], controller: AbortController) => AsyncGenerator<ProviderEvent>,
   initialKind = 'chat',
+  pressureRotationTokens?: number,
 ) {
   insertMessage('request-a', 'thread-a', initialKind);
   setContinuation('mock', 'previous-session');
@@ -73,6 +74,7 @@ async function runFailure(
   let recovered: unknown;
   const provider: AgentProvider = {
     registerMemorySessionHook: () => {},
+    ...(pressureRotationTokens === undefined ? {} : { pressureRotationTokens: () => pressureRotationTokens }),
     isSessionInvalid: (error) => {
       recovered = error;
       return true;
@@ -110,6 +112,22 @@ async function runFailure(
 }
 
 describe('provider throws with active or queued turns', () => {
+  it('handoff turn answering, provider throws: the answered request is not remembered', async () => {
+    await runFailure(
+      async function* (pushes) {
+        yield { type: 'text', text: '<message to="main">Answered A</message>' };
+        // Over the pressure threshold: the runner pushes the handoff turn.
+        yield { type: 'result', text: '', tokensUsed: 1_000 };
+        await waitFor(() => pushes.length === 1);
+        throw new Error(DIAGNOSTIC);
+      },
+      'chat',
+      100,
+    );
+    expect(visibleRows()[0] && JSON.parse(visibleRows()[0].content).text).toBe('Answered A');
+    expect(rememberedByThread()).toEqual({});
+  });
+
   it('notifies the unfinished follow-up at its own route, leaving the completed opening turn alone', async () => {
     await runFailure(async function* (pushes) {
       yield { type: 'text', text: '<message to="main">Answered A</message>' };

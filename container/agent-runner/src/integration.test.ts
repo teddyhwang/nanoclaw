@@ -10,6 +10,7 @@ import {
   setContinuationStartedAt,
 } from './db/session-state.js';
 import { getSessionRouting } from './db/session-routing.js';
+import { getAgentMailbox } from './mailbox/index.js';
 import { computeRotationDate, evaluateRotation } from './session-rotation.js';
 import { TIMEZONE } from './timezone.js';
 import { MockProvider } from './providers/mock.js';
@@ -1234,6 +1235,41 @@ describe('poll loop — provider error recovery', () => {
       expect(prompts[0]).toContain('What is this tree');
       // No automatic send: only the original failure notice plus answers to real turns.
       expect(getUndeliveredMessages().filter((r) => JSON.parse(r.content).failureNotice)).toHaveLength(1);
+    } finally {
+      c2.abort();
+      await loop2.catch(() => {});
+    }
+  });
+
+  it('a failure-notice wake on the same route neither sees nor consumes the reminder', async () => {
+    insertMessage(
+      'm1',
+      { sender: 'Nicole', text: 'What are top dishes' },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
+    const failing = new ThrowingProvider('native_terminal');
+    const c1 = new AbortController();
+    const loop1 = runPollLoopWithTimeout(failing as unknown as MockProvider, c1.signal, 2000);
+    await waitFor(() => getUndeliveredMessages().length > 0, 2000);
+    c1.abort();
+    await loop1.catch(() => {});
+
+    insertMessage(
+      'n1',
+      { text: 'Other agent failed', failureNotice: true },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
+    const prompts: string[] = [];
+    const provider = new MockProvider({}, (prompt) => {
+      prompts.push(prompt);
+      return '<message to="discord-test">ok</message>';
+    });
+    const c2 = new AbortController();
+    const loop2 = runPollLoopWithTimeout(provider, c2.signal, 3000);
+    try {
+      await waitFor(() => prompts.length >= 1, 2000);
+      expect(prompts[0]).not.toContain('<failed_request>');
+      expect(getAgentMailbox().operations.getState('failed_turn_notice')?.value).toContain('What are top dishes');
     } finally {
       c2.abort();
       await loop2.catch(() => {});
