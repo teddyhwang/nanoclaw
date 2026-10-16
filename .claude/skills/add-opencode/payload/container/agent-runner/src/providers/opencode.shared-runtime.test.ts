@@ -368,7 +368,7 @@ describe('shared runtime recovery', () => {
         .map((row) => (JSON.parse(row.content) as { text: string }).text);
       expect(sent).toEqual([
         ...(partial ? ['Completed before failure.'] : []),
-        'The agent run failed. Check the logs for details.',
+        "Sorry, I hit a problem and couldn't finish that. Please send it again.",
       ]);
       if (partial) expect(exchanges[0].result).toContain('Completed before failure.');
       expect(exchanges[0].status).toBe('error');
