@@ -10,6 +10,7 @@
  * instead of spamming the owner.
  */
 import { getDb } from '../../../db/connection.js';
+import { deletePendingNameInputsForApproval } from './pending-name-inputs.js';
 
 export interface PendingChannelApproval {
   messaging_group_id: string;
@@ -70,5 +71,8 @@ export async function updatePendingChannelApprovalCard(
 }
 
 export async function deletePendingChannelApproval(messagingGroupId: string): Promise<void> {
+  // Any "Create new agent" name prompt belongs to this approval and ends
+  // with it (also enforced by ON DELETE CASCADE where foreign keys are on).
+  await deletePendingNameInputsForApproval(messagingGroupId);
   await getDb().run('DELETE FROM pending_channel_approvals WHERE messaging_group_id = ?', messagingGroupId);
 }

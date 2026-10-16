@@ -1006,7 +1006,7 @@ describe('unknown-channel registration flow', () => {
     expect(confirm[10]).toBe('telegram'); // instance
   });
 
-  it('a name reply after the registration vanished is consumed without creating anything', async () => {
+  it('a name reply after the registration vanished creates nothing and clears the prompt', async () => {
     const { routeInbound } = await import('../../router.js');
     const { getResponseHandlers } = await import('../../response-registry.js');
 
@@ -1049,6 +1049,7 @@ describe('unknown-channel registration flow', () => {
     expect(agentGroupsAfter).toBe(agentGroupsBefore);
     const mgaCount = await countRows('SELECT COUNT(*) AS c FROM messaging_group_agents');
     expect(mgaCount).toBe(0);
+    expect(await countRows('SELECT COUNT(*) AS c FROM pending_name_inputs')).toBe(0);
   });
 });
 

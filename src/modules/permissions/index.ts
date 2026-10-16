@@ -59,6 +59,13 @@ import {
   updatePendingChannelApprovalCard,
   type PendingChannelApproval,
 } from './db/pending-channel-approvals.js';
+import {
+  claimPendingNameInput,
+  deletePendingNameInput,
+  getPendingNameInput,
+  isNameInputExpired,
+  setPendingNameInput,
+} from './db/pending-name-inputs.js';
 import { deletePendingSenderApproval, getPendingSenderApproval } from './db/pending-sender-approvals.js';
 import { hasAdminPrivilege } from './db/user-roles.js';
 import { getUser, upsertUser } from './db/users.js';
@@ -66,15 +73,11 @@ import { declineAndNotify, requestSenderApproval } from './sender-approval.js';
 import { ensureUserDm } from './user-dm.js';
 
 // ── Free-text name input state ──
-// Tracks approvers waiting for a text reply with the agent name. Keyed by
-// namespaced userId (e.g. "slack:U0ABC"). Cleared on receipt or restart.
-interface PendingNameInput {
-  channelMgId: string;
-  dmChannelType: string;
-  dmPlatformId: string;
-  dmInstance: string;
-}
-const awaitingNameInput = new Map<string, PendingNameInput>();
+// Approvers waiting for a text reply with the agent name live in
+// pending_name_inputs (./db/pending-name-inputs.ts), keyed by namespaced
+// userId (e.g. "slack:U0ABC"), so a prompt survives a host restart. Cleared
+// when the name is used, on cancel, when its approval is resolved or
+// deleted, and ignored (then dropped) once older than NAME_INPUT_TTL_MS.
 
 export const NAME_PROMPT_TEXT = "Reply with the name for your new agent (or 'cancel' to go back):";
 
@@ -605,11 +608,13 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
       });
       return true;
     }
-    awaitingNameInput.set(row.approver_user_id, {
-      channelMgId: row.messaging_group_id,
-      dmChannelType: approverDm.channel_type,
-      dmPlatformId: approverDm.platform_id,
-      dmInstance: approverDm.instance ?? approverDm.channel_type,
+    await setPendingNameInput({
+      approver_user_id: row.approver_user_id,
+      messaging_group_id: row.messaging_group_id,
+      dm_channel_type: approverDm.channel_type,
+      dm_platform_id: approverDm.platform_id,
+      dm_instance: approverDm.instance ?? approverDm.channel_type,
+      created_at: new Date().toISOString(),
     });
 
     try {
@@ -631,7 +636,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         messagingGroupId: row.messaging_group_id,
         err,
       });
-      awaitingNameInput.delete(row.approver_user_id);
+      await deletePendingNameInput(row.approver_user_id);
     }
     return true;
   }
@@ -690,12 +695,32 @@ addMessageInterceptor(async (event: InboundEvent): Promise<boolean> => {
   const userId = await extractAndUpsertUser(event);
   if (!userId) return false;
 
-  const pending = awaitingNameInput.get(userId);
-  if (!pending) return false;
-  if (event.channelType !== pending.dmChannelType || event.platformId !== pending.dmPlatformId) return false;
-  if ((event.instance ?? event.channelType) !== pending.dmInstance) return false;
+  const prompt = await getPendingNameInput(userId);
+  if (!prompt) return false;
+  if (event.channelType !== prompt.dm_channel_type || event.platformId !== prompt.dm_platform_id) return false;
+  if ((event.instance ?? event.channelType) !== prompt.dm_instance) return false;
 
-  awaitingNameInput.delete(userId);
+  // An expired prompt, or one whose approval was resolved or deleted,
+  // captures nothing: drop it and let the message route normally.
+  const row = await getPendingChannelApproval(prompt.messaging_group_id);
+  if (!row || isNameInputExpired(prompt)) {
+    await claimPendingNameInput(prompt);
+    log.info('Channel registration: stale name prompt dropped', {
+      messagingGroupId: prompt.messaging_group_id,
+      userId,
+      reason: row ? 'expired' : 'approval resolved',
+    });
+    return false;
+  }
+
+  // Consume exactly this prompt; a concurrent reply that already took it
+  // (or a newer click that replaced it) leaves this message alone.
+  if (!(await claimPendingNameInput(prompt))) return false;
+  const pending = {
+    dmChannelType: prompt.dm_channel_type,
+    dmPlatformId: prompt.dm_platform_id,
+    dmInstance: prompt.dm_instance,
+  };
 
   let text: string | undefined;
   try {
@@ -709,9 +734,6 @@ addMessageInterceptor(async (event: InboundEvent): Promise<boolean> => {
     log.warn('Channel registration: empty name reply, ignoring', { userId });
     return true;
   }
-
-  const row = await getPendingChannelApproval(pending.channelMgId);
-  if (!row) return true;
 
   if (isAbortReply(text)) {
     // Back out of the name step: create and wire nothing, keep the pending
