@@ -43,6 +43,13 @@ import {
   setCurrentReplyRoute,
 } from './db/session-state.js';
 import {
+  buildFailedTurnRecord,
+  clearFailedTurn,
+  consumeFailedTurnNotice,
+  failedTurnEligible,
+  recordFailedTurn,
+} from './failed-turn-notice.js';
+import {
   buildPressureHandoffPrompt,
   buildRotationNotice,
   shouldRequestPressureHandoff,
@@ -85,6 +92,14 @@ import type {
   ProviderExchange,
 } from './providers/types.js';
 import type { ProviderRuntimeContract } from './provider-contracts/registry.js';
+
+/**
+ * Generic user-facing notice for a turn that failed before it could answer.
+ * Written for the person in the chat, not the operator: diagnostics stay in
+ * the runner log and exchange archive. The next same-chat turn also gets a
+ * one-shot reminder of the unfinished request (failed-turn-notice.ts).
+ */
+export const FAILED_RUN_USER_TEXT = "Sorry, I hit a problem and couldn't finish that. Please send it again.";
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
@@ -659,6 +674,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         continuation = undefined;
         clearContinuation(config.providerName);
         clearContinuationStartedAt(config.providerName);
+        clearFailedTurn();
         await writeMessageOut({
           id: generateId(),
           kind: 'chat',
@@ -829,6 +845,17 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       if (notice) {
         log('Prepending rotation notice to fresh-thread prompt');
         promptForQuery = `<system>${notice}</system>\n\n${prompt}`;
+      }
+    }
+
+    // One-shot pickup of a request whose reply failed on this route
+    // (failed-turn-notice.ts). Interactive turns only: Dream and task-only
+    // turns neither consume nor see it. Works on resumed and fresh threads.
+    if (!config.isDreamRun && taskFireContexts.length === 0) {
+      const failedNotice = consumeFailedTurnNotice(routing);
+      if (failedNotice) {
+        log('Prepending failed-turn notice to prompt');
+        promptForQuery = `<system>${failedNotice}</system>\n\n${promptForQuery}`;
       }
     }
 
@@ -1413,6 +1440,8 @@ export async function processQuery(
     routing: RoutingContext;
     unwrappedNudged: boolean;
     retryDedupSince?: string;
+    /** The pushed prompt, kept so a failed queued turn can be remembered. */
+    prompt?: string;
   };
   let retryDedupSince: string | undefined;
   const queuedTurns: QueuedTurn[] = [];
@@ -1425,10 +1454,18 @@ export async function processQuery(
   };
   // A retry is another provider input, behind any follow-ups already pushed.
   // Preserve its original route, prompt and retry guards until it is answered.
-  const pushRetry = (prompt: string, dedupSince?: string): void => {
+  // `userPrompt` is the user request the retry still owes an answer to (a
+  // wrapping retry); the pressure handoff owes none, so it never feeds the
+  // failed-turn reminder.
+  const pushRetry = (prompt: string, dedupSince?: string, userPrompt?: string): void => {
     noteInput();
     query.push(prompt);
-    queuedTurns.push({ routing: { ...routing }, unwrappedNudged, retryDedupSince: dedupSince });
+    queuedTurns.push({
+      routing: { ...routing },
+      unwrappedNudged,
+      retryDedupSince: dedupSince,
+      prompt: userPrompt,
+    });
     archivePrompts.push(archivePrompts[0] ?? initialPrompt);
   };
 
@@ -1952,6 +1989,7 @@ export async function processQuery(
         const next: QueuedTurn = {
           routing: extractRouting(keep),
           unwrappedNudged: false,
+          prompt,
         };
         if (answering) queuedTurns.push(next);
         else adoptTurn(next);
@@ -2149,16 +2187,13 @@ export async function processQuery(
                 // Never answer a failure notice with another: an a2a or
                 // self-addressed failure chain stops after one notice. Keep
                 // the reason here, since the skipped notice was its only record.
-                log(
-                  `Error result — notice not sent on this route: ${event.error ?? 'The agent run failed. Check the logs for details.'}`,
-                );
+                log(`Error result — notice not sent on this route: ${event.error ?? FAILED_RUN_USER_TEXT}`);
               } else {
                 await deliverErrorResult(
                   routing,
-                  authFailure
-                    ? AUTH_FAILURE_USER_TEXT
-                    : (event.error ?? 'The agent run failed. Check the logs for details.'),
+                  authFailure ? AUTH_FAILURE_USER_TEXT : (event.error ?? FAILED_RUN_USER_TEXT),
                 );
+                rememberFailedTurn(routing, isTaskTurn, [archivePrompts[0] ?? initialPrompt]);
               }
               notifyExchangeComplete(onExchangeComplete, {
                 prompt: archivePrompts[0] ?? initialPrompt,
@@ -2190,7 +2225,11 @@ export async function processQuery(
                 wrappingRetryInFlight = true;
                 const destinations = getAllDestinations();
                 const names = destinations.map((d) => d.name).join(', ');
-                pushRetry(wrappingRetryPrompt(names, refusedBlocks), retryDedupSince ?? resultBoundaryAt);
+                pushRetry(
+                  wrappingRetryPrompt(names, refusedBlocks),
+                  retryDedupSince ?? resultBoundaryAt,
+                  archivePrompts[0] ?? initialPrompt,
+                );
                 pushAddressed.push(resultAddressed);
                 pushSuperseded.push(false);
               } else if (hasUnwrapped && resultAddressed) {
@@ -2397,6 +2436,26 @@ export async function processQuery(
       // an a2a reply's session by in_reply_to, so agent routes also compare it.
       // A turn woken only by failure notices sends none.
       const failedRoutes = [...(answering ? [routing] : []), ...queuedTurns.map((turn) => turn.routing)];
+      // Every unfinished prompt per route (answering turn first, then queued
+      // follow-ups in push order) for the next-turn reminder. A retry
+      // re-queues the original prompt, so identical prompts collapse.
+      const failedPrompts = [
+        ...(answering ? [{ routing, prompt: archivePrompts[0] ?? initialPrompt }] : []),
+        ...queuedTurns.map((turn) => ({ routing: turn.routing, prompt: turn.prompt })),
+      ];
+      const promptsFor = (target: RoutingContext): string[] => [
+        ...new Set(
+          failedPrompts
+            .filter(
+              (entry) =>
+                entry.routing.platformId === target.platformId &&
+                entry.routing.channelType === target.channelType &&
+                entry.routing.threadId === target.threadId,
+            )
+            .map((entry) => entry.prompt)
+            .filter((prompt): prompt is string => !!prompt),
+        ),
+      ];
       const noticed: RoutingContext[] = [];
       for (const target of failedRoutes) {
         if (
@@ -2418,10 +2477,10 @@ export async function processQuery(
           continue;
         noticed.push(target);
         try {
-          await deliverErrorResult(
-            target,
-            authFailure ? AUTH_FAILURE_USER_TEXT : 'The agent run failed. Check the logs for details.',
-          );
+          await deliverErrorResult(target, authFailure ? AUTH_FAILURE_USER_TEXT : FAILED_RUN_USER_TEXT);
+          // A task-attributed answering turn was skipped above, so every
+          // target here is an interactive (or a2a, filtered by eligibility) turn.
+          rememberFailedTurn(target, false, promptsFor(target));
         } catch (noticeError) {
           log(
             `Failed to deliver query error notice: ${noticeError instanceof Error ? noticeError.message : String(noticeError)}`,
@@ -2565,6 +2624,18 @@ async function deliverProviderFile(providerPath: string, routing: RoutingContext
  * This is the same user-facing write the outer catch block does, minus the
  * `Error:` prefix — the provider's text is already a user-facing message.
  */
+/** Never lets bookkeeping break failure handling. */
+function rememberFailedTurn(routing: RoutingContext, isTaskTurn: boolean, prompts: Array<string | undefined>): void {
+  const known = prompts.filter((prompt): prompt is string => !!prompt);
+  if (known.length === 0 || !failedTurnEligible(routing, isTaskTurn)) return;
+  try {
+    const record = buildFailedTurnRecord(routing, known);
+    if (record) recordFailedTurn(record);
+  } catch (err) {
+    log(`Failed to record failed-turn notice: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 async function deliverErrorResult(routing: RoutingContext, text: string): Promise<void> {
   log('Error result with no <message> envelope — delivering to channel');
   // A rejected credential's raw text ("Failed to authenticate. API Error: 401

@@ -5,12 +5,13 @@ import { getUndeliveredMessages } from './db/messages-out.js';
 import { getCurrentReplyRoute, getContinuation, setContinuation } from './db/session-state.js';
 import { getAgentMailbox } from './mailbox/index.js';
 import { closeSessionDb, getInboundDb, initTestSessionDb } from './mailbox/sqlite/connection.js';
+import { FAILED_TURN_KEY, type FailedTurnRecord } from './failed-turn-notice.js';
 import { runPollLoop } from './poll-loop.js';
 import type { AgentProvider, ProviderEvent, ProviderExchange } from './providers/types.js';
 
 const CONTRACT = { textDelivery: 'mid-turn-complete', commands: { formatting: 'xml' } } as const;
 const DIAGNOSTIC = 'Private native provider diagnostic';
-const NOTICE = 'The agent run failed. Check the logs for details.';
+const NOTICE = "Sorry, I hit a problem and couldn't finish that. Please send it again.";
 
 function insertMessage(id: string, threadId: string, kind = 'chat', text = id): void {
   getInboundDb()
@@ -30,6 +31,13 @@ function insertAgentMessage(id: string, content: object): void {
        VALUES (?, 'chat', ?, 'pending', 1, 'ag-a', 'agent', NULL, ?)`,
     )
     .run(id, new Date().toISOString(), JSON.stringify(content));
+}
+
+/** Remembered unfinished requests per thread (next-turn reminder markers). */
+function rememberedByThread(): Record<string, string> {
+  const raw = getAgentMailbox().operations.getState(FAILED_TURN_KEY)?.value;
+  const records = raw ? (JSON.parse(raw) as FailedTurnRecord[]) : [];
+  return Object.fromEntries(records.map((r) => [r.threadId ?? '', r.excerpt]));
 }
 
 function visibleRows() {
@@ -115,6 +123,11 @@ describe('provider throws with active or queued turns', () => {
       ['Answered A', 'thread-a', 'request-a'],
       [NOTICE, 'thread-b', 'request-b'],
     ]);
+    // The completed opening turn is not remembered; the failed follow-up is.
+    const remembered = rememberedByThread();
+    expect(Object.keys(remembered)).toEqual(['thread-b']);
+    expect(remembered['thread-b']).toContain('>request-b</message>');
+    expect(remembered['thread-b']).not.toContain('<context');
   });
 
   it('preserves a partial answer and notifies every abandoned route once, including still-queued turns', async () => {
@@ -137,6 +150,15 @@ describe('provider throws with active or queued turns', () => {
       [NOTICE, 'thread-b'],
       [NOTICE, 'thread-d'],
     ]);
+    // Still-queued follow-ups keep their prompts: one marker per route, with
+    // every unfinished request on that route.
+    const remembered = rememberedByThread();
+    expect(Object.keys(remembered).sort()).toEqual(['thread-a', 'thread-b', 'thread-d']);
+    expect(remembered['thread-a']).toContain('>request-a</message>');
+    expect(remembered['thread-b']).toContain('>request-b</message>');
+    expect(remembered['thread-b']).toContain('>request-c</message>');
+    expect(remembered['thread-b']).not.toContain('request-d');
+    expect(remembered['thread-d']).toContain('>request-d</message>');
   });
 
   it('notifies each abandoned a2a request, since the host routes by in_reply_to', async () => {
@@ -155,6 +177,8 @@ describe('provider throws with active or queued turns', () => {
       [true, 'a2a-1'],
       [true, 'a2a-2'],
     ]);
+    // Agent routes never get a next-turn reminder; only the human opener does.
+    expect(Object.keys(rememberedByThread())).toEqual(['thread-a']);
   });
 
   it('sends no notice for a queued turn woken only by a failure notice', async () => {

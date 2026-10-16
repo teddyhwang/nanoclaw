@@ -10,6 +10,7 @@ import { getAgentMailbox } from './mailbox/index.js';
 import { formatMessages, extractRouting, isClearCommand, isRunnerCommand } from './formatter.js';
 import { isHandledErrorResultEcho, processQuery } from './poll-loop.js';
 import { AUTH_FAILURE_USER_TEXT } from './provider-auth-failure.js';
+import { FAILED_TURN_KEY, consumeFailedTurnNotice } from './failed-turn-notice.js';
 import { confirmationGatePaused, noteToolResult, resetConfirmationGateState } from './confirmation-gate-state.js';
 import { MockProvider } from './providers/mock.js';
 import {
@@ -1614,13 +1615,18 @@ describe('error result with no <message> envelope', () => {
     const delivered = out.filter((row) => row.kind === 'chat');
     expect(delivered).toHaveLength(1);
     expect(JSON.parse(delivered[0].content)).toEqual({
-      text: 'The agent run failed. Check the logs for details.',
+      text: "Sorry, I hit a problem and couldn't finish that. Please send it again.",
       failureNotice: true,
     });
     expect(delivered[0].platform_id).toBe('chan-1');
     expect(delivered[0].channel_type).toBe('discord');
     // No re-wrap nudge — an error result must not re-hammer the gateway.
     expect(pushes).toHaveLength(0);
+    // B(ii) prototype: the failed request is remembered for the next turn on
+    // this route only, and nothing is sent or retried on its own.
+    expect(getAgentMailbox().operations.getState(FAILED_TURN_KEY)).toBeDefined();
+    expect(consumeFailedTurnNotice(ERR_ROUTING)).toContain('<failed_request>\nprompt\n</failed_request>');
+    expect(getUndeliveredMessages().filter((row) => row.kind === 'chat')).toHaveLength(1);
   });
 
   it('suppresses a terminal error result for a task-only turn', async () => {
@@ -1655,6 +1661,7 @@ describe('error result with no <message> envelope', () => {
 
     expect(getUndeliveredMessages().filter((row) => row.kind === 'chat')).toHaveLength(0);
     expect(pushes).toHaveLength(0);
+    expect(getAgentMailbox().operations.getState(FAILED_TURN_KEY)).toBeUndefined();
   });
 
   // Danielle DM, 2026-09-24: the revoked OneCLI Claude token produced this
@@ -1810,7 +1817,7 @@ describe('error result with no <message> envelope', () => {
     const exchanges: ProviderExchange[] = [];
     await processQuery(query, ERR_ROUTING, ['m1'], 'mock', (exchange) => exchanges.push(exchange), 'prompt', undefined);
     expect(getUndeliveredMessages().map((row) => JSON.parse(row.content).text)).toEqual([
-      'The agent run failed. Check the logs for details.',
+      "Sorry, I hit a problem and couldn't finish that. Please send it again.",
     ]);
     expect(exchanges).toHaveLength(1);
     expect(exchanges[0].status).toBe('error');
@@ -1833,7 +1840,7 @@ describe('error result with no <message> envelope', () => {
       getUndeliveredMessages()
         .filter((row) => row.kind === 'chat')
         .map((row) => JSON.parse(row.content).text),
-    ).toEqual(['Completed before failure.', 'The agent run failed. Check the logs for details.']);
+    ).toEqual(['Completed before failure.', "Sorry, I hit a problem and couldn't finish that. Please send it again."]);
     expect(exchanges).toEqual([{ prompt: 'prompt', result: text, continuation: 'sess-1', status: 'error' }]);
     expect(pushes).toHaveLength(0);
   });
@@ -1865,7 +1872,7 @@ describe('error result with no <message> envelope', () => {
 
   it.each([
     ['provider error', 'billing hard-stop', 'billing hard-stop'],
-    ['fallback text', undefined, 'The agent run failed. Check the logs for details.'],
+    ['fallback text', undefined, "Sorry, I hit a problem and couldn't finish that. Please send it again."],
   ])('logs a skipped notice once when answering a failure notice: %s', async (_label, error, expected) => {
     const { query } = makeResultQuery({ type: 'result', text: '', isError: true, error });
     const noticeRouting = { ...AGENT_ROUTING, failureNoticeWake: true };
