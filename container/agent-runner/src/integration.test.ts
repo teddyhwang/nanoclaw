@@ -1195,6 +1195,79 @@ describe('poll loop — provider error recovery', () => {
 
     await loopPromise.catch(() => {});
   });
+
+  // B(ii) prototype (Nicole / Sanuki Udon, 2026-10-14): the failed request is
+  // carried once into the NEXT user-initiated turn on the same chat, and
+  // nothing is sent or retried until that turn arrives.
+  it('carries a failed chat request into the next turn on the same route', async () => {
+    insertMessage(
+      'm1',
+      { sender: 'Nicole', text: 'What are top dishes' },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
+    const failing = new ThrowingProvider('native_terminal');
+    const c1 = new AbortController();
+    const loop1 = runPollLoopWithTimeout(failing as unknown as MockProvider, c1.signal, 2000);
+    await waitFor(() => getUndeliveredMessages().length > 0, 2000);
+    c1.abort();
+    await loop1.catch(() => {});
+    expect(getUndeliveredMessages()).toHaveLength(1);
+
+    insertMessage(
+      'm2',
+      { sender: 'Nicole', text: 'What is this tree' },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
+    const prompts: string[] = [];
+    const provider = new MockProvider({}, (prompt) => {
+      prompts.push(prompt);
+      return `<message to="discord-test">Answer ${prompts.length}</message>`;
+    });
+    const c2 = new AbortController();
+    const loop2 = runPollLoopWithTimeout(provider, c2.signal, 3000);
+    try {
+      await waitFor(() => prompts.length >= 1, 2000);
+      expect(prompts[0]).toContain('<failed_request>');
+      expect(prompts[0]).toContain('What are top dishes');
+      expect(prompts[0]).toContain('What is this tree');
+      // No automatic send: only the original failure notice plus answers to real turns.
+      expect(getUndeliveredMessages().filter((r) => JSON.parse(r.content).failureNotice)).toHaveLength(1);
+    } finally {
+      c2.abort();
+      await loop2.catch(() => {});
+    }
+  });
+
+  it('does not carry a failed request into another chat sharing the session', async () => {
+    insertMessage(
+      'm1',
+      { sender: 'Nicole', text: 'What are top dishes' },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
+    const failing = new ThrowingProvider('native_terminal');
+    const c1 = new AbortController();
+    const loop1 = runPollLoopWithTimeout(failing as unknown as MockProvider, c1.signal, 2000);
+    await waitFor(() => getUndeliveredMessages().length > 0, 2000);
+    c1.abort();
+    await loop1.catch(() => {});
+
+    insertMessage('m2', { sender: 'Bob', text: 'hello' }, { platformId: 'chan-2', channelType: 'discord' });
+    const prompts: string[] = [];
+    const provider = new MockProvider({}, (prompt) => {
+      prompts.push(prompt);
+      return '<message to="discord-test">hi</message>';
+    });
+    const c2 = new AbortController();
+    const loop2 = runPollLoopWithTimeout(provider, c2.signal, 3000);
+    try {
+      await waitFor(() => prompts.length >= 1, 2000);
+      expect(prompts[0]).not.toContain('What are top dishes');
+      expect(prompts[0]).not.toContain('<failed_request>');
+    } finally {
+      c2.abort();
+      await loop2.catch(() => {});
+    }
+  });
 });
 
 describe('poll loop — task_fires recording', () => {

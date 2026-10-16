@@ -43,6 +43,13 @@ import {
   setCurrentReplyRoute,
 } from './db/session-state.js';
 import {
+  buildFailedTurnRecord,
+  clearFailedTurn,
+  consumeFailedTurnNotice,
+  failedTurnEligible,
+  recordFailedTurn,
+} from './failed-turn-notice.js';
+import {
   buildPressureHandoffPrompt,
   buildRotationNotice,
   shouldRequestPressureHandoff,
@@ -659,6 +666,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         continuation = undefined;
         clearContinuation(config.providerName);
         clearContinuationStartedAt(config.providerName);
+        clearFailedTurn();
         await writeMessageOut({
           id: generateId(),
           kind: 'chat',
@@ -829,6 +837,17 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       if (notice) {
         log('Prepending rotation notice to fresh-thread prompt');
         promptForQuery = `<system>${notice}</system>\n\n${prompt}`;
+      }
+    }
+
+    // One-shot pickup of a request whose reply failed on this route
+    // (failed-turn-notice.ts). Interactive turns only: Dream and task-only
+    // turns neither consume nor see it. Works on resumed and fresh threads.
+    if (!config.isDreamRun && taskFireContexts.length === 0) {
+      const failedNotice = consumeFailedTurnNotice(routing);
+      if (failedNotice) {
+        log('Prepending failed-turn notice to prompt');
+        promptForQuery = `<system>${failedNotice}</system>\n\n${promptForQuery}`;
       }
     }
 
@@ -2159,6 +2178,7 @@ export async function processQuery(
                     ? AUTH_FAILURE_USER_TEXT
                     : (event.error ?? 'The agent run failed. Check the logs for details.'),
                 );
+                rememberFailedTurn(routing, isTaskTurn, archivePrompts[0] ?? initialPrompt);
               }
               notifyExchangeComplete(onExchangeComplete, {
                 prompt: archivePrompts[0] ?? initialPrompt,
@@ -2422,6 +2442,9 @@ export async function processQuery(
             target,
             authFailure ? AUTH_FAILURE_USER_TEXT : 'The agent run failed. Check the logs for details.',
           );
+          // Only the answering turn's prompt is known here; queued turns'
+          // prompts were pushed into the provider and are not retained.
+          if (target === routing) rememberFailedTurn(target, false, archivePrompts[0] ?? initialPrompt);
         } catch (noticeError) {
           log(
             `Failed to deliver query error notice: ${noticeError instanceof Error ? noticeError.message : String(noticeError)}`,
@@ -2565,6 +2588,17 @@ async function deliverProviderFile(providerPath: string, routing: RoutingContext
  * This is the same user-facing write the outer catch block does, minus the
  * `Error:` prefix — the provider's text is already a user-facing message.
  */
+/** Never lets bookkeeping break failure handling. */
+function rememberFailedTurn(routing: RoutingContext, isTaskTurn: boolean, prompt: string | undefined): void {
+  if (!prompt || !failedTurnEligible(routing, isTaskTurn)) return;
+  try {
+    const record = buildFailedTurnRecord(routing, prompt);
+    if (record) recordFailedTurn(record);
+  } catch (err) {
+    log(`Failed to record failed-turn notice: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 async function deliverErrorResult(routing: RoutingContext, text: string): Promise<void> {
   log('Error result with no <message> envelope — delivering to channel');
   // A rejected credential's raw text ("Failed to authenticate. API Error: 401

@@ -10,6 +10,7 @@ import { getAgentMailbox } from './mailbox/index.js';
 import { formatMessages, extractRouting, isClearCommand, isRunnerCommand } from './formatter.js';
 import { isHandledErrorResultEcho, processQuery } from './poll-loop.js';
 import { AUTH_FAILURE_USER_TEXT } from './provider-auth-failure.js';
+import { FAILED_TURN_KEY, consumeFailedTurnNotice } from './failed-turn-notice.js';
 import { confirmationGatePaused, noteToolResult, resetConfirmationGateState } from './confirmation-gate-state.js';
 import { MockProvider } from './providers/mock.js';
 import {
@@ -1621,6 +1622,11 @@ describe('error result with no <message> envelope', () => {
     expect(delivered[0].channel_type).toBe('discord');
     // No re-wrap nudge — an error result must not re-hammer the gateway.
     expect(pushes).toHaveLength(0);
+    // B(ii) prototype: the failed request is remembered for the next turn on
+    // this route only, and nothing is sent or retried on its own.
+    expect(getAgentMailbox().operations.getState(FAILED_TURN_KEY)).toBeDefined();
+    expect(consumeFailedTurnNotice(ERR_ROUTING)).toContain('<failed_request>\nprompt\n</failed_request>');
+    expect(getUndeliveredMessages().filter((row) => row.kind === 'chat')).toHaveLength(1);
   });
 
   it('suppresses a terminal error result for a task-only turn', async () => {
@@ -1655,6 +1661,7 @@ describe('error result with no <message> envelope', () => {
 
     expect(getUndeliveredMessages().filter((row) => row.kind === 'chat')).toHaveLength(0);
     expect(pushes).toHaveLength(0);
+    expect(getAgentMailbox().operations.getState(FAILED_TURN_KEY)).toBeUndefined();
   });
 
   // Danielle DM, 2026-09-24: the revoked OneCLI Claude token produced this
