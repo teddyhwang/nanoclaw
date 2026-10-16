@@ -76,6 +76,22 @@ interface PendingNameInput {
 }
 const awaitingNameInput = new Map<string, PendingNameInput>();
 
+export const NAME_PROMPT_TEXT = "Reply with the name for your new agent (or 'cancel' to go back):";
+
+// Replies that abort the name step instead of naming an agent. Compared after
+// lowercasing and stripping everything but letters/spaces, so "Cancel.",
+// " BACK!" and "go back" all match. No agent may ever be named one of these.
+const ABORT_WORDS = new Set(['cancel', 'go back', 'back', 'stop']);
+
+export function isAbortReply(text: string): boolean {
+  const normalized = text
+    .toLowerCase()
+    .replace(/[^a-z\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return ABORT_WORDS.has(normalized);
+}
+
 async function extractAndUpsertUser(event: InboundEvent): Promise<string | null> {
   let content: Record<string, unknown>;
   try {
@@ -601,7 +617,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         approverDm.platform_id,
         null,
         'chat-sdk',
-        JSON.stringify({ text: 'Reply with the name for your new agent:' }),
+        JSON.stringify({ text: NAME_PROMPT_TEXT }),
         undefined,
         undefined,
         undefined,
@@ -695,6 +711,45 @@ addMessageInterceptor(async (event: InboundEvent): Promise<boolean> => {
 
   const row = await getPendingChannelApproval(pending.channelMgId);
   if (!row) return true;
+
+  if (isAbortReply(text)) {
+    // Back out of the name step: create and wire nothing, keep the pending
+    // approval open, and re-send its original choices to the approver only.
+    log.info('Channel registration: name step cancelled, re-showing choices', {
+      messagingGroupId: row.messaging_group_id,
+      userId,
+    });
+    const adapter = getDeliveryAdapter();
+    if (adapter) {
+      try {
+        await adapter.deliver(
+          pending.dmChannelType,
+          pending.dmPlatformId,
+          null,
+          'chat-sdk',
+          JSON.stringify({
+            type: 'ask_question',
+            questionId: row.messaging_group_id,
+            title: row.title,
+            question: row.question,
+            options: JSON.parse(row.options_json) as unknown,
+          }),
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          pending.dmInstance,
+        );
+      } catch (err) {
+        log.error('Channel registration: re-shown approval card delivery failed', {
+          messagingGroupId: row.messaging_group_id,
+          err,
+        });
+      }
+    }
+    return true;
+  }
 
   const ag = await createNewAgentGroup(text);
   log.info('Channel registration: new agent group created', {

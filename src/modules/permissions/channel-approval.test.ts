@@ -859,6 +859,92 @@ describe('unknown-channel registration flow', () => {
     expect(stillPending).toBe(0);
   });
 
+  async function startNamePrompt(chatId: string) {
+    const { routeInbound } = await import('../../router.js');
+    const { getResponseHandlers } = await import('../../response-registry.js');
+    await expectAsyncDelivery(() => routeInbound(groupMention(chatId)));
+    const pending = (await getDb().get<{ messaging_group_id: string; options_json: string; title: string }>(
+      'SELECT messaging_group_id, options_json, title FROM pending_channel_approvals',
+    ))!;
+    for (const handler of getResponseHandlers()) {
+      const claimed = await handler({
+        questionId: pending.messaging_group_id,
+        value: 'new_agent',
+        userId: 'owner',
+        channelType: 'telegram',
+        platformId: 'dm-owner',
+        threadId: null,
+      });
+      if (claimed) break;
+    }
+    return { routeInbound, pending };
+  }
+
+  function ownerDm(id: string, text: string) {
+    return {
+      channelType: 'telegram',
+      platformId: 'dm-owner',
+      threadId: null,
+      message: {
+        id,
+        kind: 'chat' as const,
+        content: JSON.stringify({ senderId: 'owner', senderName: 'Owner', text }),
+        timestamp: now(),
+      },
+    };
+  }
+
+  it('create new agent: the name prompt offers cancel', async () => {
+    await startNamePrompt('chat-prompt-text');
+    const prompt = deliverMock.mock.calls.find((c) => c[1] === 'dm-owner' && String(c[4]).includes('name for'));
+    expect(JSON.parse(String(prompt![4]))).toEqual({
+      text: "Reply with the name for your new agent (or 'cancel' to go back):",
+    });
+  });
+
+  it.each([' Cancel. ', 'go back', 'BACK!', 'stop'])(
+    'create new agent: %j at the name prompt aborts, creates and wires nothing, and re-shows the choices',
+    async (reply) => {
+      const agentsBefore = await countRows('SELECT COUNT(*) AS c FROM agent_groups');
+      const { routeInbound, pending } = await startNamePrompt(`chat-cancel-${reply.trim()}`);
+      deliverMock.mockClear();
+
+      await routeInbound(ownerDm(`cancel-${reply}`, reply));
+
+      expect(await countRows('SELECT COUNT(*) AS c FROM agent_groups')).toBe(agentsBefore);
+      expect(
+        await countRows(
+          'SELECT COUNT(*) AS c FROM messaging_group_agents WHERE messaging_group_id = ?',
+          pending.messaging_group_id,
+        ),
+      ).toBe(0);
+      expect(
+        await countRows(
+          'SELECT COUNT(*) AS c FROM pending_channel_approvals WHERE messaging_group_id = ?',
+          pending.messaging_group_id,
+        ),
+      ).toBe(1);
+      expect(await countRows("SELECT COUNT(*) AS c FROM agent_group_members WHERE user_id LIKE '%caller'")).toBe(0);
+
+      // Only the approver hears back: the original choices, same question id.
+      expect(deliverMock).toHaveBeenCalledTimes(1);
+      const [channelType, platformId, , , content] = deliverMock.mock.calls[0]!;
+      expect([channelType, platformId]).toEqual(['telegram', 'dm-owner']);
+      const card = JSON.parse(String(content)) as Record<string, unknown>;
+      expect(card).toMatchObject({
+        type: 'ask_question',
+        questionId: pending.messaging_group_id,
+        title: pending.title,
+        options: JSON.parse(pending.options_json),
+      });
+
+      // The next reply is ordinary chat, not a name: picking again still works.
+      deliverMock.mockClear();
+      await routeInbound(ownerDm(`after-${reply}`, 'Jon'));
+      expect(await countRows("SELECT COUNT(*) AS c FROM agent_groups WHERE name = 'Jon'")).toBe(0);
+    },
+  );
+
   it('create new agent: confirms to the approver with instance in the instance slot, not inReplyTo', async () => {
     // Regression (2026-10-16): the confirmation passed `event.instance` as
     // the 7th positional arg (inReplyTo). Discord rejected the reply
