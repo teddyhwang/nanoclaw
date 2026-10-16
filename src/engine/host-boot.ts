@@ -221,6 +221,7 @@ export async function _bootForHost(opts: { managedSignals: boolean }): Promise<v
           operation,
           text: outboundHistoryText(parsed),
           ts: new Date().toISOString(),
+          ...(operation === 'send' && files?.length ? { files } : {}),
         });
       }
       return deliveredId;

@@ -178,6 +178,12 @@ export interface EngineEventMap {
     operation: 'send' | 'edit' | 'delete';
     text: string | null;
     ts: string;
+    /**
+     * Attachments delivered with a `send` (the in-memory outbox buffers).
+     * Read-only for listeners: copy what you keep, never mutate. Absent when
+     * the message carried no files.
+     */
+    files?: readonly { filename: string; data: Buffer }[];
   };
   'outbound.failed': { sessionId: string; agentGroupId: string; channelType: string; platformId: string; err: unknown };
   'container.spawn': { sessionId: string; agentGroupId: string };
