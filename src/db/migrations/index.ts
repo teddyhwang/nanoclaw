@@ -33,6 +33,7 @@ import { migration023 } from './023-approvals-instance.js';
 import { migration024 } from './024-host-coordination.js';
 import { migration025 } from './025-container-config-speed.js';
 import { migration026 } from './026-pending-name-inputs.js';
+import { migration027 } from './027-consumed-inbound-messages.js';
 
 interface MigrationBase {
   version: number;
@@ -104,6 +105,7 @@ export const migrations: Migration[] = [
   migration024,
   migration025,
   migration026,
+  migration027,
 ];
 
 /**

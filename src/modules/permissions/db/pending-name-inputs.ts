@@ -5,7 +5,9 @@
  * captures a message days later. Rows cascade-delete with their pending
  * channel approval.
  */
+import type { InboundEvent } from '../../../channels/adapter.js';
 import { getDb } from '../../../db/connection.js';
+import { markInboundConsumed } from '../../../db/consumed-inbound.js';
 
 export const NAME_INPUT_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -60,6 +62,21 @@ export async function claimPendingNameInput(row: PendingNameInput): Promise<bool
     row.created_at,
   );
   return result.changes === 1;
+}
+
+/**
+ * Consume exactly this prompt with `reply`, and record the reply as consumed
+ * in the same transaction. Either both happen or neither: a restart can never
+ * leave the prompt gone while its reply looks unconsumed to channel recovery
+ * (which would route the reply to the DM's agent as chat), nor mark a reply
+ * whose prompt is still open. Returns false like claimPendingNameInput.
+ */
+export async function claimPendingNameInputWithReply(row: PendingNameInput, reply: InboundEvent): Promise<boolean> {
+  return getDb().transaction(async () => {
+    if (!(await claimPendingNameInput(row))) return false;
+    await markInboundConsumed(reply, 'new-agent-name');
+    return true;
+  });
 }
 
 export async function deletePendingNameInput(approverUserId: string): Promise<void> {

@@ -61,6 +61,7 @@ import {
 } from './db/pending-channel-approvals.js';
 import {
   claimPendingNameInput,
+  claimPendingNameInputWithReply,
   deletePendingNameInput,
   getPendingNameInput,
   isNameInputExpired,
@@ -714,8 +715,10 @@ addMessageInterceptor(async (event: InboundEvent): Promise<boolean> => {
   }
 
   // Consume exactly this prompt; a concurrent reply that already took it
-  // (or a newer click that replaced it) leaves this message alone.
-  if (!(await claimPendingNameInput(prompt))) return false;
+  // (or a newer click that replaced it) leaves this message alone. The claim
+  // also records this reply as consumed, atomically, so channel recovery
+  // after a restart never re-routes it as ordinary chat.
+  if (!(await claimPendingNameInputWithReply(prompt, event))) return false;
   const pending = {
     dmChannelType: prompt.dm_channel_type,
     dmPlatformId: prompt.dm_platform_id,
