@@ -126,14 +126,21 @@ describe('wrapping retry names why a wrapped block was refused', () => {
     expect(pushes[0]).not.toContain('refused');
   });
 
-  it('a refused block in an otherwise delivered turn becomes next-turn feedback, with no retry', async () => {
+  it('a refused block after another delivery gets an informed retry, then next-turn feedback if still refused', async () => {
     seedDest();
-    const pushes = await run(
-      { result: '<message to="ai-friends">Posted.</message>\n<message to="ai-friend">Lost.</message>' },
-      false,
+    const result = '<message to="ai-friends">Posted.</message>\n<message to="ai-friend">Lost.</message>';
+    const { query, pushes } = stubQuery(
+      (async function* (): AsyncGenerator<ProviderEvent> {
+        yield { type: 'result', text: result };
+        yield { type: 'result', text: result };
+      })(),
     );
+    await processQuery(query, CHAT_ROUTING, ['m1'], 'mock', undefined, 'prompt', undefined, false);
 
-    expect(pushes).toHaveLength(0);
+    expect(pushes).toHaveLength(1);
+    expect(pushes[0]).toContain('was wrapped, but it was refused');
+    expect(pushes[0]).not.toContain('it was not wrapped');
+    expect(pushes[0]).toContain('<sent_message to="ai-friends">Posted.</sent_message>');
     expect(chatRows()).toHaveLength(1);
     expect(pendingFeedback()).toContain('to="ai-friend" is not one of your destinations; that block was not posted.');
   });

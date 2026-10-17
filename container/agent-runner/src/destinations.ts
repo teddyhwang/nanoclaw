@@ -209,7 +209,7 @@ function buildDestinationsSection(): string {
   );
   lines.push('');
   lines.push(
-    'The `send_message` MCP tool is the same delivery, available mid-turn. It also accepts `reply_to_message_id` for the same reply-pill behavior. Each `send_message` call and each final-response `<message>` block lands as its own message in the conversation, so they read as a sequence rather than as one combined reply.',
+    'The `send_message` MCP tool is the same delivery, available mid-turn. Always pass its explicit `to` destination. It also accepts `reply_to_message_id` for the same reply-pill behavior. Send acknowledgments before slow tool calls, but your answer still has to be sent after it. Each `send_message` call and each final-response `<message>` block lands as its own message in the conversation, so they read as a sequence rather than as one combined reply.',
   );
   lines.push('');
   lines.push(

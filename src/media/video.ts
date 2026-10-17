@@ -27,9 +27,11 @@
  */
 import { execFile } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { promisify } from 'util';
 
+import { AnchoredDir } from '../anchored-dir.js';
 import { log } from '../log.js';
 
 import { MAX_IMAGE_DIMENSION } from './image-processing.js';
@@ -61,6 +63,11 @@ export interface ProcessVideoOpts {
    *  responsible for surfacing them to the container (e.g. as synthetic
    *  image attachments with a `localPath` relative to `/workspace`). */
   frameDir: string;
+  /** Pinned destination for agent-writable trees. The caller must keep it open
+   *  until this promise settles. frameDir is then a display path only, never
+   *  used for I/O. Without this handle, frameDir is walked from the filesystem
+   *  root and symlinked components are refused (including operator symlinks). */
+  frameOutput?: AnchoredDir;
   /** Source MIME type for the Gemini call. Defaults to `video/mp4`. */
   mimeType?: string;
   /** Host-injected credential reader (provider → secret). Looked up for
@@ -438,15 +445,30 @@ export async function processVideo(videoBuffer: Buffer, opts: ProcessVideoOpts):
   const tag = `${Date.now()}-${Math.round(videoBuffer.length % 1e6)
     .toString(36)
     .padStart(4, '0')}`;
-  const tmpInput = path.join(opts.frameDir, `.video-${tag}.bin`);
+  // ffmpeg must never receive an agent-writable output path: it follows
+  // symlinks and reopens names after awaits. All intermediate work happens in
+  // a private, host-owned scratch directory; only completed JPEG bytes cross
+  // into the pinned destination, via exclusive create.
+  let scratch: string | undefined;
+  let ownedOutput: AnchoredDir | null | undefined;
 
   let downscaled = false;
   let bytesForGemini = videoBuffer;
   let mimeForGemini = mimeType;
 
   try {
-    fs.mkdirSync(opts.frameDir, { recursive: true });
-    fs.writeFileSync(tmpInput, videoBuffer);
+    const absoluteDir = path.resolve(opts.frameDir);
+    const output =
+      opts.frameOutput ??
+      (ownedOutput = AnchoredDir.open(
+        path.parse(absoluteDir).root,
+        absoluteDir.slice(path.parse(absoluteDir).root.length).split(path.sep).filter(Boolean),
+        true,
+      ));
+    if (!output) return null;
+    scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-video-'));
+    const tmpInput = path.join(scratch, 'input.bin');
+    fs.writeFileSync(tmpInput, videoBuffer, { flag: 'wx' });
 
     const durationSeconds = await probeDurationSeconds(tmpInput);
     if (durationSeconds <= 0) {
@@ -463,9 +485,18 @@ export async function processVideo(videoBuffer: Buffer, opts: ProcessVideoOpts):
     const frames: ProcessVideoFrame[] = [];
     for (let i = 0; i < timestamps.length; i++) {
       const filename = `frame-${tag}-${i + 1}.jpg`;
-      const filePath = path.join(opts.frameDir, filename);
+      const filePath = path.join(scratch, filename);
       const ok = await extractFrame(tmpInput, timestamps[i], filePath);
-      if (ok) frames.push({ absolutePath: filePath, filename });
+      if (ok) {
+        try {
+          output.writeNewFile(filename, fs.readFileSync(filePath));
+          frames.push({ absolutePath: path.join(opts.frameDir, filename), filename });
+        } catch (err) {
+          // A planted symlink/FIFO/existing frame is never followed or
+          // overwritten. Preserve the transcript and any other safe frames.
+          log.warn('video: frame publication refused', { filename, err });
+        }
+      }
     }
 
     // Downscale for Gemini if needed. Frames were already extracted from the
@@ -568,9 +599,9 @@ export async function processVideo(videoBuffer: Buffer, opts: ProcessVideoOpts):
     return null;
   } finally {
     try {
-      fs.rmSync(tmpInput, { force: true });
-    } catch {
-      /* ignore */
+      ownedOutput?.close();
+    } finally {
+      if (scratch) fs.rmSync(scratch, { recursive: true, force: true });
     }
   }
 }

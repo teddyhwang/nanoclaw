@@ -75,6 +75,7 @@ import { resolveProviderName } from './providers/provider-name.js';
 import {
   providerStateVolumePath,
   realizeProviderSpawnSurfaces,
+  syncSharedSkillLinks,
   type ProviderSpawnRealization,
 } from './provider-contracts/realize.js';
 // Provider host-side config barrel — each provider that needs host-side
@@ -1619,46 +1620,16 @@ export function syncSkillSymlinks(
   group: AgentGroup | null = null,
   containerSourceDir = resolvedContainerSourceDir(),
 ): string[] {
-  const skillsDir = path.join(claudeDir, 'skills');
-  fs.mkdirSync(skillsDir, { recursive: true });
+  // Same body as the declared-contract path; real (non-symlink) entries are
+  // either a template overlay (intentional; see src/group-skills.ts) or a stale
+  // pre-refactor skill copy that shadows the shared skill (#3001), so the
+  // skip is surfaced as a warning.
   const targets = skillTargets(claudeDir, containerConfig, group, containerSourceDir);
   const selected = selectGatewayAgentSkills([...targets.keys()]);
   for (const name of targets.keys()) if (!selected.includes(name)) targets.delete(name);
   for (const name of selected) if (!targets.has(name)) targets.set(name, `/app/skills/${name}`);
-
-  for (const entry of fs.readdirSync(skillsDir)) {
-    const entryPath = path.join(skillsDir, entry);
-    try {
-      if (fs.lstatSync(entryPath).isSymbolicLink() && !targets.has(entry)) fs.unlinkSync(entryPath);
-    } catch {
-      /* unreadable/missing */
-    }
-  }
-
-  for (const [skill, target] of targets) {
-    const linkPath = path.join(skillsDir, skill);
-    let entry: fs.Stats | undefined;
-    try {
-      entry = fs.lstatSync(linkPath);
-    } catch {
-      /* missing */
-    }
-    if (!entry) {
-      fs.symlinkSync(target, linkPath);
-      continue;
-    }
-    if (!entry.isSymbolicLink()) {
-      log.warn(
-        'Shared skill not symlinked: real entry occupies the path (template overlay or stale pre-refactor copy)',
-        { skill, path: linkPath },
-      );
-      continue;
-    }
-    if (fs.readlinkSync(linkPath) === target) continue;
-    fs.unlinkSync(linkPath);
-    fs.symlinkSync(target, linkPath);
-  }
-  return [...targets.keys()];
+  syncSharedSkillLinks(claudeDir, ['skills'], selected, true, targets);
+  return selected;
 }
 
 function resolvedContainerSourceDir(): string {

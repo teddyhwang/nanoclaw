@@ -690,6 +690,45 @@ describe('syncSkillSymlinks', () => {
     expect(fs.existsSync(path.join(dir, 'skills', 'hidden'))).toBe(false);
   });
 
+  it('retains local/generated roots and repairs a changed extra-root target after a directory swap', () => {
+    const dir = tmpClaudeDir();
+    const extra = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-extra-retarget-'));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-skill-outside-'));
+    cleanups.push(() => {
+      for (const root of [dir, extra, outside]) fs.rmSync(root, { recursive: true, force: true });
+    });
+    fs.mkdirSync(path.join(extra, 'custom'));
+    fs.mkdirSync(path.join(dir, 'local-skills', 'local'), { recursive: true });
+    fs.mkdirSync(path.join(dir, 'generated-skills', 'generated'), { recursive: true });
+    const remove = addSkillRoot({ hostPath: extra, containerPath: '/old-skills' });
+    syncSkillSymlinks(dir, { ...containerConfig, skills: 'all' } as ContainerConfig);
+    remove();
+    cleanups.push(addSkillRoot({ hostPath: extra, containerPath: '/new-skills' }));
+    const skills = path.join(dir, 'skills');
+    const readlink = fs.readlinkSync;
+    let swapped = false;
+    const spy = vi.spyOn(fs, 'readlinkSync').mockImplementation(((...args: Parameters<typeof fs.readlinkSync>) => {
+      if (!swapped) {
+        swapped = true;
+        fs.renameSync(skills, `${skills}-moved`);
+        fs.symlinkSync(outside, skills);
+      }
+      return readlink(...args);
+    }) as typeof fs.readlinkSync);
+    try {
+      syncSkillSymlinks(dir, { ...containerConfig, skills: 'all' } as ContainerConfig);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(swapped).toBe(true);
+    expect(fs.readdirSync(outside)).toEqual([]);
+    expect(fs.readlinkSync(path.join(`${skills}-moved`, 'custom'))).toBe('/new-skills/custom');
+    expect(fs.readlinkSync(path.join(`${skills}-moved`, 'local'))).toBe('/home/node/.claude/local-skills/local');
+    expect(fs.readlinkSync(path.join(`${skills}-moved`, 'generated'))).toBe(
+      '/home/node/.claude/generated-skills/generated',
+    );
+  });
+
   it('prunes symlinks that are no longer selected', () => {
     const dir = tmpClaudeDir();
     syncSkillSymlinks(dir, { ...containerConfig, skills: ['welcome', 'vercel-cli'] } as ContainerConfig);
@@ -711,5 +750,16 @@ describe('syncSkillSymlinks', () => {
       expect.stringContaining('Shared skill not symlinked'),
       expect.objectContaining({ skill: 'welcome' }),
     );
+  });
+
+  it('leaves a host directory alone when the skills dir is a symlink to it', () => {
+    const dir = tmpClaudeDir();
+    const hostDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-host-'));
+    fs.symlinkSync('/somewhere', path.join(hostDir, 'stale-link'));
+    fs.symlinkSync(hostDir, path.join(dir, 'skills'));
+
+    syncSkillSymlinks(dir, { ...containerConfig, skills: ['welcome'] } as ContainerConfig);
+
+    expect(fs.readdirSync(hostDir).sort()).toEqual(['stale-link']);
   });
 });

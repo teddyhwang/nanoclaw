@@ -6,6 +6,7 @@ import { AsyncLocalStorage } from 'async_hooks';
 import fs from 'fs';
 import path from 'path';
 
+import { AnchoredDir } from './anchored-dir.js';
 import { deriveAttachmentName } from './attachment-naming.js';
 import { isSafeAttachmentName } from './attachment-safety.js';
 import type { OutboundFile } from './channels/adapter.js';
@@ -13,7 +14,6 @@ import { DATA_DIR } from './config.js';
 import { getPlatformCredentialReader } from './engine/platform-credentials.js';
 import { transcribeAudio } from './media/transcription.js';
 import { formatVideoMarker, processVideo } from './media/video.js';
-import { ensureContainedInboxDir, isPathInside } from './inbox-safety.js';
 import { getMessagingGroup } from './db/messaging-groups.js';
 import { isUniqueViolation } from './db/errors.js';
 import {
@@ -393,16 +393,15 @@ export async function writeSessionMessage(
  * Both `messageId` and `att.name` originate in untrusted input. WhatsApp
  * passes `msg.key.id` through raw (and that field is client generated, so a
  * peer can craft it), and other adapters may follow. The session dir is
- * mounted writable into the container, so a compromised agent can also
- * pre-place a symlink at `inbox/<future msgId>/` and wait for a chat message
- * with a matching id to redirect the host's write.
+ * mounted writable into the container, so the agent owns the `inbox` and
+ * `inbox/<msgId>` names and can turn either into a symlink at any time.
  *
- * Defenses, mirrored from the outbound side:
+ * Defenses:
  *   1. basename check on `messageId` and `filename`.
- *   2. lstat of the inbox dir to refuse pre-placed symlinks.
- *   3. realpath-based containment under the session inbox root.
- *   4. `wx` flag on writeFileSync to refuse following a pre-existing symlink
- *      at the target file path or overwriting any existing file.
+ *   2. `inbox/<messageId>` is opened as an AnchoredDir, refusing symlinks, and
+ *      every attachment is written through that descriptor, so a later swap
+ *      of either name cannot redirect a write.
+ *   3. exclusive create: never follows or overwrites an existing entry.
  */
 async function extractAttachmentFiles(
   agentGroupId: string,
@@ -425,135 +424,132 @@ async function extractAttachmentFiles(
     return contentStr;
   }
 
-  const inboxRoot = path.join(sessionDir(agentGroupId, sessionId), 'inbox');
-  // Resolved lazily on the first attachment that actually carries bytes, so a
+  // Opened lazily on the first attachment that actually carries bytes, so a
   // message whose attachments have no inline `data` never creates an inbox dir.
-  // ensureContainedInboxDir refuses a pre-placed symlink at the inbox root or
-  // the per-message subdir before any write lands outside the sandbox (#2828).
-  let inboxDir: string | null = null;
-  let inboxResolved = false;
+  let inbox: AnchoredDir | null | undefined;
 
   let changed = false;
-  // Synthetic `type:'image'` attachments for video keyframes. Collected
-  // during the loop (mutating `attachments` mid-iteration is unsafe) and
-  // appended after, so they flow through the container's existing
-  // `extractImageAttachments` vision rail with no per-harness branching.
   const syntheticFrames: Array<Record<string, unknown>> = [];
-  for (const att of attachments) {
-    if (typeof att.data !== 'string') continue;
+  try {
+    for (const att of attachments) {
+      if (typeof att.data !== 'string') continue;
 
-    const rawName = deriveAttachmentName(att);
-    const filename = isSafeAttachmentName(rawName) ? rawName : `attachment-${Date.now()}`;
-    if (filename !== rawName) {
-      log.warn('Refused unsafe attachment filename, would escape inbox', {
-        messageId,
-        rawName,
-        replacement: filename,
-      });
-    }
-
-    if (!inboxResolved) {
-      inboxDir = ensureContainedInboxDir(inboxRoot, messageId, { messageId });
-      inboxResolved = true;
-    }
-    // Unsafe inbox (symlink / escape) — no attachment can be written safely.
-    if (!inboxDir) break;
-
-    // Decode the base64 buffer ONCE here. Used immediately for the
-    // optional transcription pass (audio attachments) AND for the
-    // write-to-inbox step. Avoids the cost of decoding twice for a
-    // single voice message.
-    const buffer = Buffer.from(att.data as string, 'base64');
-
-    // Transcription pass — audio attachments get a host-side
-    // transcript stamped onto `att.transcript` before the file lands
-    // on disk. Channel-agnostic: every adapter that emits an audio
-    // attachment with `data` (post-S367 WhatsApp + chat-sdk-bridge
-    // channels) gets transcribed once here. Adapters MUST NOT
-    // transcribe inline anymore — the engine owns the single site.
-    //
-    // Failures fall through to the file-write below: the agent still
-    // sees the attachment marker; only the transcript text is missing.
-    if (isVoiceAttachment(att)) {
-      const reader = getPlatformCredentialReader();
-      try {
-        const transcript = await transcribeAudio(buffer, {
-          filename,
-          mimeType: typeof att.mimeType === 'string' ? att.mimeType : undefined,
-          getCredential: reader ?? undefined,
-        });
-        att.transcript = transcript;
-        changed = true;
-      } catch (err) {
-        log.warn('Voice transcription threw — continuing without transcript', {
+      const rawName = deriveAttachmentName(att);
+      const filename = isSafeAttachmentName(rawName) ? rawName : `attachment-${Date.now()}`;
+      if (filename !== rawName) {
+        log.warn('Refused unsafe attachment filename, would escape inbox', {
           messageId,
-          filename,
-          err: err instanceof Error ? err.message : String(err),
+          rawName,
+          replacement: filename,
         });
       }
-    }
 
-    // Video processing pass — channel-agnostic, single engine site (same as
-    // voice). Extracts keyframes into the inbox message dir + a Gemini
-    // transcript/visual-summary, stamps `att.transcript`/`att.summary` for the
-    // formatter, and queues the keyframes as synthetic `type:'image'`
-    // attachments so they ride the container's existing vision rail. Failures
-    // fall through: the agent still sees the `[video: …]` marker.
-    if (isVideoAttachment(att)) {
-      const reader = getPlatformCredentialReader();
-      try {
-        const result = await processVideo(buffer, {
-          frameDir: inboxDir,
-          mimeType: typeof att.mimeType === 'string' ? att.mimeType : undefined,
-          getCredential: reader ?? undefined,
-        });
-        if (result) {
-          att.transcript = result.transcript;
-          att.summary = result.summary;
-          att.videoMarker = formatVideoMarker(result.transcript, result.summary, result.transcriptStatus);
-          for (const frame of result.frames) {
-            syntheticFrames.push({
-              type: 'image',
-              name: frame.filename,
-              mimeType: 'image/jpeg',
-              localPath: `inbox/${messageId}/${frame.filename}`,
-              fromVideo: filename,
-            });
-          }
-          changed = true;
+      if (inbox === undefined) {
+        try {
+          inbox = AnchoredDir.open(sessionDir(agentGroupId, sessionId), ['inbox', messageId], true);
+        } catch (err) {
+          log.warn('Rejecting unsafe inbox directory', { messageId, err });
+          inbox = null;
         }
-      } catch (err) {
-        log.warn('Video processing threw — continuing without transcript/frames', {
-          messageId,
-          filename,
-          err: err instanceof Error ? err.message : String(err),
-        });
       }
-    }
+      // Unsafe inbox — no attachment can be written safely.
+      if (!inbox) break;
 
-    const filePath = path.join(inboxDir, filename);
-    try {
-      // wx = exclusive create. Refuses to follow a pre existing symlink or
-      // overwrite any existing file. The host expects to be the sole writer
-      // of these attachments.
-      fs.writeFileSync(filePath, buffer, { flag: 'wx' });
-    } catch (err: unknown) {
-      const e = err as NodeJS.ErrnoException;
-      if (e.code === 'EEXIST') {
-        log.warn('Inbox attachment target already exists, refusing to overwrite', {
-          messageId,
-          filename,
-        });
-        continue;
+      // Decode the base64 buffer ONCE here. Used immediately for the
+      // optional transcription pass (audio attachments) AND for the
+      // write-to-inbox step. Avoids the cost of decoding twice for a
+      // single voice message.
+      const buffer = Buffer.from(att.data as string, 'base64');
+
+      // Transcription pass — audio attachments get a host-side
+      // transcript stamped onto `att.transcript` before the file lands
+      // on disk. Channel-agnostic: every adapter that emits an audio
+      // attachment with `data` (post-S367 WhatsApp + chat-sdk-bridge
+      // channels) gets transcribed once here. Adapters MUST NOT
+      // transcribe inline anymore — the engine owns the single site.
+      //
+      // Failures fall through to the file-write below: the agent still
+      // sees the attachment marker; only the transcript text is missing.
+      if (isVoiceAttachment(att)) {
+        const reader = getPlatformCredentialReader();
+        try {
+          const transcript = await transcribeAudio(buffer, {
+            filename,
+            mimeType: typeof att.mimeType === 'string' ? att.mimeType : undefined,
+            getCredential: reader ?? undefined,
+          });
+          att.transcript = transcript;
+          changed = true;
+        } catch (err) {
+          log.warn('Voice transcription threw — continuing without transcript', {
+            messageId,
+            filename,
+            err: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
-      throw err;
-    }
 
-    att.name = filename;
-    att.localPath = `inbox/${messageId}/${filename}`;
-    delete att.data;
-    changed = true;
-    log.debug('Saved attachment to inbox', { messageId, filename, size: att.size });
+      // Video processing pass — channel-agnostic, single engine site (same as
+      // voice). Extracts keyframes into the inbox message dir + a Gemini
+      // transcript/visual-summary, stamps `att.transcript`/`att.summary` for the
+      // formatter, and queues the keyframes as synthetic `type:'image'`
+      // attachments so they ride the container's existing vision rail. Failures
+      // fall through: the agent still sees the `[video: …]` marker.
+      if (isVideoAttachment(att)) {
+        const reader = getPlatformCredentialReader();
+        try {
+          const result = await processVideo(buffer, {
+            frameDir: path.join(sessionDir(agentGroupId, sessionId), 'inbox', messageId),
+            frameOutput: inbox,
+            mimeType: typeof att.mimeType === 'string' ? att.mimeType : undefined,
+            getCredential: reader ?? undefined,
+          });
+          if (result) {
+            att.transcript = result.transcript;
+            att.summary = result.summary;
+            att.videoMarker = formatVideoMarker(result.transcript, result.summary, result.transcriptStatus);
+            for (const frame of result.frames) {
+              syntheticFrames.push({
+                type: 'image',
+                name: frame.filename,
+                mimeType: 'image/jpeg',
+                localPath: `inbox/${messageId}/${frame.filename}`,
+                fromVideo: filename,
+              });
+            }
+            changed = true;
+          }
+        } catch (err) {
+          log.warn('Video processing threw — continuing without transcript/frames', {
+            messageId,
+            filename,
+            err: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+
+      try {
+        inbox.writeNewFile(filename, buffer);
+      } catch (err: unknown) {
+        const e = err as NodeJS.ErrnoException;
+        if (e.code === 'EEXIST') {
+          log.warn('Inbox attachment target already exists, refusing to overwrite', {
+            messageId,
+            filename,
+          });
+          continue;
+        }
+        throw err;
+      }
+
+      att.name = filename;
+      att.localPath = `inbox/${messageId}/${filename}`;
+      delete att.data;
+      changed = true;
+      log.debug('Saved attachment to inbox', { messageId, filename, size: att.size });
+    }
+  } finally {
+    inbox?.close();
   }
 
   // Append video-derived keyframes after iteration so the container's
@@ -680,45 +676,32 @@ export function readOutboxFiles(
     return undefined;
   }
 
-  const outboxDir = path.join(sessionDir(agentGroupId, sessionId), 'outbox', messageId);
-  if (!fs.existsSync(outboxDir)) return undefined;
-
-  let realOutboxDir: string;
+  // The container owns `outbox` and everything below it: read only through
+  // descriptors, refusing symlinks at every level.
+  let outbox: AnchoredDir | null;
   try {
-    const stat = fs.lstatSync(outboxDir);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) {
-      log.warn('Rejecting unsafe outbox directory', { messageId, outboxDir });
-      return undefined;
-    }
-    realOutboxDir = fs.realpathSync(outboxDir);
+    outbox = AnchoredDir.open(sessionDir(agentGroupId, sessionId), ['outbox', messageId]);
   } catch (err) {
-    log.warn('Failed to inspect outbox directory', { messageId, err });
+    log.warn('Rejecting unsafe outbox directory', { messageId, err });
     return undefined;
   }
+  if (!outbox) return undefined;
 
   const files: OutboundFile[] = [];
-  for (const filename of filenames) {
-    if (!isSafeAttachmentName(filename)) {
-      log.warn('Refused unsafe outbox filename, would escape outbox', { messageId, filename });
-      continue;
-    }
-
-    const filePath = path.join(outboxDir, filename);
-    try {
-      const stat = fs.lstatSync(filePath);
-      if (!stat.isFile() || stat.isSymbolicLink()) {
-        log.warn('Rejecting unsafe outbox file', { messageId, filename });
+  try {
+    for (const filename of filenames) {
+      if (!isSafeAttachmentName(filename)) {
+        log.warn('Refused unsafe outbox filename, would escape outbox', { messageId, filename });
         continue;
       }
-      const realFilePath = fs.realpathSync(filePath);
-      if (!isPathInside(realOutboxDir, realFilePath)) {
-        log.warn('Rejecting outbox file outside message directory', { messageId, filename });
-        continue;
+      try {
+        files.push({ filename, data: outbox.readFile(filename) });
+      } catch (err) {
+        log.warn('Outbox file missing or not a regular file', { messageId, filename, err });
       }
-      files.push({ filename, data: fs.readFileSync(realFilePath) });
-    } catch {
-      log.warn('Outbox file not found', { messageId, filename });
     }
+  } finally {
+    outbox.close();
   }
   return files.length > 0 ? files : undefined;
 }
@@ -735,23 +718,23 @@ export function clearOutbox(agentGroupId: string, sessionId: string, messageId: 
     return;
   }
 
-  const outboxDir = path.join(sessionDir(agentGroupId, sessionId), 'outbox', messageId);
-  if (!fs.existsSync(outboxDir)) return;
+  let outbox: AnchoredDir | null = null;
   try {
-    const stat = fs.lstatSync(outboxDir);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) {
-      log.warn('Rejecting unsafe outbox cleanup directory', { messageId, outboxDir });
-      return;
+    outbox = AnchoredDir.open(sessionDir(agentGroupId, sessionId), ['outbox']);
+    const dir = outbox?.openDir(messageId);
+    if (!outbox || !dir) return;
+    // One level, no recursion: a message outbox holds the files it delivered.
+    // Anything else surfaces as an error below instead of being walked.
+    try {
+      for (const entry of dir.entries()) dir.unlink(entry);
+    } finally {
+      dir.close();
     }
-    const realOutboxBase = fs.realpathSync(path.join(sessionDir(agentGroupId, sessionId), 'outbox'));
-    const realOutboxDir = fs.realpathSync(outboxDir);
-    if (!isPathInside(realOutboxBase, realOutboxDir)) {
-      log.warn('Rejecting outbox cleanup outside session outbox', { messageId, outboxDir });
-      return;
-    }
-    fs.rmSync(realOutboxDir, { recursive: true, force: true });
+    outbox.rmdir(messageId);
   } catch (err) {
     log.warn('Outbox cleanup failed (message already delivered)', { messageId, err });
+  } finally {
+    outbox?.close();
   }
 }
 

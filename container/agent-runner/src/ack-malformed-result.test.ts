@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { closeSessionDb, getInboundDb, initTestSessionDb } from './mailbox/sqlite/connection.js';
 import { getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
-import { _resetShutdownStateForTests, runPollLoop } from './poll-loop.js';
+import { _resetShutdownStateForTests, prependDeliveryFeedback, runPollLoop } from './poll-loop.js';
 import type { AgentProvider, ProviderEvent } from './providers/types.js';
 
 beforeEach(() => {
@@ -88,7 +88,12 @@ async function runFixture(
   } finally {
     clearTimeout(timer);
   }
-  return { pushed, toolCalls, chat: getUndeliveredMessages().filter((row) => row.kind === 'chat') };
+  return {
+    pushed,
+    toolCalls,
+    chat: getUndeliveredMessages().filter((row) => row.kind === 'chat'),
+    feedback: prependDeliveryFeedback('next turn'),
+  };
 }
 
 const answer = 'Backup plan: owner A, deputy B, handover one month.';
@@ -137,12 +142,52 @@ describe.each([false, true])('acknowledgment must not hide malformed substantive
     ['explicit silence', '<internal>silent turn</internal>', []],
     ['tool echo', 'I will prepare the plan.</message>', []],
     ['valid tool echo', '<message to="test-chat">I will prepare the plan.</message>', []],
-    ['ordinary scratchpad', 'Tool completed; private bookkeeping.', []],
   ] as const)('preserves control %s without retry or leak', async (_label, final, expected) => {
     const result = await runFixture(final, wrapped, streamed);
     expect(result.pushed).toHaveLength(0);
     expect(result.chat.map((row) => JSON.parse(row.content).text)).toEqual(['I will prepare the plan.', ...expected]);
     expect(result.toolCalls).toBe(1);
+  });
+
+  it('informs a retry after bare bookkeeping rather than assuming the tool acknowledgment answered', async () => {
+    const result = await runFixture('Tool completed; private bookkeeping.', '<internal>done</internal>', streamed);
+    expect(result.pushed).toHaveLength(1);
+    expect(result.pushed[0]).toContain('<sent_message to="test-chat">I will prepare the plan.</sent_message>');
+    expect(result.pushed[0]).toContain('<undelivered_text>Tool completed; private bookkeeping.</undelivered_text>');
+    expect(result.chat.map((row) => JSON.parse(row.content).text)).toEqual(['I will prepare the plan.']);
+    expect(result.toolCalls).toBe(1);
+  });
+
+  it('retains reason-specific refusal diagnostics in an informed retry after an acknowledgment', async () => {
+    const result = await runFixture(`<message bogus="x">${answer}</message>`, wrapped, streamed);
+    expect(result.pushed).toHaveLength(1);
+    expect(result.pushed[0]).toContain('was wrapped, but it was refused');
+    expect(result.pushed[0]).toContain('no to=&quot;name&quot; attribute');
+    expect(result.pushed[0]).not.toContain('it was not wrapped');
+    expect(result.pushed[0]).toContain('<sent_message to="test-chat">I will prepare the plan.</sent_message>');
+    expect(result.chat.map((row) => JSON.parse(row.content).text)).toEqual(['I will prepare the plan.', answer]);
+  });
+
+  it.each([answer, `\n${answer}\n`])(
+    'does not send an addressed fallback when the retry repeats its original full tool reply: %s',
+    async (body) => {
+      const result = await runFixture('Sent.', `<message to="test-chat">${body}</message>`, streamed, body);
+      expect(result.pushed).toHaveLength(1);
+      expect(result.chat.map((row) => JSON.parse(row.content).text)).toEqual([body]);
+    },
+  );
+
+  it('keeps next-turn refusal feedback when the informed retry is exhausted', async () => {
+    const malformed = `<message bogus="x">${answer}</message>`;
+    const result = await runFixture(malformed, malformed, streamed);
+    expect(result.pushed).toHaveLength(1);
+    const feedback = JSON.parse(result.feedback.split('\n')[0]).delivery_feedback.join('\n');
+    expect(feedback).toContain('no to="name" attribute');
+    expect(feedback).toContain('that block was not posted');
+    expect(result.chat.map((row) => JSON.parse(row.content).text)).toEqual([
+      'I will prepare the plan.',
+      "I couldn't complete that request or produce a reliable reply. Please try again.",
+    ]);
   });
 
   it('rewraps only missing output: retry tool echo is deduplicated, internal text stays private', async () => {

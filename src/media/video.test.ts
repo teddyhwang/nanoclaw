@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   canDownscaleFitGeminiInline,
@@ -88,14 +91,22 @@ describe('formatVideoMarker', () => {
 });
 
 describe('processVideo guards', () => {
+  let frameDir: string;
+  beforeEach(() => {
+    frameDir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'ncl-video-guard-'));
+  });
+  afterEach(() => {
+    fs.rmSync(frameDir, { recursive: true, force: true });
+  });
+
   it('returns null on an empty buffer', async () => {
-    const out = await processVideo(Buffer.alloc(0), { frameDir: '/tmp/never-used' });
+    const out = await processVideo(Buffer.alloc(0), { frameDir });
     expect(out).toBeNull();
   });
 
   it('returns null for unreadable media even when no Gemini credential is available', async () => {
     const out = await processVideo(Buffer.from('not a real video'), {
-      frameDir: '/tmp/never-used',
+      frameDir,
       getCredential: () => null,
     });
     expect(out).toBeNull();
@@ -103,7 +114,7 @@ describe('processVideo guards', () => {
 
   it('returns null (does not throw) when the credential reader throws', async () => {
     const out = await processVideo(Buffer.from('not a real video'), {
-      frameDir: '/tmp/never-used',
+      frameDir,
       getCredential: () => {
         throw new Error('reader boom');
       },
