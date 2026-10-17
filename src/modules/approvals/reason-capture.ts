@@ -20,7 +20,6 @@
  */
 import type { InboundEvent } from '../../channels/adapter.js';
 import { getDeliveryAdapter } from '../../delivery.js';
-import { markInboundConsumed } from '../../db/consumed-inbound.js';
 import { getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
 import {
   deletePendingApproval,
@@ -159,10 +158,6 @@ export async function captureReasonReply(event: InboundEvent): Promise<boolean> 
     // reason — let it route normally instead of swallowing it.
     return false;
   }
-
-  // Consumed from here on: record it before any effect so channel recovery
-  // after a restart never re-routes this reply to the DM's agent as chat.
-  await markInboundConsumed(event, 'reject-reason');
 
   const session = approval.session_id ? await getSession(approval.session_id) : null;
   if (!session) {

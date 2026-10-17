@@ -199,30 +199,6 @@ describe('reject with reason', () => {
     expect(lastRelayedText()).toBe('Your install_packages request was rejected by admin: "too risky for prod"');
   });
 
-  it('a recovered copy of a consumed reason reply is not routed again', async () => {
-    const { captureReasonReply } = await import('./reason-capture.js');
-    const { routeInbound, registerMessageInterceptor } = await import('../../router.js');
-    // Registered after reason capture: sees every message routing reaches.
-    const reachedRouting: string[] = [];
-    registerMessageInterceptor(async (event) => {
-      reachedRouting.push(event.message.id);
-      return false;
-    });
-    await seedApproval('appr-recover', 'install_packages');
-    await clickRejectWithReason('appr-recover');
-
-    expect(await captureReasonReply(dmReply('too risky'))).toBe(true);
-    const { getInboundConsumer } = await import('../../db/consumed-inbound.js');
-    expect(await getInboundConsumer(dmReply('too risky'))).toBe('reject-reason');
-
-    // Startup recovery re-fetches the same platform message after a restart:
-    // the router drops it before any interceptor or session sees it.
-    vi.mocked(writeSessionMessage).mockClear();
-    await routeInbound(dmReply('too risky'));
-    expect(reachedRouting).not.toContain('m-1');
-    expect(vi.mocked(writeSessionMessage)).not.toHaveBeenCalled();
-  });
-
   it('truncates an over-long reason to 280 chars with an ellipsis', async () => {
     const { captureReasonReply } = await import('./reason-capture.js');
     await seedApproval('appr-3');
