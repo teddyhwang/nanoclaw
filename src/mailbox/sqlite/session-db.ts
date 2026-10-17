@@ -234,8 +234,7 @@ export function hasUserConversationMessages(db: Database.Database, messageIds: r
 
 export function getLatestHumanInboundMs(db: Database.Database): number {
   const row = db.prepare(`SELECT MAX(timestamp) AS ts FROM messages_in WHERE kind = 'chat-sdk'`).get() as
-    | { ts: string | null }
-    | undefined;
+    { ts: string | null } | undefined;
   if (!row?.ts) return 0;
   const ms = Date.parse(row.ts);
   return Number.isFinite(ms) ? ms : 0;
@@ -346,8 +345,19 @@ export function getRecoverableMessage(
         WHERE id = ? AND status IN ('pending', 'processing')`,
     )
     .get(messageId) as
-    | { id: string; tries: number; processAfter: string | null; status: 'pending' | 'processing' }
-    | undefined;
+    { id: string; tries: number; processAfter: string | null; status: 'pending' | 'processing' } | undefined;
+}
+
+/** Retained row, never the most recent inbound or an event-cache guess. */
+export function getTriggerIdentitySource(
+  db: Database.Database,
+  messageId: string,
+): { kind: string; content: string } | undefined {
+  return db
+    .prepare(
+      "SELECT kind, content FROM messages_in WHERE id = ? AND trigger = 1 AND status IN ('pending', 'processing')",
+    )
+    .get(messageId) as { kind: string; content: string } | undefined;
 }
 
 export function syncProcessingAcks(inDb: Database.Database, outDb: Database.Database): void {
@@ -582,8 +592,7 @@ export function migrateMessagesInTable(db: Database.Database): void {
  */
 export function isSyntheticInboundMessage(db: Database.Database, messageId: string): boolean {
   const row = db.prepare('SELECT kind, content, source_session_id FROM messages_in WHERE id = ?').get(messageId) as
-    | { kind: string; content: string | null; source_session_id: string | null }
-    | undefined;
+    { kind: string; content: string | null; source_session_id: string | null } | undefined;
   if (!row) return false;
   // Reactions resolve to the reacted-to message (an established anchor).
   if (!['chat', 'chat-sdk', 'reaction'].includes(row.kind) || row.source_session_id) return true;
@@ -603,8 +612,7 @@ export function isSyntheticInboundMessage(db: Database.Database, messageId: stri
  */
 export function getInboundSourceSessionId(db: Database.Database, messageId: string): string | null {
   const row = db.prepare('SELECT source_session_id FROM messages_in WHERE id = ?').get(messageId) as
-    | { source_session_id: string | null }
-    | undefined;
+    { source_session_id: string | null } | undefined;
   return row?.source_session_id ?? null;
 }
 

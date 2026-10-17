@@ -25,6 +25,7 @@ import {
   getProcessingClaims,
   getRecentPendingTriggeringChats,
   getRecoverableMessage,
+  getTriggerIdentitySource,
   insertMessage,
   markDelivered,
   markDeliveryFailed,
@@ -240,6 +241,7 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
       return row && { channelType: row.channel_type, platformId: row.platform_id };
     },
     getLatestTriggeringInbound: () => getLatestTriggeringInbound(db),
+    getTriggerIdentitySource: (messageId) => getTriggerIdentitySource(db, messageId),
     hasUserConversationMessages: (messageIds) => hasUserConversationMessages(db, messageIds),
     getLatestHumanInboundMs: () => getLatestHumanInboundMs(db),
     getRecoverableMessage: (messageId) => {

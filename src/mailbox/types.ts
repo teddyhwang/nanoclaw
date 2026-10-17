@@ -135,6 +135,8 @@ export interface InboundMailbox {
   hasUserConversationMessages(messageIds: readonly string[]): boolean;
   getLatestHumanInboundMs(): number;
   getRecoverableMessage(messageId: string): RecoverableMessage | undefined;
+  /** Exact retained trigger, for host-bound identity validation. */
+  getTriggerIdentitySource(messageId: string): TriggeringInboundSummary | undefined;
   getFailedMessageNotifyInfo(messageId: string): FailedMessageNotifyInfo | undefined;
   gcStaleSystemRows(now?: number): number;
   wasDeliveredByBot(platformMessageId: string): boolean;
