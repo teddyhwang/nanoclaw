@@ -3,7 +3,7 @@ import net from 'net';
 import os from 'os';
 import path from 'path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { startCliServer, stopCliServer } from './socket-server.js';
 
@@ -14,6 +14,7 @@ function tmpSocketPath(): string {
 }
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await stopCliServer();
 });
 
@@ -52,5 +53,15 @@ describe('startCliServer single-bind', () => {
     const socketPath = tmpSocketPath();
     await startCliServer(socketPath);
     expect(fs.existsSync(socketPath)).toBe(true);
+    expect(fs.statSync(socketPath).mode & 0o777).toBe(0o600);
+  });
+
+  it('fails closed if owner-only permissions cannot be established', async () => {
+    const socketPath = tmpSocketPath();
+    vi.spyOn(fs, 'chmodSync').mockImplementationOnce(() => {
+      throw new Error('chmod refused');
+    });
+    await expect(startCliServer(socketPath)).rejects.toThrow('chmod refused');
+    expect(fs.existsSync(socketPath)).toBe(false);
   });
 });

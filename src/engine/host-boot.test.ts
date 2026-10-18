@@ -65,6 +65,12 @@ vi.mock('../channels/channel-registry.js', () => ({
 vi.mock('../channels/chat-migration.js', () => ({ handleChatMigrated: async () => {} }));
 vi.mock('../channels/index.js', () => ({}));
 vi.mock('../modules/index.js', () => ({}));
+vi.mock('../cli/commands/index.js', () => ({}));
+vi.mock('../cli/delivery-action.js', () => ({}));
+vi.mock('../cli/socket-server.js', () => ({
+  startCliServer: async () => order.push('cli-start'),
+  stopCliServer: async () => order.push('cli-stop'),
+}));
 vi.mock('../response-registry.js', () => ({ getResponseHandlers: () => [responses] }));
 vi.mock('../host-lifecycle.js', () => ({
   startHostModules: async ({ signal }: { signal: AbortSignal }) => {
@@ -89,6 +95,7 @@ it('the embedded boot owns a durable lease before adoption and releases it after
     'modules-start',
     'delivery-start',
     'sweep-start',
+    'cli-start',
   ]);
   expect(routed).toHaveBeenCalledWith(
     expect.objectContaining({ instance: 'bot-one', message: expect.objectContaining({ isBackfill: true }) }),
@@ -100,6 +107,8 @@ it('the embedded boot owns a durable lease before adoption and releases it after
   );
   await _shutdownForHost('test');
   expect(order).toEqual(expect.arrayContaining(['modules-abort', 'gateway-stop', 'gateway-detach', 'modules-stop']));
+  expect(order.filter((step) => step === 'cli-start')).toHaveLength(1);
+  expect(order.indexOf('cli-stop')).toBeLessThan(order.indexOf('gateway-stop'));
   expect(order.indexOf('gateway-stop')).toBeLessThan(order.indexOf('modules-stop'));
   expect(order.slice(-4)).toEqual(['delivery-stop', 'sweep-stop', 'lease-stop', 'channels-stop']);
 });

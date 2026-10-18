@@ -213,6 +213,23 @@ async function releaseClaimQuietly(sessionId: string, incarnation: number): Prom
  */
 const wakePromises = new Map<string, Promise<boolean>>();
 
+/** Read-only process-local evidence; never infer activity from persisted status. */
+export function getHostSessionActivity() {
+  return {
+    active: [...activeContainers]
+      .map(([sessionId, runtime]) => ({
+        session_id: sessionId,
+        agent_group_id: runtime.handle.key.agentGroupId,
+        started_at: new Date(runtime.startedAtMs).toISOString(),
+        adopted: runtime.adopted,
+        stopping: runtime.stopReason !== undefined,
+      }))
+      .sort((a, b) => a.session_id.localeCompare(b.session_id)),
+    waking: [...wakePromises.keys()].sort(),
+    adopting: [...pendingAdoptions].sort(),
+  };
+}
+
 export function getActiveContainerCount(): number {
   return activeContainers.size;
 }
