@@ -764,6 +764,19 @@ async function deliverToAgent(
     messageId,
     trigger: wake,
   });
+  if (wake)
+    emitEngineEvent('principal.input', {
+      sessionId: session.id,
+      agentGroupId: session.agent_group_id,
+      messageId,
+      kind: 'human',
+      content,
+      channelType: event.channelType,
+      platformId: event.platformId,
+      threadId: event.threadId ?? null,
+      isBotMessage: event.message.isBotMessage,
+      sourceUserId: userId,
+    });
   if (created) emitEngineEvent('session.created', { session, created });
 
   if (wake && created) {

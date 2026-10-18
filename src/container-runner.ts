@@ -1384,6 +1384,19 @@ export async function buildMounts(
     }
   }
 
+  // Exclude protected provenance from session, custom and ancestor mounts.
+  const protectedRoot = path.resolve(DATA_DIR, 'requester-provenance');
+  fs.mkdirSync(protectedRoot, { recursive: true });
+  const realProtected = fs.realpathSync(protectedRoot);
+  for (const mount of mounts) {
+    const host = fs.existsSync(mount.hostPath) ? fs.realpathSync(mount.hostPath) : path.resolve(mount.hostPath);
+    if (
+      host === realProtected ||
+      realProtected.startsWith(host + path.sep) ||
+      host.startsWith(realProtected + path.sep)
+    )
+      throw new Error('Container mount overlaps protected requester provenance');
+  }
   return mergeVolumeMounts([], mounts);
 }
 

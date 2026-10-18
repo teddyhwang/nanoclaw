@@ -14,6 +14,7 @@ import type Database from 'better-sqlite3';
 
 import { resolveGroupTimezone } from '../../container-config.js';
 import { log } from '../../log.js';
+import { emitEngineEvent } from '../../engine/events.js';
 import { mayMaterializeTask } from '../../engine/task-materialization.js';
 import type { InboundMailbox } from '../../mailbox/index.js';
 import type { Session } from '../../types.js';
@@ -109,6 +110,17 @@ export async function handleRecurrence(
             content: series.content,
             platformId: series.platform_id,
             channelType: series.channel_type,
+            threadId: series.thread_id,
+          });
+          emitEngineEvent('principal.input', {
+            sessionId: session.id,
+            agentGroupId: session.agent_group_id,
+            messageId: occurrenceId,
+            kind: 'task',
+            seriesId: series.series_id,
+            content: series.content,
+            channelType: series.channel_type,
+            platformId: series.platform_id,
             threadId: series.thread_id,
           });
           log.info('Materialized due task occurrence', {

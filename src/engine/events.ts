@@ -18,6 +18,20 @@ export interface EngineEventMap {
   'session.resolved': { session: Session };
   'session.cleared': { sessionId: string; agentGroupId: string };
   'inbound.routed': { event: InboundEvent; userId: string | null };
+  /** Original arguments from trusted router/schedule insertion, NOT a mailbox reread. */
+  'principal.input': {
+    sessionId: string;
+    agentGroupId: string;
+    messageId: string;
+    kind: 'human' | 'task';
+    content: string;
+    channelType: string | null;
+    platformId: string | null;
+    threadId: string | null;
+    seriesId?: string;
+    isBotMessage?: boolean;
+    sourceUserId?: string | null;
+  };
   'inbound.written': { sessionId: string; agentGroupId: string; messageId: string; trigger: boolean };
   /**
    * Fires when the host applies a `schedule_task` delivery action, after
