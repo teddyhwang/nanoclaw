@@ -239,7 +239,7 @@ describe('protected principal provenance mount exclusion', () => {
               containerPath: '/forged-principal',
               readonly: kind === 'root',
               mountClass: 'allowlisted-extra',
-              scope: { agentGroupId: GROUP_ID, sessionId: SESSION_ID },
+              scope: GROUP_ID,
             },
           ]),
         ).rejects.toThrow('protected requester provenance');
