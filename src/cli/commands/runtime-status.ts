@@ -16,6 +16,13 @@ type SessionIdentity = Pick<
   'id' | 'agent_group_id' | 'messaging_group_id' | 'thread_id' | 'status' | 'container_status'
 >;
 
+const phaseClass = (phase: string) => {
+  if (phase === 'running') return 'running';
+  if (phase === 'starting' || phase === 'preparing' || phase === 'ready') return 'starting';
+  if (phase === 'terminal' || phase === 'stopped' || phase === 'failed') return 'not_running';
+  return 'unknown';
+};
+
 const signature = (rows: SessionSnapshot[]) =>
   JSON.stringify(
     rows
@@ -31,12 +38,22 @@ export async function readRuntimeStatus() {
   const observedFrom = new Date().toISOString();
   const instanceId = getHostInstanceId();
   const before = getHostSessionActivity();
-  const registry = (await getAllAgentGroups()).map(({ id, name, folder }) => ({ id, name, folder }));
-  const persisted = await getDb().all<SessionIdentity>(
-    'SELECT id, agent_group_id, messaging_group_id, thread_id, status, container_status FROM sessions ORDER BY id',
-  );
-  const driver = getSessionDriver();
   const problems: string[] = [];
+  let registry: Array<{ id: string; name: string; folder: string }> = [];
+  try {
+    registry = (await getAllAgentGroups()).map(({ id, name, folder }) => ({ id, name, folder }));
+  } catch {
+    problems.push('registry_read_failed');
+  }
+  let persisted: SessionIdentity[] = [];
+  try {
+    persisted = await getDb().all<SessionIdentity>(
+      'SELECT id, agent_group_id, messaging_group_id, thread_id, status, container_status FROM sessions ORDER BY id',
+    );
+  } catch {
+    problems.push('session_read_failed');
+  }
+  const driver = getSessionDriver();
   if (!instanceId) problems.push('host_not_ready');
   let snapshots: SessionSnapshot[] = [];
   let listed = false;
@@ -55,8 +72,15 @@ export async function readRuntimeStatus() {
       } catch {
         problems.push('runtime_status_failed');
       }
+      const phaseConsistent = phaseClass(currentPhase) !== 'unknown' && phaseClass(phase) === phaseClass(currentPhase);
+      if (currentPhase !== 'unknown' && !phaseConsistent) problems.push('runtime_phase_disagreement');
       const { installSlug, agentGroupId, sessionId } = handle.key;
-      return { key: { installSlug, agentGroupId, sessionId }, listed_phase: phase, phase: currentPhase };
+      return {
+        key: { installSlug, agentGroupId, sessionId },
+        listed_phase: phase,
+        phase: currentPhase,
+        phase_consistent: phaseConsistent,
+      };
     }),
   );
   if (listed) {
@@ -68,8 +92,12 @@ export async function readRuntimeStatus() {
       problems.push('runtime_recheck_failed');
     }
   }
-  const registryAfter = (await getAllAgentGroups()).map(({ id, name, folder }) => ({ id, name, folder }));
-  if (JSON.stringify(registry) !== JSON.stringify(registryAfter)) problems.push('registry_changed');
+  try {
+    const registryAfter = (await getAllAgentGroups()).map(({ id, name, folder }) => ({ id, name, folder }));
+    if (JSON.stringify(registry) !== JSON.stringify(registryAfter)) problems.push('registry_changed');
+  } catch {
+    problems.push('registry_recheck_failed');
+  }
   const after = getHostSessionActivity();
   if (JSON.stringify(before) !== JSON.stringify(after)) problems.push('host_activity_changed');
   if (instanceId !== getHostInstanceId()) problems.push('host_instance_changed');
@@ -102,23 +130,30 @@ export async function readRuntimeStatus() {
     const active = after.active.find((runtime) => runtime.session_id === id);
     const waking = after.waking.includes(id);
     const adopting = after.adopting.includes(id);
-    const identity =
-      registry.find(
-        (group) => group.id === (active?.agent_group_id ?? live[0]?.key.agentGroupId ?? row?.agent_group_id),
-      ) ?? null;
+    const identityIds = new Set([
+      ...(row ? [row.agent_group_id] : []),
+      ...live.map((runtime) => runtime.key.agentGroupId),
+      ...before.active.filter((runtime) => runtime.session_id === id).map((runtime) => runtime.agent_group_id),
+      ...(active ? [active.agent_group_id] : []),
+    ]);
+    const identityConflict = identityIds.size > 1;
+    if (identityConflict) problems.push('session_identity_disagreement');
+    const identity = identityConflict ? null : (registry.find((group) => identityIds.has(group.id)) ?? null);
     if ((active || waking || adopting) && !identity) problems.push('host_identity_unresolved');
     if (active && !live.some((runtime) => runtime.phase === 'running')) problems.push('host_runtime_disagreement');
     // A discovered runtime with no host tracking remains occupied; never idle.
     const classification =
-      waking || adopting
-        ? 'starting'
-        : live.some((runtime) => runtime.phase === 'running')
-          ? 'running'
-          : live.some((runtime) => runtime.phase === 'ready' || runtime.phase === 'preparing')
-            ? 'starting'
-            : active || !listed || live.some((runtime) => runtime.phase === 'unknown')
-              ? 'unknown'
-              : 'not_running';
+      identityConflict || live.some((runtime) => !runtime.phase_consistent)
+        ? 'unknown'
+        : waking || adopting
+          ? 'starting'
+          : live.some((runtime) => runtime.phase === 'running')
+            ? 'running'
+            : live.some((runtime) => runtime.phase === 'ready' || runtime.phase === 'preparing')
+              ? 'starting'
+              : active || !listed
+                ? 'unknown'
+                : 'not_running';
     return {
       session_id: id,
       registry_identity: identity,

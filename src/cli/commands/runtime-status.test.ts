@@ -158,6 +158,78 @@ describe('host-owned runtime-status', () => {
     expect(JSON.stringify(result)).not.toContain('DO_NOT_EXPOSE');
   });
 
+  it('fails closed on stable listed-running/per-handle-stopped contradiction, comparing coarse phases', async () => {
+    mocks.list.mockResolvedValue([snapshot('s1', group.id, 'stopped')]);
+    expect(await readRuntimeStatus()).toMatchObject({
+      complete: false,
+      session_gate: 'unknown',
+      problems: ['runtime_phase_disagreement'],
+      sessions: [
+        {
+          classification: 'unknown',
+          runtimes: [{ listed_phase: 'running', phase: 'stopped', phase_consistent: false }],
+        },
+      ],
+    });
+    const compatible = snapshot('s1', group.id, 'preparing');
+    compatible.phase = 'starting';
+    mocks.list.mockResolvedValue([compatible]);
+    expect(await readRuntimeStatus()).toMatchObject({
+      complete: true,
+      session_gate: 'occupied',
+      sessions: [{ classification: 'starting' }],
+    });
+  });
+
+  it('rejects registered host-group B when persisted/runtime identity is group A, without choosing either', async () => {
+    const other = { id: 'other', name: 'Other', folder: 'other-folder' };
+    mocks.groups.mockResolvedValue([group, other]);
+    mocks.list.mockResolvedValue([snapshot()]);
+    mocks.activity.mockReturnValue({ ...idle(), active: [{ session_id: 's1', agent_group_id: other.id }] });
+    const result = await readRuntimeStatus();
+    expect(result).toMatchObject({
+      complete: false,
+      session_gate: 'unknown',
+      sessions: [{ classification: 'unknown', registry_identity: null }],
+    });
+    expect(result.problems).toContain('session_identity_disagreement');
+  });
+
+  it('sanitizes initial registry, session DB and registry-recheck failures into incomplete host responses', async () => {
+    const cases = [
+      {
+        problem: 'registry_read_failed',
+        fail: () => {
+          mocks.groups.mockRejectedValueOnce(new Error('DO_NOT_EXPOSE'));
+        },
+      },
+      {
+        problem: 'session_read_failed',
+        fail: () => {
+          mocks.rows.mockRejectedValueOnce(new Error('DO_NOT_EXPOSE'));
+        },
+      },
+      {
+        problem: 'registry_recheck_failed',
+        fail: () => {
+          mocks.groups.mockResolvedValueOnce([group]).mockRejectedValueOnce(new Error('DO_NOT_EXPOSE'));
+        },
+      },
+    ];
+    for (const testCase of cases) {
+      mocks.groups.mockReset().mockResolvedValue([group]);
+      mocks.rows.mockReset().mockResolvedValue([row]);
+      testCase.fail();
+      const response = await dispatch({ id: 'failed-read', command: 'runtime-status', args: {} }, { caller: 'host' });
+      expect(response).toMatchObject({
+        ok: true,
+        data: { complete: false, session_gate: 'unknown', problems: expect.arrayContaining([testCase.problem]) },
+      });
+      expect(JSON.stringify(response)).not.toContain('DO_NOT_EXPOSE');
+      expect(JSON.stringify(response)).not.toContain('handler-error');
+    }
+  });
+
   it('rejects container callers before reading any cross-group identity or state', async () => {
     expect(
       await dispatch(
