@@ -1,4 +1,4 @@
-import { bindIdentityTurn } from './turn-identity.js';
+import { bindIdentityTurn, extendIdentityTurn } from './turn-identity.js';
 import {
   confirmationGatePaused,
   isAwaitingSensitiveConfirmation,
@@ -1852,6 +1852,19 @@ export async function processQuery(
           return;
         }
 
+        // Never push a new addressed input or run its scripts under merely
+        // the previous turn's principal. Host selection cannot change actor.
+        if (
+          process.env.OPTIMUS_TURN_IDENTITY_FILE &&
+          !(await extendIdentityTurn(newMessages.filter((m) => m.trigger === 1).map((m) => m.id)))
+        ) {
+          if (mayEndDeferredQuery() && !endedForCommand) {
+            endedForCommand = true;
+            query.end();
+          }
+          return;
+        }
+        if (done) return;
         const newIds = newMessages.map((m) => m.id);
         markProcessing(newIds);
 

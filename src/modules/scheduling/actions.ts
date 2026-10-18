@@ -130,6 +130,18 @@ export async function handleUpdateTask(content: Record<string, unknown>, session
   let touched: number;
   try {
     touched = updateSeries(db, taskId, update);
+    // Changed definitions require the currently accepted owner again.
+    const changed = touched
+      ? (db.prepare('SELECT content FROM task_series WHERE series_id=?').get(taskId) as { content: string } | undefined)
+      : undefined;
+    if (changed)
+      emitEngineEvent('task.scheduled', {
+        agentGroupId: session.agent_group_id,
+        sessionId: session.id,
+        taskId,
+        seriesId: taskId,
+        taskContent: changed.content,
+      });
   } finally {
     db.close();
   }

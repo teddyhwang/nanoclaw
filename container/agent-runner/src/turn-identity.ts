@@ -5,8 +5,8 @@ import { writeMessageOut } from './db/messages-out.js';
 
 interface BindingDeps {
   file?: string;
-  read(): { turnId?: string | null } | null;
-  send(action: string, turnId: string, triggerIds?: string[]): Promise<void>;
+  read(): { turnId?: string | null; followupRequestId?: string; followupAccepted?: boolean } | null;
+  send(action: string, turnId: string, triggerIds?: string[], requestId?: string): Promise<void>;
   wait(): Promise<void>;
 }
 function defaults(): BindingDeps {
@@ -20,15 +20,34 @@ function defaults(): BindingDeps {
         return null;
       }
     },
-    async send(action, turnId, triggerIds) {
+    async send(action, turnId, triggerIds, requestId) {
       await writeMessageOut({
         id: `identity-${randomUUID()}`,
         kind: 'system',
-        content: JSON.stringify({ action, turnId, triggerIds }),
+        content: JSON.stringify({ action, turnId, triggerIds, requestId }),
       });
     },
     wait: () => new Promise((resolve) => setTimeout(resolve, 50)),
   };
+}
+
+let activeBinding: { turnId: string; deps: BindingDeps } | null = null;
+/** Same-actor warm inputs require their own host-selected immutable extension
+ * before scripts/provider push. An opaque request id is only an ACK reference. */
+export async function extendIdentityTurn(triggerIds: string[]): Promise<boolean> {
+  if (!process.env.OPTIMUS_TURN_IDENTITY_FILE && !activeBinding) return true;
+  const binding = activeBinding;
+  if (!binding) return false;
+  const requestId = `followup-${randomUUID()}`;
+  await binding.deps.send('identity_turn_followup', binding.turnId, triggerIds, requestId);
+  for (let i = 0; i < 600; i++) {
+    if (activeBinding?.turnId !== binding.turnId) return false;
+    const ack = binding.deps.read();
+    if (ack && ack.turnId !== binding.turnId) return false;
+    if (ack?.turnId === binding.turnId && ack.followupRequestId === requestId) return ack.followupAccepted === true;
+    await binding.deps.wait();
+  }
+  return false;
 }
 
 /** Upstream runners need no host binding. Optimus opts in at spawn; once
@@ -40,7 +59,9 @@ export async function bindIdentityTurn(triggerIds: string[], deps = defaults()):
   await deps.send('identity_turn_begin', turnId, triggerIds);
   for (let i = 0; i < 600; i++) {
     if (deps.read()?.turnId === turnId) {
+      activeBinding = { turnId, deps };
       return async () => {
+        if (activeBinding?.turnId === turnId) activeBinding = null;
         await deps.send('identity_turn_end', turnId);
         for (let j = 0; j < 600; j++) {
           if (deps.read()?.turnId === null) return;
