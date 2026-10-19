@@ -349,12 +349,13 @@ export function releaseOccurrenceClaim(
   );
 }
 
-/** Stamp a claimed occurrence as fired (observability/telemetry; the Dream
- * activity window is measured from it). */
+/** Stamp fire telemetry without changing the definition/claim revision.
+ * The claim already stamped updated_at; preserving it also avoids overwriting
+ * a concurrent owner edit made while materialization was awaiting. */
 export function markSeriesFired(db: Database.Database, seriesId: string, firedAt: string): void {
   firedAt = scheduleTimestamp(firedAt);
   db.prepare(
-    `UPDATE task_series SET last_fired_at = @firedAt, updated_at = @firedAt
+    `UPDATE task_series SET last_fired_at = @firedAt
       WHERE series_id = @seriesId`,
   ).run({ seriesId, firedAt });
 }

@@ -21,6 +21,8 @@ import {
   SCHEDULE_SCHEMA,
   advanceRecurrence,
   cancelSeries,
+  claimDueOccurrence,
+  markSeriesFired,
   getDueSeries,
   hasSeries,
   listLiveSeries,
@@ -64,6 +66,25 @@ afterEach(() => {
 });
 
 describe('schedule-store — series lifecycle (S405 structural fix)', () => {
+  it.each([false, true])('fire telemetry preserves claim revision/concurrent edit (%s)', (concurrentEdit) => {
+    const db = freshDb();
+    try {
+      const due = '2026-10-19T00:00:00.000Z',
+        claimedAt = '2026-10-19T00:00:01.001Z',
+        firedAt = '2026-10-19T00:00:01.000Z';
+      schedule(db, 'one-shot', { processAfter: due });
+      expect(claimDueOccurrence(db, 'one-shot', due, null, claimedAt)).toBe(claimedAt);
+      if (concurrentEdit)
+        db.prepare("UPDATE task_series SET updated_at='intervening-owner-edit' WHERE series_id='one-shot'").run();
+      markSeriesFired(db, 'one-shot', firedAt);
+      expect(db.prepare("SELECT updated_at,last_fired_at FROM task_series WHERE series_id='one-shot'").get()).toEqual({
+        updated_at: concurrentEdit ? 'intervening-owner-edit' : claimedAt,
+        last_fired_at: firedAt,
+      });
+    } finally {
+      db.close();
+    }
+  });
   it('schedules a series and surfaces it as due once process_after has elapsed', () => {
     const db = freshDb();
     schedule(db, 'task-1', { recurrence: '*/5 * * * *' });
