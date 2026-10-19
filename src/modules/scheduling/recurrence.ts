@@ -118,6 +118,8 @@ export async function handleRecurrence(
             messageId: occurrenceId,
             kind: 'task',
             seriesId: series.series_id,
+            scheduledFor: observed,
+            scheduleClaimedAt: claimedAt,
             content: series.content,
             channelType: series.channel_type,
             platformId: series.platform_id,

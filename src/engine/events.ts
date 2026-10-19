@@ -29,6 +29,9 @@ export interface EngineEventMap {
     platformId: string | null;
     threadId: string | null;
     seriesId?: string;
+    /** Native scheduler claim, never supplied by a container or mailbox. */
+    scheduledFor?: string;
+    scheduleClaimedAt?: string;
     isBotMessage?: boolean;
     sourceUserId?: string | null;
   };
