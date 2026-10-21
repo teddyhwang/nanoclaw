@@ -1,4 +1,4 @@
-import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
+import { query as sdkQuery, type EffortLevel, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 
 import { isAwaitingSensitiveConfirmation, noteToolResult } from '../confirmation-gate-state.js';
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/container-state.js';
@@ -126,6 +126,13 @@ interface SDKUserMessage {
   };
   parent_tool_use_id: null;
   session_id: string;
+}
+
+/** Trusted runtime-plugin policy, not prompt text. Standalone installs retain
+ * their SDK default when no resolver is installed. Read only at input boundaries. */
+let inputEffortResolver: ((model?: string, effort?: string) => string | undefined) | undefined;
+export function setClaudeInputEffortResolver(resolver: typeof inputEffortResolver): void {
+  inputEffortResolver = resolver;
 }
 
 /**
@@ -505,6 +512,14 @@ export class ClaudeProvider implements AgentProvider {
     stream.push(input.prompt, input.imageBlocks);
 
     const instructions = input.systemContext?.instructions;
+    const resolver = inputEffortResolver;
+    const readEffort = () => resolver
+      ? resolver(this.inference.model, this.inference.effort)
+      : this.inference.effort;
+    let currentEffort = readEffort();
+    let inputFailure: unknown;
+    let ended = false;
+    let pendingInputs = Promise.resolve();
 
     // Per-spawn model override. Set by the host via container env when a
     // plugin (e.g. Optimus' maintenance-task) wants the SDK to run on a
@@ -541,7 +556,7 @@ export class ClaudeProvider implements AgentProvider {
         env: this.env,
         model: this.inference.model,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        effort: this.inference.effort as any,
+        effort: currentEffort as any,
         permissionMode: this.executionPolicy.permissionMode,
         allowDangerouslySkipPermissions: this.executionPolicy.allowDangerouslySkipPermissions,
         settingSources: ['project', 'user', 'local'],
@@ -701,9 +716,45 @@ export class ClaudeProvider implements AgentProvider {
     }
 
     return {
-      push: (msg, imageBlocks) => stream.push(msg, imageBlocks),
-      end: () => stream.end(),
-      events: translateEvents(),
+      push: (msg, imageBlocks) => {
+        if (!resolver) {
+          stream.push(msg, imageBlocks);
+          return;
+        }
+        // Snapshot trusted configuration synchronously at this ordinary input.
+        // Do not enqueue its prompt until the supported SDK control ACKs.
+        const effort = readEffort();
+        pendingInputs = pendingInputs.then(async () => {
+          if (ended || aborted || inputFailure) return;
+          if (effort !== currentEffort) {
+            await sdkResult.applyFlagSettings({ effortLevel: (effort ?? null) as EffortLevel | null });
+            currentEffort = effort;
+          }
+          if (!ended && !aborted) stream.push(msg, imageBlocks);
+        }).catch((error) => {
+          inputFailure = error;
+          stream.end();
+          sdkResult.close();
+        });
+      },
+      end: () => {
+        ended = true;
+        stream.end();
+      },
+      events: (async function* () {
+        try {
+          yield* translateEvents();
+        } catch (error) {
+          if (!inputFailure) throw error;
+        }
+        if (inputFailure) {
+          yield {
+            type: 'error' as const,
+            retryable: false,
+            message: 'Reasoning settings were refused before the next input: ' + String(inputFailure),
+          };
+        }
+      })(),
       abort: () => {
         aborted = true;
         stream.end();
