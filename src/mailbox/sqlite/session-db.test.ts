@@ -310,6 +310,16 @@ describe('syncProcessingAcks — script-skip counter', () => {
     expect(status(inDb, 't1')).toBe('failed');
   });
 
+  it('failed ack (error result) lands the row as FAILED, not completed', () => {
+    const { inDb, outDb } = freshPair();
+    seedTask(inDb, 't1', { prompt: 'p', script: 'x' });
+    ack(outDb, 't1', 'failed');
+
+    syncProcessingAcks(inDb, outDb);
+
+    expect(status(inDb, 't1')).toBe('failed');
+  });
+
   it('a settled row is terminal — a lingering ack cannot flip failed back to completed', () => {
     const { inDb, outDb } = freshPair();
     seedTask(inDb, 't1', { prompt: 'p', script: 'x' });

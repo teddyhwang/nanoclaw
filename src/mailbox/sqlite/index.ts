@@ -98,7 +98,7 @@ function applyProcessingAcks(db: Database.Database, acks: ProcessingAck[]): void
     "UPDATE messages_in SET status = 'failed' WHERE id = ? AND status NOT IN ('completed', 'failed')",
   );
   db.transaction(() => {
-    for (const ack of acks) (ack.status === 'script-skip:error' ? fail : complete).run(ack.messageId);
+    for (const ack of acks) (ack.status === 'completed' ? complete : fail).run(ack.messageId);
   })();
 }
 

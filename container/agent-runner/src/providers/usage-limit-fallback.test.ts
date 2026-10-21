@@ -86,8 +86,32 @@ describe('resolveUsageLimitFallback', () => {
     });
   });
 
-  it('stays disabled for pi and when the host flag is absent', () => {
-    expect(resolveUsageLimitFallback('pi_rpc', { NANOCLAW_USAGE_LIMIT_FALLBACK: '1' })).toBeNull();
+  it('keeps Pi on Pi and switches its model family', () => {
+    const env = {
+      NANOCLAW_USAGE_LIMIT_FALLBACK: '1',
+      NANOCLAW_USAGE_LIMIT_CLAUDE_MODEL: 'claude-opus-4-8',
+      NANOCLAW_USAGE_LIMIT_CODEX_MODEL: 'gpt-5.6-sol',
+    };
+    expect(resolveUsageLimitFallback('pi_rpc', env, 'openai-codex/gpt-5.6-sol')).toEqual({
+      providerName: 'pi_rpc',
+      model: 'anthropic/claude-opus-4-8',
+    });
+    expect(resolveUsageLimitFallback('pi_rpc', env, 'gpt-5.6-luna')).toEqual({
+      providerName: 'pi_rpc',
+      model: 'anthropic/claude-opus-4-8',
+    });
+    expect(resolveUsageLimitFallback('pi_rpc', env, 'anthropic/claude-sonnet-4-8')).toEqual({
+      providerName: 'pi_rpc',
+      model: 'openai-codex/gpt-5.6-sol',
+    });
+    expect(resolveUsageLimitFallback('pi_rpc', env, 'google/gemini')).toBeNull();
+  });
+
+  it('stays disabled without alternate models or the host flag', () => {
+    expect(
+      resolveUsageLimitFallback('pi_rpc', { NANOCLAW_USAGE_LIMIT_FALLBACK: '1' }, 'openai-codex/gpt-5.6-sol'),
+    ).toBeNull();
+    expect(resolveUsageLimitFallback('pi_rpc', {}, 'openai-codex/gpt-5.6-sol')).toBeNull();
     expect(resolveUsageLimitFallback('claude', {})).toBeNull();
   });
 });
@@ -147,6 +171,45 @@ describe('UsageLimitFallbackProvider', () => {
     expect(primary.pushes).toEqual(['follow-up']);
     expect(fallback.pushes).toEqual(['follow-up']);
     expect(fallback.ends).toBe(1);
+  });
+
+  it('replays only the inputs the primary has not answered yet', async () => {
+    const primary = new StubProvider([
+      [
+        { type: 'result', text: 'first answer' },
+        { type: 'error', message: 'usage limit', retryable: false, classification: 'quota' },
+      ],
+    ]);
+    const fallback = new StubProvider([[{ type: 'result', text: 'second answer' }]]);
+    const provider = new UsageLimitFallbackProvider({
+      primaryName: 'pi_rpc',
+      fallbackName: 'pi_rpc',
+      primary,
+      fallback,
+    });
+    const query = provider.query({ prompt: 'first', cwd: '/workspace/agent' });
+    query.push('second');
+    query.push('third');
+
+    expect(await collect(query)).toEqual([
+      { type: 'result', text: 'first answer' },
+      { type: 'result', text: 'second answer' },
+    ]);
+    expect(fallback.inputs[0]?.prompt).toBe('second');
+    expect(fallback.pushes).toEqual(['third']);
+  });
+
+  it('names neither provider twice when both limits are on the same harness', async () => {
+    const quota: ProviderEvent = { type: 'error', message: 'limit', retryable: false, classification: 'quota' };
+    const provider = new UsageLimitFallbackProvider({
+      primaryName: 'pi_rpc',
+      fallbackName: 'pi_rpc',
+      primary: new StubProvider([[quota]]),
+      fallback: new StubProvider([[quota]]),
+    });
+    const [event] = await collect(provider.query({ prompt: 'q', cwd: '/tmp' }));
+    expect(event).toMatchObject({ type: 'result', isError: true });
+    expect((event as { text: string }).text).toStartWith('Both model providers have reached');
   });
 
   it('prefers the alternate harness for later queries after the first quota', async () => {

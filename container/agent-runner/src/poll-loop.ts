@@ -9,6 +9,7 @@ import {
   getPendingMessages,
   markProcessing,
   markCompleted,
+  markFailed,
   markScriptSkipped,
   type MessageInRow,
 } from './db/messages-in.js';
@@ -412,6 +413,14 @@ export function _resetShutdownStateForTests(): void {
   shuttingDown = false;
   activeQueryForShutdown = null;
 }
+
+/**
+ * Message status from the query that just ran, for the caller's final
+ * marking. Each pushed input is completed (or failed, for an error result) by
+ * its own result; inputs still without a result when the stream ends are
+ * `unresolved`. Reset by the caller before each processQuery.
+ */
+const queryMessageOutcome = { failed: new Set<string>(), unresolved: [] as string[] };
 
 /**
  * Read inbound image attachments off disk and convert to Anthropic
@@ -904,6 +913,8 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       // try/finally to decide, on a shutdown-cut-short turn, between completing
       // the rows (work happened) and leaving them pending (work didn't).
       let sawResult = false;
+      queryMessageOutcome.failed.clear();
+      queryMessageOutcome.unresolved = [];
       publishReplyRoute(routing);
       // Forward a loop stop to the ACTIVE query. The stream deliberately stays
       // open between turns, so the loop can be parked inside processQuery when
@@ -1060,8 +1071,21 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         // Dreams neither resume nor persist a continuation (shouldResumeContinuation /
         // shouldPersistContinuation), and daily rotation is provider-owned since
         // 2026-10-14, so a completed Dream no longer clears session tracking.
-        markCompleted(processingIds);
+        // An error result marked its inputs failed already; don't overwrite.
+        markCompleted(processingIds.filter((id) => !queryMessageOutcome.failed.has(id)));
         log(`Completed ${ids.length} message(s)`);
+      }
+      // Follow-ups pushed into this query that never got their own result.
+      // A cut-short or retryable turn leaves them for the next container like
+      // the batch above; otherwise they were dropped, which is a failure.
+      const followUps = queryMessageOutcome.unresolved.filter((id) => !processingIds.includes(id));
+      if (followUps.length > 0) {
+        if (retryableBatchFailure || shuttingDown) {
+          log(`Leaving ${followUps.length} unanswered follow-up(s) pending for the next container`);
+        } else {
+          log(`Marking ${followUps.length} follow-up(s) failed — the query ended before answering them`);
+          for (const id of followUps) markFailed(id);
+        }
       }
     } finally {
       await releaseIdentity();
@@ -1270,6 +1294,19 @@ export async function processQuery(
   // Preserve whether each push was directly addressed so a warm request is not mistaken
   // for ambient continuation (Nook 2026-06-07).
   const pushAddressed: boolean[] = [addressed];
+  // Message ids by push index (into pushAddressed). Each push's rows are
+  // marked when the result that consumes that push arrives: completed, or
+  // failed for an error result, so a failed turn is not recorded as answered.
+  // Retry/handoff pushes carry no rows.
+  const pushIds = new Map<number, string[]>([[0, initialBatchIds]]);
+  const takePushIds = (from: number, to: number): string[] => {
+    const ids: string[] = [];
+    for (let i = from; i < to; i++) {
+      ids.push(...(pushIds.get(i) ?? []));
+      pushIds.delete(i);
+    }
+    return ids;
+  };
   // Parallel to pushAddressed. A same-sender chat follow-up that arrives
   // before the current result supersedes that result: the provider queued the
   // follow-up as the next turn, so the current turn cannot know its contents.
@@ -2018,6 +2055,7 @@ export async function processQuery(
         ) {
           prompt += `\n${SUPERSEDED_RESPONSE_NOTICE}`;
         }
+        pushIds.set(pushAddressed.length, keptIds);
         pushAddressed.push(isAddressedTurn(keep, assistantName));
         pushSuperseded.push(false);
         noteInput();
@@ -2036,7 +2074,7 @@ export async function processQuery(
         }
         if (answering) queuedTurns.push(next);
         else adoptTurn(next);
-        markCompleted(keptIds);
+        // keptIds stay claimed until their own result marks them.
       } catch (err) {
         // Without this catch the rejection escapes the void IIFE and Node
         // terminates the container on unhandled-rejection. The initial-batch
@@ -2154,8 +2192,16 @@ export async function processQuery(
           // A queued Codex push may have been replayed into Claude during
           // failover; Claude can merge it into this very result.
           const resultSuperseded = deliveryProviderName === 'codex' && (pushSuperseded[resultIndex] ?? false);
+          const resultIds = takePushIds(resultIndex, resultPushEnd);
           resultIndex = resultPushEnd;
-          markCompleted(initialBatchIds);
+          if (event.isError) {
+            for (const id of resultIds) {
+              markFailed(id);
+              queryMessageOutcome.failed.add(id);
+            }
+          } else {
+            markCompleted(resultIds);
+          }
           if (resultSuperseded) {
             log('Suppressing superseded chat result — a same-sender follow-up arrived before completion');
             notifyExchangeComplete(onExchangeComplete, {
@@ -2555,6 +2601,7 @@ export async function processQuery(
     throw err;
   } finally {
     done = true;
+    queryMessageOutcome.unresolved = [...pushIds.values()].flat();
     clearInterval(pollHandle);
     clearInterval(keepaliveHandle);
     // Backstop: flush any task context that never saw a `result` event

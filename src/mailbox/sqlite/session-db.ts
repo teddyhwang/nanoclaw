@@ -380,7 +380,9 @@ export function syncProcessingAcks(inDb: Database.Database, outDb: Database.Data
   );
   inDb.transaction(() => {
     for (const { message_id, status } of completed) {
-      (status === 'script-skip:error' ? failStmt : completeStmt).run(message_id);
+      // `failed` (an error result: the provider never answered) is a failed
+      // run too, like `script-skip:error`.
+      (status === 'completed' ? completeStmt : failStmt).run(message_id);
     }
   })();
 }

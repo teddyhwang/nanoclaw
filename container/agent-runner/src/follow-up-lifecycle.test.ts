@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 
 import { getPendingMessages, markProcessing } from './db/messages-in.js';
 import { getUndeliveredMessages, writeMessageOut } from './db/messages-out.js';
-import { closeSessionDb, getInboundDb, initTestSessionDb } from './mailbox/sqlite/connection.js';
+import { closeSessionDb, getInboundDb, getOutboundDb, initTestSessionDb } from './mailbox/sqlite/connection.js';
 import { processQuery } from './poll-loop.js';
 import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
 import { UsageLimitFallbackProvider } from './providers/usage-limit-fallback.js';
@@ -344,6 +344,34 @@ describe('deferred work must not preempt any unfinished input', () => {
       result(fallback, 'Timezone published');
       await waitFor(() => fallback.ends === 1);
       expect(texts()).toEqual(['First finished', 'Timezone published']);
+    } finally {
+      query.abort();
+      await done;
+    }
+  });
+});
+
+describe('each input is marked by its own result', () => {
+  const ack = (id: string) =>
+    (
+      getOutboundDb().query('SELECT status FROM processing_ack WHERE message_id = ?').get(id) as {
+        status: string;
+      } | null
+    )?.status;
+
+  it('keeps a follow-up claimed until its result, and marks an error result failed', async () => {
+    const primary = new ControlledProvider();
+    const { done, query } = start(primary);
+    try {
+      result(primary, 'First request finished');
+      await waitFor(() => ack('initial') === 'completed');
+      chat('follow-up');
+      await waitFor(() => primary.pushes.length === 1);
+      // Pushed is not answered: the row stays claimed while the turn runs.
+      expect(ack('follow-up')).toBe('processing');
+      primary.emit({ type: 'result', text: 'provider failed', isError: true });
+      await waitFor(() => ack('follow-up') === 'failed');
+      expect(ack('initial')).toBe('completed');
     } finally {
       query.abort();
       await done;
