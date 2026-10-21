@@ -181,7 +181,7 @@ async function main(): Promise<void> {
     // trigger it; transport failures keep their normal retry behavior.
     // The alternate continuation is ephemeral, so a
     // Claude thread id can never be persisted under Codex (or vice versa).
-    const fallback = resolveUsageLimitFallback(providerName);
+    const fallback = resolveUsageLimitFallback(providerName, process.env, config.model);
     if (fallback) {
       const alternate = createProvider(fallback.providerName, {
         ...providerOptions,

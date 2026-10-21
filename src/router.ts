@@ -22,6 +22,7 @@ import { getChannelAdapter, getChannelDefaults } from './channels/channel-regist
 import { resolveThreadPolicy, resolveUnknownSenderPolicy } from './channels/channel-defaults.js';
 import { gateCommand } from './command-gate.js';
 import { getAgentGroup } from './db/agent-groups.js';
+import { getInboundConsumer } from './db/consumed-inbound.js';
 import { recordDroppedMessage } from './db/dropped-messages.js';
 import {
   createMessagingGroupIfAbsent,
@@ -278,6 +279,20 @@ function safeParseContent(raw: string): { text?: string; sender?: string; sender
  * Creates messaging group + session if they don't exist yet.
  */
 export async function routeInbound(event: InboundEvent): Promise<void> {
+  // A reply a host prompt already consumed never reached any session's
+  // inbound.db, so session dedup can't catch a recovered (startup/reconnect
+  // backfill) or redelivered copy. Drop it before anything else sees it.
+  const consumedBy = await getInboundConsumer(event);
+  if (consumedBy) {
+    log.info('Inbound already consumed by a host prompt, skipping', {
+      channelType: event.channelType,
+      platformId: event.platformId,
+      messageId: event.message.id,
+      consumedBy,
+    });
+    return;
+  }
+
   // Pre-route interceptors — let modules consume messages before any routing
   // (e.g. free-text DM replies during multi-step approval flows). They run in
   // registration order; the first to claim the message stops routing. The
@@ -749,6 +764,19 @@ async function deliverToAgent(
     messageId,
     trigger: wake,
   });
+  if (wake)
+    emitEngineEvent('principal.input', {
+      sessionId: session.id,
+      agentGroupId: session.agent_group_id,
+      messageId,
+      kind: 'human',
+      content,
+      channelType: event.channelType,
+      platformId: event.platformId,
+      threadId: event.threadId ?? null,
+      isBotMessage: event.message.isBotMessage,
+      sourceUserId: userId,
+    });
   if (created) emitEngineEvent('session.created', { session, created });
 
   if (wake && created) {

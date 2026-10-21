@@ -350,6 +350,18 @@ export function getRecoverableMessage(
     | undefined;
 }
 
+/** Retained row, never the most recent inbound or an event-cache guess. */
+export function getTriggerIdentitySource(
+  db: Database.Database,
+  messageId: string,
+): { kind: string; content: string } | undefined {
+  return db
+    .prepare(
+      "SELECT kind, content FROM messages_in WHERE id = ? AND trigger = 1 AND status IN ('pending', 'processing')",
+    )
+    .get(messageId) as { kind: string; content: string } | undefined;
+}
+
 export function syncProcessingAcks(inDb: Database.Database, outDb: Database.Database): void {
   const completed = outDb
     .prepare(
@@ -370,7 +382,9 @@ export function syncProcessingAcks(inDb: Database.Database, outDb: Database.Data
   );
   inDb.transaction(() => {
     for (const { message_id, status } of completed) {
-      (status === 'script-skip:error' ? failStmt : completeStmt).run(message_id);
+      // `failed` (an error result: the provider never answered) is a failed
+      // run too, like `script-skip:error`.
+      (status === 'completed' ? completeStmt : failStmt).run(message_id);
     }
   })();
 }

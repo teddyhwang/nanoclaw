@@ -6,6 +6,7 @@
  */
 import '../resources/index.js';
 import './status.js';
+import './runtime-status.js';
 import { registerResourceHelpCommands } from './help.js';
 
 registerResourceHelpCommands();

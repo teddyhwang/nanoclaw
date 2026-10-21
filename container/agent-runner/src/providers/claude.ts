@@ -1,4 +1,4 @@
-import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
+import { query as sdkQuery, type EffortLevel, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 
 import { isAwaitingSensitiveConfirmation, noteToolResult } from '../confirmation-gate-state.js';
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/container-state.js';
@@ -126,6 +126,13 @@ interface SDKUserMessage {
   };
   parent_tool_use_id: null;
   session_id: string;
+}
+
+/** Trusted runtime-plugin policy, not prompt text. Standalone installs retain
+ * their SDK default when no resolver is installed. Read only at input boundaries. */
+let inputEffortResolver: ((model?: string, effort?: string) => string | undefined) | undefined;
+export function setClaudeInputEffortResolver(resolver: typeof inputEffortResolver): void {
+  inputEffortResolver = resolver;
 }
 
 /**
@@ -501,10 +508,29 @@ export class ClaudeProvider implements AgentProvider {
 
   query(input: QueryInput): AgentQuery {
     if (!this.memorySessionHook) throw new Error('Claude memory session hook was not registered');
+    const resolver = inputEffortResolver;
     const stream = new MessageStream();
-    stream.push(input.prompt, input.imageBlocks);
+    const hasInitialInput = input.prompt !== '' || (input.imageBlocks?.length ?? 0) > 0;
+    if (!resolver || hasInitialInput) stream.push(input.prompt, input.imageBlocks);
 
     const instructions = input.systemContext?.instructions;
+    const readEffort = () => resolver
+      ? resolver(this.inference.model, this.inference.effort)
+      : this.inference.effort;
+    let currentEffort = readEffort();
+    let inputFailure: unknown;
+    let ended = false;
+    let pendingInputs = Promise.resolve();
+    // The SDK consumes stdin ahead of its answers. Control ACK alone is not
+    // a per-input boundary: hold the next setting/prompt until the preceding
+    // SDK result, so queued High/Low cannot alter an in-flight Low answer or
+    // overwrite one another before consumption. Legacy callers remain direct.
+    let completeInput = () => {};
+    let inputReady = Promise.resolve();
+    const beginInput = () => {
+      inputReady = new Promise<void>((resolve) => { completeInput = resolve; });
+    };
+    if (resolver && hasInitialInput) beginInput();
 
     // Per-spawn model override. Set by the host via container env when a
     // plugin (e.g. Optimus' maintenance-task) wants the SDK to run on a
@@ -541,7 +567,7 @@ export class ClaudeProvider implements AgentProvider {
         env: this.env,
         model: this.inference.model,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        effort: this.inference.effort as any,
+        effort: currentEffort as any,
         permissionMode: this.executionPolicy.permissionMode,
         allowDangerouslySkipPermissions: this.executionPolicy.allowDangerouslySkipPermissions,
         settingSources: ['project', 'user', 'local'],
@@ -607,6 +633,7 @@ export class ClaudeProvider implements AgentProvider {
             yield { type: 'text', text: assistantText };
           }
         } else if (message.type === 'result') {
+          completeInput();
           // `result` text exists only on subtype:"success"; error subtypes
           // (e.g. a non-retryable 403 billing_error) carry their message in
           // `errors[]` instead. Keep that actionable notice separate from
@@ -701,11 +728,61 @@ export class ClaudeProvider implements AgentProvider {
     }
 
     return {
-      push: (msg, imageBlocks) => stream.push(msg, imageBlocks),
-      end: () => stream.end(),
-      events: translateEvents(),
+      push: (msg, imageBlocks) => {
+        if (!resolver) {
+          stream.push(msg, imageBlocks);
+          return;
+        }
+        if (ended || aborted) return;
+        // Snapshot trusted configuration synchronously at this ordinary input.
+        // Do not enqueue its prompt until the supported SDK control ACKs.
+        const effort = readEffort();
+        pendingInputs = pendingInputs.then(async () => {
+          await inputReady;
+          if (aborted || inputFailure) return;
+          if (effort !== currentEffort) {
+            await sdkResult.applyFlagSettings({ effortLevel: (effort ?? null) as EffortLevel | null });
+            currentEffort = effort;
+          }
+          if (!aborted) {
+            beginInput();
+            stream.push(msg, imageBlocks);
+          }
+        }).catch((error) => {
+          inputFailure = error;
+          stream.end();
+          sdkResult.close();
+        });
+      },
+      end: () => {
+        ended = true;
+        // Graceful EOF drains already accepted inputs in their original
+        // order. Stop/abort below cancels them instead.
+        if (resolver) void pendingInputs.then(() => stream.end());
+        else stream.end();
+      },
+      events: (async function* () {
+        try {
+          yield* translateEvents();
+        } catch (error) {
+          if (!inputFailure) throw error;
+        } finally {
+          if (resolver) {
+            aborted = true;
+            completeInput();
+          }
+        }
+        if (inputFailure) {
+          yield {
+            type: 'error' as const,
+            retryable: false,
+            message: 'Reasoning settings were refused before the next input: ' + String(inputFailure),
+          };
+        }
+      })(),
       abort: () => {
         aborted = true;
+        completeInput();
         stream.end();
       },
     };

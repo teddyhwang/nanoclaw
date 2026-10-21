@@ -213,6 +213,23 @@ async function releaseClaimQuietly(sessionId: string, incarnation: number): Prom
  */
 const wakePromises = new Map<string, Promise<boolean>>();
 
+/** Read-only process-local evidence; never infer activity from persisted status. */
+export function getHostSessionActivity() {
+  return {
+    active: [...activeContainers]
+      .map(([sessionId, runtime]) => ({
+        session_id: sessionId,
+        agent_group_id: runtime.handle.key.agentGroupId,
+        started_at: new Date(runtime.startedAtMs).toISOString(),
+        adopted: runtime.adopted,
+        stopping: runtime.stopReason !== undefined,
+      }))
+      .sort((a, b) => a.session_id.localeCompare(b.session_id)),
+    waking: [...wakePromises.keys()].sort(),
+    adopting: [...pendingAdoptions].sort(),
+  };
+}
+
 export function getActiveContainerCount(): number {
   return activeContainers.size;
 }
@@ -1384,6 +1401,19 @@ export async function buildMounts(
     }
   }
 
+  // Exclude protected provenance from session, custom and ancestor mounts.
+  const protectedRoot = path.resolve(DATA_DIR, 'requester-provenance');
+  fs.mkdirSync(protectedRoot, { recursive: true });
+  const realProtected = fs.realpathSync(protectedRoot);
+  for (const mount of mounts) {
+    const host = fs.existsSync(mount.hostPath) ? fs.realpathSync(mount.hostPath) : path.resolve(mount.hostPath);
+    if (
+      host === realProtected ||
+      realProtected.startsWith(host + path.sep) ||
+      host.startsWith(realProtected + path.sep)
+    )
+      throw new Error('Container mount overlaps protected requester provenance');
+  }
   return mergeVolumeMounts([], mounts);
 }
 

@@ -18,6 +18,7 @@ import { ensureSchema, openInboundDb } from '../../mailbox/sqlite/session-db.js'
 import type { Session } from '../../types.js';
 import { addTaskMaterializationGuard } from '../../engine/task-materialization.js';
 import { log } from '../../log.js';
+import { engineEvents, type EngineEventMap } from '../../engine/events.js';
 import { handleRecurrence } from './recurrence.js';
 import { _maintainSchedulingForTesting } from '../../host-sweep.js';
 import { listLiveSeries, openScheduleDbAt, pauseSeries, updateSeries, upsertSeries } from './schedule-store.js';
@@ -52,6 +53,35 @@ function session(): Session {
     container_status: 'stopped',
   } as Session;
 }
+
+it('emits the native due instant and claim stamp after one-shot cursor consumption', async () => {
+  const due = new Date(Date.now() - 1000).toISOString();
+  seedSeries('one-shot-claim', null, due);
+  const captured: EngineEventMap['principal.input'][] = [];
+  const off = engineEvents.on('principal.input', (input) => {
+    captured.push(input);
+  });
+  try {
+    await sweep();
+    expect(captured).toHaveLength(1);
+    const schedule = openSchedule();
+    try {
+      const row = schedule
+        .prepare('SELECT process_after,updated_at FROM task_series WHERE series_id=?')
+        .get('one-shot-claim') as { process_after: string | null; updated_at: string };
+      expect(row.process_after).toBeNull();
+      expect(captured[0]).toMatchObject({
+        seriesId: 'one-shot-claim',
+        scheduledFor: due,
+        scheduleClaimedAt: row.updated_at,
+      });
+    } finally {
+      schedule.close();
+    }
+  } finally {
+    off();
+  }
+});
 
 function seedSeries(
   seriesId: string,

@@ -142,6 +142,7 @@ describe('evaluatePolicy — ordered rules + fail-closed', async () => {
 describe('decideSensitiveGate — fail-closed resolution', async () => {
   const base = {
     groupFolder: FOLDER,
+    sessionId: SESSION,
     integration: 'google',
     tool: 'google_call',
     args: {},
@@ -160,6 +161,26 @@ describe('decideSensitiveGate — fail-closed resolution', async () => {
     expect(r.decision).toBe('fail_closed');
   });
 
+  it('missing or cross-group session scope fails closed even for read calls', async () => {
+    await seedGroupAndSession(1);
+    const missing = await decideSensitiveGate({
+      ...base,
+      sessionId: undefined,
+      classification: { risk: 'read', pii: false },
+    });
+    expect(missing.decision).toBe('fail_closed');
+    await createAgentGroup({
+      id: 'ag-other',
+      name: 'Other',
+      folder: 'other-folder',
+      agent_provider: null,
+      created_at: now(),
+    });
+    const wrongGroup = await decideSensitiveGate({ ...base, groupFolder: 'other-folder' });
+    expect(wrongGroup.decision).toBe('fail_closed');
+    expect(delivered).toHaveLength(0);
+  });
+
   it('session with no originating chat → fail_closed (in-channel only)', async () => {
     await seedGroupAndSession(1, /* withChat */ false);
     const r = await decideSensitiveGate(base);
@@ -171,6 +192,7 @@ describe('decideSensitiveGate — fail-closed resolution', async () => {
 describe('decideSensitiveGate — grant + policy path', async () => {
   const base = {
     groupFolder: FOLDER,
+    sessionId: SESSION,
     integration: 'google',
     tool: 'google_call',
     args: {},
@@ -199,6 +221,18 @@ describe('decideSensitiveGate — grant + policy path', async () => {
     const actorId = namespaceActorId('discord', '777'); // discord:777
     const t0 = new Date(Date.now() - 60_000).toISOString();
     await upsertConfirmationGrant(SESSION, actorId, t0);
+    // A newer sibling thread must not steal this caller's grant/session.
+    await createSession({
+      id: 'sess-newer-thread',
+      agent_group_id: AG,
+      messaging_group_id: MG_PUBLIC,
+      thread_id: 'other-thread',
+      agent_provider: null,
+      status: 'active',
+      container_status: 'idle',
+      last_active: now(),
+      created_at: new Date(Date.now() + 1000).toISOString(),
+    });
     const r = await decideSensitiveGate(base);
     expect(r).toEqual({ decision: 'allow', reason: 'live_grant' });
     expect(delivered).toHaveLength(0);
@@ -228,6 +262,7 @@ describe('decideSensitiveGate — grant + policy path', async () => {
 describe('Phase 5 — admin-controlled per-agent gate disable', async () => {
   const base = {
     groupFolder: FOLDER,
+    sessionId: SESSION,
     integration: 'google',
     tool: 'google_call', // unclassified ⇒ would normally require_confirmation
     args: {},
@@ -330,6 +365,7 @@ describe('source-chat card routing — merged agent-shared groups (2026-06-15)',
 
   const base = {
     groupFolder: FOLDER,
+    sessionId: SESSION,
     integration: 'google',
     tool: 'google_call', // unclassified ⇒ require_confirmation
     args: {},

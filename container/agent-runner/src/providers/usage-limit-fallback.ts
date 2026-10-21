@@ -43,16 +43,35 @@ export interface FailoverInfo {
 }
 
 export interface UsageLimitFallbackSelection {
-  providerName: 'claude' | 'codex';
+  providerName: 'claude' | 'codex' | 'pi_rpc';
   model?: string;
 }
 
-/** Resolve Optimus-style Claude↔Codex failover from the container env. */
+/**
+ * Resolve Optimus-style Claude↔Codex failover from the container env.
+ *
+ * Pi runs both model families itself, so a Pi agent stays on Pi and switches
+ * family: an OpenAI (Codex) model falls back to the Claude family default and
+ * an Anthropic model to the GPT one. `primaryModel` is the Pi model
+ * (`provider/model`, or a bare id) the agent runs on.
+ */
 export function resolveUsageLimitFallback(
   primaryName: string,
   env: Record<string, string | undefined> = process.env,
+  primaryModel?: string,
 ): UsageLimitFallbackSelection | null {
   if (env.NANOCLAW_USAGE_LIMIT_FALLBACK !== '1') return null;
+  if (primaryName === 'pi_rpc') {
+    const model = (primaryModel || env.NANOCLAW_AGENT_MODEL || env.NANOCLAW_MODEL || '').trim();
+    const family = model.includes('/') ? model.slice(0, model.indexOf('/')) : model;
+    const claude = env.NANOCLAW_USAGE_LIMIT_CLAUDE_MODEL?.trim();
+    const codex = env.NANOCLAW_USAGE_LIMIT_CODEX_MODEL?.trim();
+    if (/^(openai|gpt)/i.test(family)) return claude ? { providerName: 'pi_rpc', model: `anthropic/${claude}` } : null;
+    if (/^(anthropic|claude)/i.test(family) || !model) {
+      return codex ? { providerName: 'pi_rpc', model: `openai-codex/${codex}` } : null;
+    }
+    return null;
+  }
   if (primaryName === 'claude') {
     return {
       providerName: 'codex',
@@ -255,9 +274,16 @@ export class UsageLimitFallbackProvider implements AgentProvider {
         return { delivered: [], actions: new Map() };
       }
     };
-    const fallbackInput = (handoff: string | null = null): QueryInput => ({
+    const fallbackInput = (
+      handoff: string | null = null,
+      first: { message: string; imageBlocks?: ImageContentBlock[] } = {
+        message: input.prompt,
+        imageBlocks: input.imageBlocks,
+      },
+    ): QueryInput => ({
       ...input,
-      prompt: handoff ? `${handoff}\n${input.prompt}` : input.prompt,
+      prompt: handoff ? `${handoff}\n${first.message}` : first.message,
+      imageBlocks: first.imageBlocks,
       continuation: undefined,
       systemContext: {
         ...input.systemContext,
@@ -273,7 +299,9 @@ export class UsageLimitFallbackProvider implements AgentProvider {
     const primaryName = this.primaryName;
     const fallbackName = this.fallbackName;
     const dualLimitText =
-      `Both ${this.primaryName} and ${this.fallbackName} have reached their usage limits. ` +
+      (this.primaryName === this.fallbackName
+        ? 'Both model providers have reached their usage limits. '
+        : `Both ${this.primaryName} and ${this.fallbackName} have reached their usage limits. `) +
       'Please try again after one of the limits resets.';
     const notifyFailover = async (info: FailoverInfo): Promise<void> => {
       try {
@@ -294,6 +322,12 @@ export class UsageLimitFallbackProvider implements AgentProvider {
       this.fallbackCause = null;
     };
     const followups: Array<{ message: string; imageBlocks?: ImageContentBlock[] }> = [];
+    // Results the primary already returned. Codex and Pi answer one input per
+    // result, so those inputs are done and must not be replayed on the
+    // alternate. (Claude may merge inputs into one result; counting results
+    // then under-counts, which only replays an input it already answered,
+    // never skips one.)
+    let primaryResults = 0;
     let ended = false;
     let aborted = false;
 
@@ -301,8 +335,12 @@ export class UsageLimitFallbackProvider implements AgentProvider {
     // the outbox is the only complete record of what the user already has.
     const primaryHasDelivered = (): boolean => primaryProducedWork || primaryWork().delivered.length > 0;
 
-    const switchToFallback = async (reason: FailoverReason, detail: string): Promise<void> => {
-      if (activeProvider === this.fallback) return;
+    const switchToFallback = async (reason: FailoverReason, detail: string): Promise<boolean> => {
+      if (activeProvider === this.fallback) return false;
+      const unanswered = [{ message: input.prompt, imageBlocks: input.imageBlocks }, ...followups].slice(
+        primaryResults,
+      );
+      if (unanswered.length === 0) return false;
       const work = primaryWork();
       const handoff = buildFailoverHandoff({
         from: this.primaryName,
@@ -326,12 +364,13 @@ export class UsageLimitFallbackProvider implements AgentProvider {
       activeQuery.abort();
       this.preferFallback = true;
       activeProvider = this.fallback;
-      activeQuery = this.fallback.query(fallbackInput(handoff));
-      for (const followup of followups) {
+      activeQuery = this.fallback.query(fallbackInput(handoff, unanswered[0]));
+      for (const followup of unanswered.slice(1)) {
         activeQuery.push(followup.message, followup.imageBlocks);
       }
       if (aborted) activeQuery.abort();
       else if (ended) activeQuery.end();
+      return true;
     };
 
     async function* events(): AsyncGenerator<ProviderEvent> {
@@ -349,9 +388,9 @@ export class UsageLimitFallbackProvider implements AgentProvider {
               !aborted &&
               activeProvider !== fallbackProvider &&
               isProviderAuthFailureText(errorText(err)) &&
-              !primaryHasDelivered()
+              !primaryHasDelivered() &&
+              (await switchToFallback('auth', errorText(err)))
             ) {
-              await switchToFallback('auth', errorText(err));
               switched = true;
               break;
             }
@@ -360,14 +399,18 @@ export class UsageLimitFallbackProvider implements AgentProvider {
           if (next.done) break;
           const event = next.value;
           const reason = activeProvider !== fallbackProvider ? failoverReason(event) : null;
-          if (!aborted && reason && (reason !== 'auth' || !primaryHasDelivered())) {
+          if (
+            !aborted &&
+            reason &&
+            (reason !== 'auth' || !primaryHasDelivered()) &&
             // Do not await iterator.return(): a provider stream can be parked
             // in its SDK even after abort. The alternate attempt must start
             // immediately rather than inheriting that hang.
-            await switchToFallback(
+            (await switchToFallback(
               reason,
               event.type === 'result' ? (event.error ?? event.text ?? '') : event.type === 'error' ? event.message : '',
-            );
+            ))
+          ) {
             switched = true;
             break;
           }
@@ -400,7 +443,20 @@ export class UsageLimitFallbackProvider implements AgentProvider {
           ) {
             primaryProducedWork = true;
           }
+          const primaryResult = activeProvider !== fallbackProvider && event.type === 'result';
+          if (primaryResult) primaryResults++;
           yield event;
+          if (primaryResult) {
+            // The consumer resumes this generator only after it dispatched
+            // that result, so the answer is already in the outbox. A later
+            // failover hands over only the work for inputs still open.
+            primaryProducedWork = false;
+            try {
+              ledgerCursor = ledger?.cursor() ?? ledgerCursor;
+            } catch (err) {
+              log(`turn ledger cursor unavailable: ${errorText(err)}`);
+            }
+          }
         }
         if (!switched) return;
       }

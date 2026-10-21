@@ -15,6 +15,7 @@ import {
   gcStaleSystemRows,
   getInboundSourceSessionId,
   getRecoverableMessage,
+  getTriggerIdentitySource,
   insertMessage,
   migrateMessagesInTable,
   retryWithBackoff,
@@ -27,6 +28,28 @@ const DB_PATH = path.join(TEST_DIR, 'inbound.db');
 
 afterEach(() => {
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+});
+
+it('identity source is the retained live trigger, not a duplicate event or terminal/ambient row', () => {
+  const db = new Database(':memory:');
+  db.exec(INBOUND_SCHEMA);
+  try {
+    const insert = db.prepare(
+      "INSERT OR IGNORE INTO messages_in (id, kind, timestamp, content, trigger, status) VALUES (?, 'reaction', datetime('now'), ?, ?, 'pending')",
+    );
+    insert.run('rx', JSON.stringify({ senderId: 'alice' }), 1);
+    insert.run('rx', JSON.stringify({ senderId: 'bob' }), 1);
+    expect(getTriggerIdentitySource(db, 'rx')).toEqual({
+      kind: 'reaction',
+      content: JSON.stringify({ senderId: 'alice' }),
+    });
+    db.prepare("UPDATE messages_in SET status = 'completed' WHERE id = 'rx'").run();
+    expect(getTriggerIdentitySource(db, 'rx')).toBeUndefined();
+    insert.run('ambient', '{}', 0);
+    expect(getTriggerIdentitySource(db, 'ambient')).toBeUndefined();
+  } finally {
+    db.close();
+  }
 });
 
 describe('migrateMessagesInTable', () => {
@@ -281,6 +304,16 @@ describe('syncProcessingAcks — script-skip counter', () => {
     const { inDb, outDb } = freshPair();
     seedTask(inDb, 't1', { prompt: 'p', script: 'x' });
     ack(outDb, 't1', 'script-skip:error');
+
+    syncProcessingAcks(inDb, outDb);
+
+    expect(status(inDb, 't1')).toBe('failed');
+  });
+
+  it('failed ack (error result) lands the row as FAILED, not completed', () => {
+    const { inDb, outDb } = freshPair();
+    seedTask(inDb, 't1', { prompt: 'p', script: 'x' });
+    ack(outDb, 't1', 'failed');
 
     syncProcessingAcks(inDb, outDb);
 

@@ -25,6 +25,7 @@ import {
   getProcessingClaims,
   getRecentPendingTriggeringChats,
   getRecoverableMessage,
+  getTriggerIdentitySource,
   insertMessage,
   markDelivered,
   markDeliveryFailed,
@@ -97,7 +98,7 @@ function applyProcessingAcks(db: Database.Database, acks: ProcessingAck[]): void
     "UPDATE messages_in SET status = 'failed' WHERE id = ? AND status NOT IN ('completed', 'failed')",
   );
   db.transaction(() => {
-    for (const ack of acks) (ack.status === 'script-skip:error' ? fail : complete).run(ack.messageId);
+    for (const ack of acks) (ack.status === 'completed' ? complete : fail).run(ack.messageId);
   })();
 }
 
@@ -240,6 +241,7 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
       return row && { channelType: row.channel_type, platformId: row.platform_id };
     },
     getLatestTriggeringInbound: () => getLatestTriggeringInbound(db),
+    getTriggerIdentitySource: (messageId) => getTriggerIdentitySource(db, messageId),
     hasUserConversationMessages: (messageIds) => hasUserConversationMessages(db, messageIds),
     getLatestHumanInboundMs: () => getLatestHumanInboundMs(db),
     getRecoverableMessage: (messageId) => {

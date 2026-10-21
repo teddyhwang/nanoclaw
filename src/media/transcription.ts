@@ -19,6 +19,8 @@ interface TranscribeOpts {
   mimeType?: string;
   model?: string;
   backend?: TranscriptionBackend;
+  /** Private-media callers omit SDK/credential error payloads from logs. */
+  redactErrors?: boolean;
   /**
    * Host-injected credential reader. Looked up first; .env / process.env
    * are the fallback. Optimus stores `gemini_api_key` and `openai_api_key`
@@ -46,7 +48,7 @@ export async function transcribeAudio(audioBuffer: Buffer, opts: TranscribeOpts 
     injectedGemini = opts.getCredential?.('gemini_api_key');
     injectedOpenai = opts.getCredential?.('openai_api_key');
   } catch (err) {
-    log.warn('platform-credential reader threw; falling back to env', { err });
+    log.warn('platform-credential reader threw; falling back to env', opts.redactErrors ? {} : { err });
   }
   const geminiKey = injectedGemini || process.env.GEMINI_API_KEY || env.GEMINI_API_KEY || undefined;
   const openaiKey = injectedOpenai || process.env.OPENAI_API_KEY || env.OPENAI_API_KEY || undefined;
@@ -68,6 +70,7 @@ export async function transcribeAudio(audioBuffer: Buffer, opts: TranscribeOpts 
         apiKey: geminiKey!,
         mimeType,
         model: opts.model ?? 'gemini-2.5-flash',
+        redactErrors: opts.redactErrors,
       });
     }
 
@@ -76,6 +79,7 @@ export async function transcribeAudio(audioBuffer: Buffer, opts: TranscribeOpts 
       filename: opts.filename ?? 'voice.ogg',
       mimeType,
       model: opts.model ?? 'gpt-transcribe',
+      redactErrors: opts.redactErrors,
     });
   };
 
@@ -115,7 +119,12 @@ function resolveBackend(
 
 async function transcribeWithGemini(
   audioBuffer: Buffer,
-  { apiKey, mimeType, model }: { apiKey: string; mimeType: string; model: string },
+  {
+    apiKey,
+    mimeType,
+    model,
+    redactErrors,
+  }: { apiKey: string; mimeType: string; model: string; redactErrors?: boolean },
 ): Promise<string> {
   try {
     const { GoogleGenAI } = await import('@google/genai');
@@ -149,16 +158,27 @@ async function transcribeWithGemini(
     });
     return text || VOICE_TRANSCRIPTION_FAILED;
   } catch (err) {
-    log.error('Gemini transcription failed', {
-      err: err instanceof Error ? err.message : String(err),
-    });
+    log.error(
+      'Gemini transcription failed',
+      redactErrors
+        ? {}
+        : {
+            err: err instanceof Error ? err.message : String(err),
+          },
+    );
     return VOICE_TRANSCRIPTION_FAILED;
   }
 }
 
 async function transcribeWithOpenAI(
   audioBuffer: Buffer,
-  { apiKey, filename, mimeType, model }: { apiKey: string; filename: string; mimeType: string; model: string },
+  {
+    apiKey,
+    filename,
+    mimeType,
+    model,
+    redactErrors,
+  }: { apiKey: string; filename: string; mimeType: string; model: string; redactErrors?: boolean },
 ): Promise<string> {
   try {
     const openaiModule = await import('openai');
@@ -182,9 +202,14 @@ async function transcribeWithOpenAI(
     });
     return text || VOICE_TRANSCRIPTION_FAILED;
   } catch (err) {
-    log.error('OpenAI transcription failed', {
-      err: err instanceof Error ? err.message : String(err),
-    });
+    log.error(
+      'OpenAI transcription failed',
+      redactErrors
+        ? {}
+        : {
+            err: err instanceof Error ? err.message : String(err),
+          },
+    );
     return VOICE_TRANSCRIPTION_FAILED;
   }
 }

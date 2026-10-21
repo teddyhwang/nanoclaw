@@ -15,12 +15,15 @@
 import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 
 import {
   SCHEDULE_SCHEMA,
   advanceRecurrence,
   cancelSeries,
+  claimDueOccurrence,
+  markSeriesFired,
+  releaseOccurrenceClaim,
   getDueSeries,
   hasSeries,
   listLiveSeries,
@@ -60,10 +63,30 @@ function schedule(
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
 });
 
 describe('schedule-store — series lifecycle (S405 structural fix)', () => {
+  it.each([false, true])('fire telemetry preserves claim revision/concurrent edit (%s)', (concurrentEdit) => {
+    const db = freshDb();
+    try {
+      const due = '2026-10-19T00:00:00.000Z',
+        claimedAt = '2026-10-19T00:00:01.001Z',
+        firedAt = '2026-10-19T00:00:01.000Z';
+      schedule(db, 'one-shot', { processAfter: due });
+      expect(claimDueOccurrence(db, 'one-shot', due, null, claimedAt)).toBe(claimedAt);
+      if (concurrentEdit)
+        db.prepare("UPDATE task_series SET updated_at='intervening-owner-edit' WHERE series_id='one-shot'").run();
+      markSeriesFired(db, 'one-shot', firedAt);
+      expect(db.prepare("SELECT updated_at,last_fired_at FROM task_series WHERE series_id='one-shot'").get()).toEqual({
+        updated_at: concurrentEdit ? 'intervening-owner-edit' : claimedAt,
+        last_fired_at: firedAt,
+      });
+    } finally {
+      db.close();
+    }
+  });
   it('schedules a series and surfaces it as due once process_after has elapsed', () => {
     const db = freshDb();
     schedule(db, 'task-1', { recurrence: '*/5 * * * *' });
@@ -136,6 +159,28 @@ describe('schedule-store — series lifecycle (S405 structural fix)', () => {
     expect(resumeSeries(db, 'task-c')).toBe(0);
     expect(getDueSeries(db, new Date().toISOString())).toEqual([]);
     db.close();
+  });
+
+  it('explicit Stop advances an already-consumed claim revision even within the same millisecond', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-20T13:00:00.000Z'));
+    const db = freshDb();
+    try {
+      const due = '2026-10-20T12:59:59.000Z';
+      const claimedAt = new Date().toISOString();
+      schedule(db, 'claimed-one-shot', { processAfter: due });
+      expect(claimDueOccurrence(db, 'claimed-one-shot', due, null, claimedAt)).toBe(claimedAt);
+      expect(cancelSeries(db, 'claimed-one-shot')).toBe(1);
+      const read = () =>
+        db.prepare("SELECT status,updated_at,recurrence FROM task_series WHERE series_id='claimed-one-shot'").get();
+      expect(read()).toEqual({ status: 'cancelled', updated_at: '2026-10-20T13:00:00.001Z', recurrence: null });
+      expect(cancelSeries(db, 'claimed-one-shot')).toBe(1);
+      expect(read()).toEqual({ status: 'cancelled', updated_at: '2026-10-20T13:00:00.002Z', recurrence: null });
+      expect(releaseOccurrenceClaim(db, 'claimed-one-shot', due, claimedAt)).toBe(false);
+      expect(resumeSeries(db, 'claimed-one-shot')).toBe(0);
+    } finally {
+      db.close();
+    }
   });
 
   it('updateSeries merges prompt into content JSON without clobbering, only for live series', () => {

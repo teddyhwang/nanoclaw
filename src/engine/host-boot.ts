@@ -42,6 +42,9 @@ import { handleChatMigrated } from '../channels/chat-migration.js';
 import { getResponseHandlers, type ResponsePayload } from '../response-registry.js';
 import { startHostModules, stopHostModules } from '../host-lifecycle.js';
 import { startHostInstanceLease, stopHostInstanceLease } from '../host-instance.js';
+import '../cli/commands/index.js';
+import '../cli/delivery-action.js';
+import { startCliServer, stopCliServer } from '../cli/socket-server.js';
 
 // Channel barrel — each enabled channel self-registers on import.
 import '../channels/index.js';
@@ -284,11 +287,15 @@ export async function _bootForHost(opts: { managedSignals: boolean }): Promise<v
     process.on('SIGINT', () => void _shutdownForHost('SIGINT').then(() => process.exit(0)));
   }
 
+  // Same private host control lifecycle as the standalone entrypoint. Do not
+  // expose readback until adoption and host modules have completed startup.
+  await startCliServer();
   log.info('NanoClaw running');
 }
 
 export async function _shutdownForHost(reason: string): Promise<void> {
   log.info('Shutdown requested', { reason });
+  await stopCliServer();
   hostAbortController.abort();
   stopGatewayMonitor?.();
   await stopGatewayApprovalCoordinator();

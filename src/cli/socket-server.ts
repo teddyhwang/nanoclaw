@@ -70,7 +70,10 @@ export async function startCliServer(socketPath: string = DEFAULT_SOCKET_PATH): 
       try {
         fs.chmodSync(socketPath, 0o600);
       } catch (err) {
-        log.warn('Failed to chmod ncl socket (continuing)', { socketPath, err });
+        // The filesystem owner-only boundary is mandatory, not best effort.
+        server = null;
+        s.close(() => reject(err));
+        return;
       }
       log.info('ncl CLI server listening', { socketPath });
       resolve();

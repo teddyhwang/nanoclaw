@@ -317,6 +317,8 @@ export {
 // route approval to the owner rather than the standard pickApprover
 // precedence that also includes group admins).
 export { getOwners, getGlobalAdmins } from '../modules/permissions/db/user-roles.js';
+// Read-only caller-to-DM evidence; unlike ensureUserDm, never opens a DM.
+export { getUserDm } from '../modules/permissions/db/user-dms.js';
 export type { UserRole } from '../types.js';
 
 export { addSpawnAdmissionGuard, type SpawnAdmissionGuard } from './spawn-admission.js';

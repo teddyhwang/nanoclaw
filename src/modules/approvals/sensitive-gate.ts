@@ -57,7 +57,7 @@
 import { getAgentGroupByFolder } from '../../db/agent-groups.js';
 import { getSensitiveGateMode } from '../../db/container-configs.js';
 import { getMessagingGroup, getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
-import { findSessionByAgentGroup, getConfirmationGrant, touchConfirmationGrant } from '../../db/sessions.js';
+import { getSession, getConfirmationGrant, touchConfirmationGrant } from '../../db/sessions.js';
 import { log } from '../../log.js';
 import type { Session } from '../../types.js';
 import { requestConfirmation } from './primitive.js';
@@ -143,6 +143,7 @@ function grantIsLive(grantedAt: string, lastUsedAt: string, nowMs: number): bool
 // ─── Decision orchestrator ────────────────────────────────────────────
 
 export interface SensitiveGateInput {
+  sessionId?: string;
   /** `agent_groups.folder` from the MCP route URL (`/mcp/:integration/:groupFolder`). */
   groupFolder: string;
   /** URL `:integration` param (google, lunchmoney, ...). */
@@ -209,6 +210,14 @@ export async function decideSensitiveGate(input: SensitiveGateInput): Promise<Se
     return { decision: 'fail_closed', reason: `no agent group for folder ${groupFolder}` };
   }
 
+  const session: Session | undefined = input.sessionId ? await getSession(input.sessionId) : undefined;
+  if (session?.agent_group_id !== agentGroup.id || session?.status !== 'active') {
+    return { decision: 'fail_closed', reason: 'missing or mismatched authenticated session scope' };
+  }
+  if (!session) {
+    return { decision: 'fail_closed', reason: `no active session for agent group ${agentGroup.id}` };
+  }
+
   // Phase 5 — admin-controlled per-agent disable. A workspace owner/global-
   // admin can mark a trusted agent group 'off'; container-side `ncl` can
   // NEVER write this (dispatch.ts blocks it for caller==='agent' regardless
@@ -228,10 +237,6 @@ export async function decideSensitiveGate(input: SensitiveGateInput): Promise<Se
     return { decision: 'allow', reason: 'gate_disabled_by_admin' };
   }
 
-  const session: Session | undefined = await findSessionByAgentGroup(agentGroup.id);
-  if (!session) {
-    return { decision: 'fail_closed', reason: `no active session for agent group ${agentGroup.id}` };
-  }
   if (!session.messaging_group_id) {
     // Self-confirm is in-channel only — a session with no originating
     // chat has nowhere to deliver the card, so it cannot be confirmed.

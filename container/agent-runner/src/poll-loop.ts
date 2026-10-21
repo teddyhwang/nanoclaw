@@ -1,3 +1,4 @@
+import { bindIdentityTurn, extendIdentityTurn } from './turn-identity.js';
 import {
   confirmationGatePaused,
   isAwaitingSensitiveConfirmation,
@@ -8,6 +9,7 @@ import {
   getPendingMessages,
   markProcessing,
   markCompleted,
+  markFailed,
   markScriptSkipped,
   type MessageInRow,
 } from './db/messages-in.js';
@@ -413,6 +415,14 @@ export function _resetShutdownStateForTests(): void {
 }
 
 /**
+ * Message status from the query that just ran, for the caller's final
+ * marking. Each pushed input is completed (or failed, for an error result) by
+ * its own result; inputs still without a result when the stream ends are
+ * `unresolved`. Reset by the caller before each processQuery.
+ */
+const queryMessageOutcome = { failed: new Set<string>(), unresolved: [] as string[] };
+
+/**
  * Read inbound image attachments off disk and convert to Anthropic
  * vision content blocks. The host writes raw bytes to
  * `<sessDir>/inbox/<msgId>/<file>` (resized client-side via sharp when
@@ -639,425 +649,446 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     const ids = batch.map((m) => m.id);
     markProcessing(ids);
-
-    const routing = extractRouting(batch);
-    // Did a human @mention this agent or reply to one of its messages
-    // this turn? Computed once here from the same batch routing uses.
-    // Threaded into processQuery → dispatchResultText so an addressed
-    // turn that produces no deliverable output emits an explicit
-    // fallback instead of a bare silent_turn_complete the user never
-    // sees (2026-05-17 AI Friends incident).
-    //
-    // assistantName only powers isAddressedTurn's *secondary*
-    // reply-to-bot-by-name path; the primary isMention / replyTo.toBot
-    // signals don't need it. Resolve it defensively: getConfig() throws
-    // if loadConfig() hasn't run (the production entrypoint always calls
-    // it first, but integration tests drive runPollLoop directly without
-    // it). A throw here would crash the whole loop for a name-match
-    // nicety — degrade to "" (skip only the name path) instead.
-    let assistantName = '';
+    // Bind before commands or pre-task scripts, not merely before the model:
+    // scripts can call MCP and must use the same host-verified principal.
+    const releaseIdentity = await bindIdentityTurn(batch.filter((m) => m.trigger === 1).map((m) => m.id));
     try {
-      assistantName = getConfig().assistantName;
-    } catch {
-      // config not loaded (test harness / very early boot) — name-match
-      // path is skipped, isMention/toBot still work.
-    }
-    const addressed = isAddressedTurn(batch, assistantName);
-
-    // Command handling: the host router gates filtered and unauthorized
-    // admin commands before they reach the container. The only command
-    // the runner handles directly is /clear (session reset).
-    const normalMessages: MessageInRow[] = [];
-    const commandIds: string[] = [];
-
-    for (const msg of batch) {
-      if ((msg.kind === 'chat' || msg.kind === 'chat-sdk') && isClearCommand(msg)) {
-        log('Clearing session (resetting continuation)');
-        continuation = undefined;
-        clearContinuation(config.providerName);
-        clearContinuationStartedAt(config.providerName);
-        clearFailedTurn();
-        await writeMessageOut({
-          id: generateId(),
-          kind: 'chat',
-          platform_id: routing.platformId,
-          channel_type: routing.channelType,
-          thread_id: routing.threadId,
-          content: JSON.stringify({ text: 'Session cleared.' }),
-        });
-        commandIds.push(msg.id);
-        continue;
+      const routing = extractRouting(batch);
+      // Did a human @mention this agent or reply to one of its messages
+      // this turn? Computed once here from the same batch routing uses.
+      // Threaded into processQuery → dispatchResultText so an addressed
+      // turn that produces no deliverable output emits an explicit
+      // fallback instead of a bare silent_turn_complete the user never
+      // sees (2026-05-17 AI Friends incident).
+      //
+      // assistantName only powers isAddressedTurn's *secondary*
+      // reply-to-bot-by-name path; the primary isMention / replyTo.toBot
+      // signals don't need it. Resolve it defensively: getConfig() throws
+      // if loadConfig() hasn't run (the production entrypoint always calls
+      // it first, but integration tests drive runPollLoop directly without
+      // it). A throw here would crash the whole loop for a name-match
+      // nicety — degrade to "" (skip only the name path) instead.
+      let assistantName = '';
+      try {
+        assistantName = getConfig().assistantName;
+      } catch {
+        // config not loaded (test harness / very early boot) — name-match
+        // path is skipped, isMention/toBot still work.
       }
-      // isSessionEcho guard: a copied "/upload-trace" from another session is
-      // ambient context, never a runner command (isClearCommand self-guards).
-      if ((msg.kind === 'chat' || msg.kind === 'chat-sdk') && !isSessionEcho(msg) && isUploadTraceCommand(msg)) {
-        log('Uploading session trace to Hugging Face');
-        await writeMessageOut({
-          id: generateId(),
-          kind: 'chat',
-          platform_id: routing.platformId,
-          channel_type: routing.channelType,
-          thread_id: routing.threadId,
-          content: JSON.stringify({ text: uploadTrace(config.providerName) }),
-        });
-        commandIds.push(msg.id);
-        continue;
-      }
-      normalMessages.push(msg);
-    }
+      const addressed = isAddressedTurn(batch, assistantName);
 
-    if (commandIds.length > 0) {
-      markCompleted(commandIds);
-    }
+      // Command handling: the host router gates filtered and unauthorized
+      // admin commands before they reach the container. The only command
+      // the runner handles directly is /clear (session reset).
+      const normalMessages: MessageInRow[] = [];
+      const commandIds: string[] = [];
 
-    if (normalMessages.length === 0) {
-      const remainingIds = ids.filter((id) => !commandIds.includes(id));
-      if (remainingIds.length > 0) markCompleted(remainingIds);
-      log(`All ${batch.length} message(s) were commands, skipping query`);
-      continue;
-    }
-
-    // Pre-task scripts: for any task rows with a `script`, run it before the
-    // provider call. Scripts returning wakeAgent=false (or erroring) gate
-    // their own task row only — surviving messages still go to the agent.
-    // Without the scheduling module, the marker block is empty, `keep`
-    // falls back to `normalMessages`, and no gating happens.
-    let keep: MessageInRow[] = normalMessages;
-    let skipped: Array<{ id: string; reason: string }> = [];
-    // MODULE-HOOK:scheduling-pre-task:start
-    const { applyPreTaskScripts } = await import('./scheduling/task-script.js');
-    const preTask = await applyPreTaskScripts(normalMessages);
-    keep = preTask.keep;
-    skipped = preTask.skipped;
-    if (skipped.length > 0) {
-      markScriptSkipped(skipped);
-      log(`Pre-task script skipped ${skipped.length} task(s): ${skipped.map((s) => s.id).join(', ')}`);
-      // Record a 'gated' fire per skipped task. The task fired on
-      // schedule and its script ran — it just decided not to wake the
-      // agent. Without this row the dashboard shows "never ran" for a
-      // healthy quiet task (RSS pollers, dream/maintenance checks that
-      // usually no-op). One row per occurrence; series_id groups them.
-      for (const g of preTask.gated) {
-        try {
-          writeTaskFire({
+      for (const msg of batch) {
+        if ((msg.kind === 'chat' || msg.kind === 'chat-sdk') && isClearCommand(msg)) {
+          log('Clearing session (resetting continuation)');
+          continuation = undefined;
+          clearContinuation(config.providerName);
+          clearContinuationStartedAt(config.providerName);
+          clearFailedTurn();
+          await writeMessageOut({
             id: generateId(),
-            seriesId: g.seriesId,
-            taskId: g.taskId,
-            status: 'gated',
-            assistantText: null,
-            dispatched: [],
-            errorMessage: g.reason === 'script error/no output' ? g.reason : null,
+            kind: 'chat',
+            platform_id: routing.platformId,
+            channel_type: routing.channelType,
+            thread_id: routing.threadId,
+            content: JSON.stringify({ text: 'Session cleared.' }),
           });
-        } catch (err) {
-          log(`task_fires gated-write failed for ${g.taskId}: ${err instanceof Error ? err.message : String(err)}`);
+          commandIds.push(msg.id);
+          continue;
         }
+        // isSessionEcho guard: a copied "/upload-trace" from another session is
+        // ambient context, never a runner command (isClearCommand self-guards).
+        if ((msg.kind === 'chat' || msg.kind === 'chat-sdk') && !isSessionEcho(msg) && isUploadTraceCommand(msg)) {
+          log('Uploading session trace to Hugging Face');
+          await writeMessageOut({
+            id: generateId(),
+            kind: 'chat',
+            platform_id: routing.platformId,
+            channel_type: routing.channelType,
+            thread_id: routing.threadId,
+            content: JSON.stringify({ text: uploadTrace(config.providerName) }),
+          });
+          commandIds.push(msg.id);
+          continue;
+        }
+        normalMessages.push(msg);
       }
-    }
-    // MODULE-HOOK:scheduling-pre-task:end
 
-    if (keep.length === 0) {
-      log(`All ${normalMessages.length} non-command message(s) gated by script, skipping query`);
-      continue;
-    }
-
-    // Re-check the accumulate gate after script filtering. The gate at the
-    // top of the loop lets the batch through if ANY message has trigger=1,
-    // but a recurring task with wakeAgent=false (e.g. dream/maintenance
-    // scripts that decide nothing's worth waking for) is the only trigger=1
-    // row in the batch and gets stripped here. Without this re-check, the
-    // trigger=0 accumulate rows that rode along get processed as prompts —
-    // exactly the v1 requires_trigger gap operators reported (2026-05-09
-    // AI Friends "close.. just gotta suppress those embeds" echo).
-    if (!keep.some((m) => m.trigger === 1)) {
-      log(
-        `Skipping ${keep.length} accumulate-only message(s) after script filter — leaving pending until next trigger`,
-      );
-      continue;
-    }
-
-    // Format messages: passthrough commands get raw text (only if the
-    // provider natively handles slash commands), others get XML.
-    const prompt = formatMessagesWithCommands(keep, nativeSlashCommands, config.providerName);
-
-    log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
-
-    // Capture the active turn's trigger sender. Follow-up messages from a
-    // different sender are deferred (left pending) instead of pushed into
-    // this query — pushing folds both senders' requests into one combined
-    // reply (boysnight 2026-04-27, ported from v1 apps/nanoclaw/src/index.ts).
-    const triggerRow = keep.find((m) => m.trigger === 1) ?? keep[0];
-    const activeSender = extractMessageSender(triggerRow);
-
-    // Task-fire tracking: if a task row triggered this stream, capture its
-    // series_id + id so processQuery can write a task_fires row when the
-    // stream ends. `series_id` falls back to `id` for pre-migration rows
-    // (matches the host-side backfill in src/db/session-db.ts:349). Only
-    // the kind='task' branch participates — chat-triggered wakes don't
-    // produce fire rows.
-    // Shared, mutable list seeded with the initial-batch task rows; the
-    // follow-up poll closure appends a context per follow-up task that
-    // survives its pre-task script. One context per due task occurrence so
-    // each gets exactly one fire row even when several fold into one
-    // provider stream (multiple recurring tasks coming due in the same
-    // wake, or follow-ups arriving mid-turn). `series_id` falls back to
-    // `id` for pre-migration rows (matches host-side backfill in
-    // src/db/session-db.ts:349). Chat-triggered wakes produce no context.
-    const taskFireContexts: TaskFireContext[] = [];
-    for (const m of keep) {
-      if (m.trigger !== 1 || m.kind !== 'task') continue;
-      registerTaskFireContextOnce(taskFireContexts, m);
-    }
-
-    // Load any inbound image attachments as Anthropic vision content blocks.
-    // The host wrote bytes to <sessDir>/inbox/<msgId>/<file> (sized to fit
-    // the 5MB API cap by chat-sdk-bridge before insert), and the session dir
-    // mounts at /workspace, so absolutePath is `/workspace/inbox/...`.
-    // Empty array on no images / all reads failed — provider sends text-only.
-    const imageRefs = extractImageAttachments(keep);
-    const imageBlocks = loadImageBlocks(imageRefs);
-    if (imageBlocks.length > 0) {
-      log(`Loaded ${imageBlocks.length} image attachment(s) for multimodal turn`);
-    }
-
-    // Per-dequeue session rotation — fires BEFORE provider.query() so the
-    // current turn always runs on a coherent thread (rotating mid-flight
-    // would destroy the in-memory `resume` id while the SDK is still using
-    // it). Upstream calls maybeRotateContinuation once at container boot;
-    // we additionally call it before every query so drift-axis triggers
-    // (post-compact summaries, day-boundary crossings — see
-    // session-rotation.ts) fire even in a long-lived warm container.
-    if (continuation) {
-      const reason = config.provider.maybeRotateContinuation?.(continuation, config.cwd);
-      if (reason) {
-        log(`Rotating session before query: ${reason} (previous continuation: ${continuation})`);
-        clearContinuation(config.providerName);
-        setRotationNotice(buildRotationNotice(reason));
-        continuation = undefined;
+      if (commandIds.length > 0) {
+        markCompleted(commandIds);
       }
-    }
 
-    // A fresh thread that follows a rotation gets a one-shot pointer to the
-    // handoff note / archived transcripts, so it doesn't silently start with
-    // zero knowledge of an in-flight conversation (the "it compacted and
-    // then forgot everything" experience). Dream runs skip it — their fresh
-    // thread is ephemeral maintenance, not the conversation's successor.
-    let promptForQuery = prompt;
-    if (continuation === undefined && !config.isDreamRun) {
-      const notice = consumeRotationNotice();
-      if (notice) {
-        log('Prepending rotation notice to fresh-thread prompt');
-        promptForQuery = `<system>${notice}</system>\n\n${prompt}`;
+      if (normalMessages.length === 0) {
+        const remainingIds = ids.filter((id) => !commandIds.includes(id));
+        if (remainingIds.length > 0) markCompleted(remainingIds);
+        log(`All ${batch.length} message(s) were commands, skipping query`);
+        continue;
       }
-    }
 
-    // One-shot pickup of a request whose reply failed on this route
-    // (failed-turn-notice.ts). Interactive turns only: Dream and task-only
-    // turns neither consume nor see it, nor do routes that could never have
-    // recorded one (a2a, failure-notice wakes). Works on resumed and fresh threads.
-    if (!config.isDreamRun && taskFireContexts.length === 0 && failedTurnEligible(routing, false)) {
-      const failedNotice = consumeFailedTurnNotice(routing);
-      if (failedNotice) {
-        log('Prepending failed-turn notice to prompt');
-        promptForQuery = `<system>${failedNotice}</system>\n\n${promptForQuery}`;
-      }
-    }
-
-    const query = config.provider.query({
-      prompt: promptForQuery,
-      continuation,
-      cwd: config.cwd,
-      systemContext: config.systemContext,
-      imageBlocks: imageBlocks.length > 0 ? imageBlocks : undefined,
-    });
-    // Expose the active query to the SIGTERM handler so a host reap can end
-    // it cleanly mid-turn (drain to completion) instead of the process being
-    // SIGKILLed with the turn still open. If shutdown was requested in the
-    // window between the loop-top check and here, end immediately.
-    activeQueryForShutdown = query;
-    if (shuttingDown) query.end();
-
-    // Process the query while concurrently polling for new messages
-    const skippedSet = new Set(skipped.map((s) => s.id));
-    const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
-    // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
-    // can stamp it on outbound rows — needed for a2a return-path routing.
-    // Two transports, both required: module state for any in-process
-    // consumer, AND session_state (outbound.db) because the built-in MCP
-    // server runs as a separate stdio subprocess that cannot see this
-    // process's module state. The DB value is the AUTHORITATIVE reply
-    // target — it is `null` for task-only / accumulate-only turns
-    // (extractRouting → pickInReplyToMessage already excluded task rows),
-    // which is exactly the signal that stops a recurring RSS/status post
-    // from inheriting a stale human @mention's reply pill. See
-    // setCurrentBatchReplyTarget's docstring for the full incident chain.
-    setCurrentInReplyTo(routing.inReplyTo);
-    setCurrentBatchReplyTarget(routing.inReplyTo);
-    // Set when processQuery threw a retryable-with-no-result failure; guards
-    // the markCompleted below so the host re-fires the task instead of the
-    // run silently completing (codex MCP-init empty-fire, 2026-06-05).
-    let retryableBatchFailure = false;
-    // Whether this turn produced at least one result event. Read after the
-    // try/finally to decide, on a shutdown-cut-short turn, between completing
-    // the rows (work happened) and leaving them pending (work didn't).
-    let sawResult = false;
-    publishReplyRoute(routing);
-    // Forward a loop stop to the ACTIVE query. The stream deliberately stays
-    // open between turns, so the loop can be parked inside processQuery when
-    // config.signal fires; without this, the "stopped" loop's query — and its
-    // 500ms follow-up poller — outlives the stop and keeps polling (and
-    // claiming) messages from whatever inbound DB the process points at. In
-    // tests that leaked one immortal poller per loop-driven test, which could
-    // steal a later test's follow-up message into a dead query.
-    const abortActiveQuery = () => query.abort();
-    if (config.signal?.aborted) abortActiveQuery();
-    else config.signal?.addEventListener('abort', abortActiveQuery, { once: true });
-    try {
-      const result = await processQuery(
-        query,
-        routing,
-        processingIds,
-        config.providerName,
-        activeSender,
-        addressed,
-        assistantName,
-        taskFireContexts,
-        // Proactive pressure rotation is for the persistent interactive
-        // thread only — a dream's fresh thread is ephemeral by design.
-        config.isDreamRun ? null : (config.provider.pressureRotationTokens?.() ?? null),
-        config.provider.onExchangeComplete?.bind(config.provider),
-        prompt,
-        continuation,
-        midTurnCompleteDelivery,
-        config.signal,
-      );
-      sawResult = Boolean(result.sawResult);
-      if (result.pressureRotated) {
-        // processQuery already cleared the persisted continuation rows and
-        // wrote the rotation notice; drop the in-memory id too, or the next
-        // warm dequeue would resume — and re-persist — the retired thread.
-        log('Pressure rotation completed — next turn starts a fresh thread');
-        continuation = undefined;
-      } else if (result.continuation && result.continuation !== continuation) {
-        const isNewThread = continuation === undefined;
-        // A dream's fresh thread is EPHEMERAL — it must never become the
-        // group's persisted continuation. Persisting it would clobber the
-        // interactive session's thread with the throwaway dream thread, so
-        // the next user turn would resume the dream's one-shot maintenance
-        // context instead of the conversation. The dream owns its own
-        // lifecycle (it calls rotate_session as its final step); the
-        // poll-loop just must not write its thread id back. Keep the local
-        // `continuation` var updated so any in-process follow-up dream turn
-        // stays on the same fresh thread, but skip the durable write.
-        continuation = result.continuation;
-        if (shouldPersistContinuation(Boolean(config.isDreamRun))) {
-          setContinuation(config.providerName, continuation);
-          // Stamp the rotation-day this continuation started on. Only on a
-          // newly-adopted thread — resuming an existing one keeps the
-          // original stamp so the day-boundary check measures from when the
-          // thread truly began, not when this container happened to attach.
-          if (isNewThread) {
-            setContinuationStartedAt(config.providerName, computeRotationDate(new Date(), TIMEZONE));
+      // Pre-task scripts: for any task rows with a `script`, run it before the
+      // provider call. Scripts returning wakeAgent=false (or erroring) gate
+      // their own task row only — surviving messages still go to the agent.
+      // Without the scheduling module, the marker block is empty, `keep`
+      // falls back to `normalMessages`, and no gating happens.
+      let keep: MessageInRow[] = normalMessages;
+      let skipped: Array<{ id: string; reason: string }> = [];
+      // MODULE-HOOK:scheduling-pre-task:start
+      const { applyPreTaskScripts } = await import('./scheduling/task-script.js');
+      const preTask = await applyPreTaskScripts(normalMessages);
+      keep = preTask.keep;
+      skipped = preTask.skipped;
+      if (skipped.length > 0) {
+        markScriptSkipped(skipped);
+        log(`Pre-task script skipped ${skipped.length} task(s): ${skipped.map((s) => s.id).join(', ')}`);
+        // Record a 'gated' fire per skipped task. The task fired on
+        // schedule and its script ran — it just decided not to wake the
+        // agent. Without this row the dashboard shows "never ran" for a
+        // healthy quiet task (RSS pollers, dream/maintenance checks that
+        // usually no-op). One row per occurrence; series_id groups them.
+        for (const g of preTask.gated) {
+          try {
+            writeTaskFire({
+              id: generateId(),
+              seriesId: g.seriesId,
+              taskId: g.taskId,
+              status: 'gated',
+              assistantText: null,
+              dispatched: [],
+              errorMessage: g.reason === 'script error/no output' ? g.reason : null,
+            });
+          } catch (err) {
+            log(`task_fires gated-write failed for ${g.taskId}: ${err instanceof Error ? err.message : String(err)}`);
           }
         }
       }
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      log(`Query error: ${errMsg}`);
+      // MODULE-HOOK:scheduling-pre-task:end
 
-      // A retryable provider failure with no result (processQuery's
-      // `retryable provider error, no result:` throw) must NOT be marked
-      // completed — leaving the row pending lets the host re-fire it.
-      // Everything else still completes: a non-retryable error is terminal
-      // (re-running would just fail again), so we record the error fire and
-      // move on as before.
-      const killedDream =
-        taskFireContexts.length > 0 &&
-        taskFireContexts.every((ctx) => ctx.seriesId.startsWith('dream-') && !ctx.written) &&
-        /Claude Code process exited with code 137\b/.test(errMsg);
-      if (errMsg.startsWith('retryable provider error, no result:') || killedDream) {
-        retryableBatchFailure = true;
+      if (keep.length === 0) {
+        log(`All ${normalMessages.length} non-command message(s) gated by script, skipping query`);
+        continue;
       }
 
-      // Stale/corrupt continuation recovery: ask the provider whether
-      // this error means the stored continuation is unusable, and clear
-      // it so the next attempt starts fresh.
-      if (continuation && config.provider.isSessionInvalid(err)) {
-        log(`Stale session detected (${continuation}) — clearing for next retry`);
-        continuation = undefined;
-        clearContinuation(config.providerName);
-        clearContinuationStartedAt(config.providerName);
+      // Re-check the accumulate gate after script filtering. The gate at the
+      // top of the loop lets the batch through if ANY message has trigger=1,
+      // but a recurring task with wakeAgent=false (e.g. dream/maintenance
+      // scripts that decide nothing's worth waking for) is the only trigger=1
+      // row in the batch and gets stripped here. Without this re-check, the
+      // trigger=0 accumulate rows that rode along get processed as prompts —
+      // exactly the v1 requires_trigger gap operators reported (2026-05-09
+      // AI Friends "close.. just gotta suppress those embeds" echo).
+      if (!keep.some((m) => m.trigger === 1)) {
+        log(
+          `Skipping ${keep.length} accumulate-only message(s) after script filter — leaving pending until next trigger`,
+        );
+        continue;
       }
 
-      // processQuery owns push-scoped failure notices and auth alerts.
+      // Format messages: passthrough commands get raw text (only if the
+      // provider natively handles slash commands), others get XML.
+      const prompt = formatMessagesWithCommands(keep, nativeSlashCommands, config.providerName);
 
-      // Task-fire error record. Captures the error message so the
-      // dashboard can show "this fire failed and why" instead of leaving
-      // the fire row missing entirely (which would look like the task
-      // simply didn't run). One row per still-unwritten due task; mark
-      // each written so processQuery's finally can't also write a
-      // completed/silent row for it (the single-fire invariant).
-      for (const ctx of taskFireContexts) {
-        if (ctx.written) continue;
-        try {
-          writeTaskFire({
-            id: generateId(),
-            seriesId: ctx.seriesId,
-            taskId: ctx.taskId,
-            status: 'error',
-            assistantText: null,
-            dispatched: [],
-            errorMessage: errMsg,
-          });
-          ctx.written = true;
-        } catch (writeErr) {
-          log(`task_fires error-write failed: ${writeErr instanceof Error ? writeErr.message : String(writeErr)}`);
+      log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
+
+      // Capture the active turn's trigger sender. Follow-up messages from a
+      // different sender are deferred (left pending) instead of pushed into
+      // this query — pushing folds both senders' requests into one combined
+      // reply (boysnight 2026-04-27, ported from v1 apps/nanoclaw/src/index.ts).
+      const triggerRow = keep.find((m) => m.trigger === 1) ?? keep[0];
+      const activeSender = extractMessageSender(triggerRow);
+
+      // Task-fire tracking: if a task row triggered this stream, capture its
+      // series_id + id so processQuery can write a task_fires row when the
+      // stream ends. `series_id` falls back to `id` for pre-migration rows
+      // (matches the host-side backfill in src/db/session-db.ts:349). Only
+      // the kind='task' branch participates — chat-triggered wakes don't
+      // produce fire rows.
+      // Shared, mutable list seeded with the initial-batch task rows; the
+      // follow-up poll closure appends a context per follow-up task that
+      // survives its pre-task script. One context per due task occurrence so
+      // each gets exactly one fire row even when several fold into one
+      // provider stream (multiple recurring tasks coming due in the same
+      // wake, or follow-ups arriving mid-turn). `series_id` falls back to
+      // `id` for pre-migration rows (matches host-side backfill in
+      // src/db/session-db.ts:349). Chat-triggered wakes produce no context.
+      const taskFireContexts: TaskFireContext[] = [];
+      for (const m of keep) {
+        if (m.trigger !== 1 || m.kind !== 'task') continue;
+        registerTaskFireContextOnce(taskFireContexts, m);
+      }
+
+      // Load any inbound image attachments as Anthropic vision content blocks.
+      // The host wrote bytes to <sessDir>/inbox/<msgId>/<file> (sized to fit
+      // the 5MB API cap by chat-sdk-bridge before insert), and the session dir
+      // mounts at /workspace, so absolutePath is `/workspace/inbox/...`.
+      // Empty array on no images / all reads failed — provider sends text-only.
+      const imageRefs = extractImageAttachments(keep);
+      const imageBlocks = loadImageBlocks(imageRefs);
+      if (imageBlocks.length > 0) {
+        log(`Loaded ${imageBlocks.length} image attachment(s) for multimodal turn`);
+      }
+
+      // Per-dequeue session rotation — fires BEFORE provider.query() so the
+      // current turn always runs on a coherent thread (rotating mid-flight
+      // would destroy the in-memory `resume` id while the SDK is still using
+      // it). Upstream calls maybeRotateContinuation once at container boot;
+      // we additionally call it before every query so drift-axis triggers
+      // (post-compact summaries, day-boundary crossings — see
+      // session-rotation.ts) fire even in a long-lived warm container.
+      if (continuation) {
+        const reason = config.provider.maybeRotateContinuation?.(continuation, config.cwd);
+        if (reason) {
+          log(`Rotating session before query: ${reason} (previous continuation: ${continuation})`);
+          clearContinuation(config.providerName);
+          setRotationNotice(buildRotationNotice(reason));
+          continuation = undefined;
+        }
+      }
+
+      // A fresh thread that follows a rotation gets a one-shot pointer to the
+      // handoff note / archived transcripts, so it doesn't silently start with
+      // zero knowledge of an in-flight conversation (the "it compacted and
+      // then forgot everything" experience). Dream runs skip it — their fresh
+      // thread is ephemeral maintenance, not the conversation's successor.
+      let promptForQuery = prompt;
+      if (continuation === undefined && !config.isDreamRun) {
+        const notice = consumeRotationNotice();
+        if (notice) {
+          log('Prepending rotation notice to fresh-thread prompt');
+          promptForQuery = `<system>${notice}</system>\n\n${prompt}`;
+        }
+      }
+
+      // One-shot pickup of a request whose reply failed on this route
+      // (failed-turn-notice.ts). Interactive turns only: Dream and task-only
+      // turns neither consume nor see it, nor do routes that could never have
+      // recorded one (a2a, failure-notice wakes). Works on resumed and fresh threads.
+      if (!config.isDreamRun && taskFireContexts.length === 0 && failedTurnEligible(routing, false)) {
+        const failedNotice = consumeFailedTurnNotice(routing);
+        if (failedNotice) {
+          log('Prepending failed-turn notice to prompt');
+          promptForQuery = `<system>${failedNotice}</system>\n\n${promptForQuery}`;
+        }
+      }
+
+      const query = config.provider.query({
+        prompt: promptForQuery,
+        continuation,
+        cwd: config.cwd,
+        systemContext: config.systemContext,
+        imageBlocks: imageBlocks.length > 0 ? imageBlocks : undefined,
+      });
+      // Expose the active query to the SIGTERM handler so a host reap can end
+      // it cleanly mid-turn (drain to completion) instead of the process being
+      // SIGKILLed with the turn still open. If shutdown was requested in the
+      // window between the loop-top check and here, end immediately.
+      activeQueryForShutdown = query;
+      if (shuttingDown) query.end();
+
+      // Process the query while concurrently polling for new messages
+      const skippedSet = new Set(skipped.map((s) => s.id));
+      const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
+      // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
+      // can stamp it on outbound rows — needed for a2a return-path routing.
+      // Two transports, both required: module state for any in-process
+      // consumer, AND session_state (outbound.db) because the built-in MCP
+      // server runs as a separate stdio subprocess that cannot see this
+      // process's module state. The DB value is the AUTHORITATIVE reply
+      // target — it is `null` for task-only / accumulate-only turns
+      // (extractRouting → pickInReplyToMessage already excluded task rows),
+      // which is exactly the signal that stops a recurring RSS/status post
+      // from inheriting a stale human @mention's reply pill. See
+      // setCurrentBatchReplyTarget's docstring for the full incident chain.
+      setCurrentInReplyTo(routing.inReplyTo);
+      setCurrentBatchReplyTarget(routing.inReplyTo);
+      // Set when processQuery threw a retryable-with-no-result failure; guards
+      // the markCompleted below so the host re-fires the task instead of the
+      // run silently completing (codex MCP-init empty-fire, 2026-06-05).
+      let retryableBatchFailure = false;
+      // Whether this turn produced at least one result event. Read after the
+      // try/finally to decide, on a shutdown-cut-short turn, between completing
+      // the rows (work happened) and leaving them pending (work didn't).
+      let sawResult = false;
+      queryMessageOutcome.failed.clear();
+      queryMessageOutcome.unresolved = [];
+      publishReplyRoute(routing);
+      // Forward a loop stop to the ACTIVE query. The stream deliberately stays
+      // open between turns, so the loop can be parked inside processQuery when
+      // config.signal fires; without this, the "stopped" loop's query — and its
+      // 500ms follow-up poller — outlives the stop and keeps polling (and
+      // claiming) messages from whatever inbound DB the process points at. In
+      // tests that leaked one immortal poller per loop-driven test, which could
+      // steal a later test's follow-up message into a dead query.
+      const abortActiveQuery = () => query.abort();
+      if (config.signal?.aborted) abortActiveQuery();
+      else config.signal?.addEventListener('abort', abortActiveQuery, { once: true });
+      try {
+        const result = await processQuery(
+          query,
+          routing,
+          processingIds,
+          config.providerName,
+          activeSender,
+          addressed,
+          assistantName,
+          taskFireContexts,
+          // Proactive pressure rotation is for the persistent interactive
+          // thread only — a dream's fresh thread is ephemeral by design.
+          config.isDreamRun ? null : (config.provider.pressureRotationTokens?.() ?? null),
+          config.provider.onExchangeComplete?.bind(config.provider),
+          prompt,
+          continuation,
+          midTurnCompleteDelivery,
+          config.signal,
+        );
+        sawResult = Boolean(result.sawResult);
+        if (result.pressureRotated) {
+          // processQuery already cleared the persisted continuation rows and
+          // wrote the rotation notice; drop the in-memory id too, or the next
+          // warm dequeue would resume — and re-persist — the retired thread.
+          log('Pressure rotation completed — next turn starts a fresh thread');
+          continuation = undefined;
+        } else if (result.continuation && result.continuation !== continuation) {
+          const isNewThread = continuation === undefined;
+          // A dream's fresh thread is EPHEMERAL — it must never become the
+          // group's persisted continuation. Persisting it would clobber the
+          // interactive session's thread with the throwaway dream thread, so
+          // the next user turn would resume the dream's one-shot maintenance
+          // context instead of the conversation. The dream owns its own
+          // lifecycle (it calls rotate_session as its final step); the
+          // poll-loop just must not write its thread id back. Keep the local
+          // `continuation` var updated so any in-process follow-up dream turn
+          // stays on the same fresh thread, but skip the durable write.
+          continuation = result.continuation;
+          if (shouldPersistContinuation(Boolean(config.isDreamRun))) {
+            setContinuation(config.providerName, continuation);
+            // Stamp the rotation-day this continuation started on. Only on a
+            // newly-adopted thread — resuming an existing one keeps the
+            // original stamp so the day-boundary check measures from when the
+            // thread truly began, not when this container happened to attach.
+            if (isNewThread) {
+              setContinuationStartedAt(config.providerName, computeRotationDate(new Date(), TIMEZONE));
+            }
+          }
+        }
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        log(`Query error: ${errMsg}`);
+
+        // A retryable provider failure with no result (processQuery's
+        // `retryable provider error, no result:` throw) must NOT be marked
+        // completed — leaving the row pending lets the host re-fire it.
+        // Everything else still completes: a non-retryable error is terminal
+        // (re-running would just fail again), so we record the error fire and
+        // move on as before.
+        const killedDream =
+          taskFireContexts.length > 0 &&
+          taskFireContexts.every((ctx) => ctx.seriesId.startsWith('dream-') && !ctx.written) &&
+          /Claude Code process exited with code 137\b/.test(errMsg);
+        if (errMsg.startsWith('retryable provider error, no result:') || killedDream) {
+          retryableBatchFailure = true;
+        }
+
+        // Stale/corrupt continuation recovery: ask the provider whether
+        // this error means the stored continuation is unusable, and clear
+        // it so the next attempt starts fresh.
+        if (continuation && config.provider.isSessionInvalid(err)) {
+          log(`Stale session detected (${continuation}) — clearing for next retry`);
+          continuation = undefined;
+          clearContinuation(config.providerName);
+          clearContinuationStartedAt(config.providerName);
+        }
+
+        // processQuery owns push-scoped failure notices and auth alerts.
+
+        // Task-fire error record. Captures the error message so the
+        // dashboard can show "this fire failed and why" instead of leaving
+        // the fire row missing entirely (which would look like the task
+        // simply didn't run). One row per still-unwritten due task; mark
+        // each written so processQuery's finally can't also write a
+        // completed/silent row for it (the single-fire invariant).
+        for (const ctx of taskFireContexts) {
+          if (ctx.written) continue;
+          try {
+            writeTaskFire({
+              id: generateId(),
+              seriesId: ctx.seriesId,
+              taskId: ctx.taskId,
+              status: 'error',
+              assistantText: null,
+              dispatched: [],
+              errorMessage: errMsg,
+            });
+            ctx.written = true;
+          } catch (writeErr) {
+            log(`task_fires error-write failed: ${writeErr instanceof Error ? writeErr.message : String(writeErr)}`);
+          }
+        }
+      } finally {
+        // The turn is over (success, error, or shutdown-drain) — stop exposing
+        // this query to the SIGTERM handler so a late reap can't call .end() on
+        // an already-settled query.
+        activeQueryForShutdown = null;
+        clearCurrentInReplyTo();
+        // Drop the DB-published target too. Once the key is absent the MCP
+        // subprocess falls back to its legacy heuristic — correct for any
+        // stray off-turn send, and prevents a finished turn's target from
+        // leaking onto the next turn before poll-loop republishes.
+        clearCurrentBatchReplyTarget();
+        clearCurrentReplyRoute();
+        config.signal?.removeEventListener('abort', abortActiveQuery);
+      }
+
+      // Ensure completed even if processQuery ended without a result event
+      // (e.g. stream closed unexpectedly). EXCEPT a retryable-with-no-result
+      // failure: leave the rows pending and exit this container. The processing
+      // claim lives in outbound.db, so a warm runner cannot claim the row again;
+      // exiting is what lets host-sweep observe the stopped container, clear the
+      // stale claim with backoff, and spawn a clean provider process. Staying
+      // alive here stranded the trigger until the 30-minute absolute ceiling
+      // (Fasting Add Chat, 2026-07-13).
+      if (retryableBatchFailure) {
+        log(
+          `Leaving ${processingIds.length} message(s) pending and exiting container for host retry ` +
+            `(retryable provider failure)`,
+        );
+        return;
+      } else if (shuttingDown && !sawResult) {
+        // SIGTERM ended the query before it produced any result — the turn was
+        // cut short by the host reap, not finished. Leave the rows pending so
+        // the next container actually answers them (Teddy's AI-Friends mention,
+        // 2026-06-08, was consumed with zero output exactly because a cut-short
+        // turn still marked its rows completed). A drain that DID produce a
+        // result falls through to markCompleted below — that work really happened.
+        log(
+          `Shutdown mid-turn before any result — leaving ${processingIds.length} message(s) pending for next container`,
+        );
+      } else {
+        // Dreams neither resume nor persist a continuation (shouldResumeContinuation /
+        // shouldPersistContinuation), and daily rotation is provider-owned since
+        // 2026-10-14, so a completed Dream no longer clears session tracking.
+        // An error result marked its inputs failed already; don't overwrite.
+        markCompleted(processingIds.filter((id) => !queryMessageOutcome.failed.has(id)));
+        log(`Completed ${ids.length} message(s)`);
+      }
+      // Follow-ups pushed into this query that never got their own result.
+      // A cut-short or retryable turn leaves them for the next container like
+      // the batch above; otherwise they were dropped, which is a failure.
+      const followUps = queryMessageOutcome.unresolved.filter((id) => !processingIds.includes(id));
+      if (followUps.length > 0) {
+        if (retryableBatchFailure || shuttingDown) {
+          log(`Leaving ${followUps.length} unanswered follow-up(s) pending for the next container`);
+        } else {
+          log(`Marking ${followUps.length} follow-up(s) failed — the query ended before answering them`);
+          for (const id of followUps) markFailed(id);
         }
       }
     } finally {
-      // The turn is over (success, error, or shutdown-drain) — stop exposing
-      // this query to the SIGTERM handler so a late reap can't call .end() on
-      // an already-settled query.
-      activeQueryForShutdown = null;
-      clearCurrentInReplyTo();
-      // Drop the DB-published target too. Once the key is absent the MCP
-      // subprocess falls back to its legacy heuristic — correct for any
-      // stray off-turn send, and prevents a finished turn's target from
-      // leaking onto the next turn before poll-loop republishes.
-      clearCurrentBatchReplyTarget();
-      clearCurrentReplyRoute();
-      config.signal?.removeEventListener('abort', abortActiveQuery);
-    }
-
-    // Ensure completed even if processQuery ended without a result event
-    // (e.g. stream closed unexpectedly). EXCEPT a retryable-with-no-result
-    // failure: leave the rows pending and exit this container. The processing
-    // claim lives in outbound.db, so a warm runner cannot claim the row again;
-    // exiting is what lets host-sweep observe the stopped container, clear the
-    // stale claim with backoff, and spawn a clean provider process. Staying
-    // alive here stranded the trigger until the 30-minute absolute ceiling
-    // (Fasting Add Chat, 2026-07-13).
-    if (retryableBatchFailure) {
-      log(
-        `Leaving ${processingIds.length} message(s) pending and exiting container for host retry ` +
-          `(retryable provider failure)`,
-      );
-      return;
-    } else if (shuttingDown && !sawResult) {
-      // SIGTERM ended the query before it produced any result — the turn was
-      // cut short by the host reap, not finished. Leave the rows pending so
-      // the next container actually answers them (Teddy's AI-Friends mention,
-      // 2026-06-08, was consumed with zero output exactly because a cut-short
-      // turn still marked its rows completed). A drain that DID produce a
-      // result falls through to markCompleted below — that work really happened.
-      log(
-        `Shutdown mid-turn before any result — leaving ${processingIds.length} message(s) pending for next container`,
-      );
-    } else {
-      // Dreams neither resume nor persist a continuation (shouldResumeContinuation /
-      // shouldPersistContinuation), and daily rotation is provider-owned since
-      // 2026-10-14, so a completed Dream no longer clears session tracking.
-      markCompleted(processingIds);
-      log(`Completed ${ids.length} message(s)`);
+      await releaseIdentity();
     }
   }
 }
@@ -1263,6 +1294,19 @@ export async function processQuery(
   // Preserve whether each push was directly addressed so a warm request is not mistaken
   // for ambient continuation (Nook 2026-06-07).
   const pushAddressed: boolean[] = [addressed];
+  // Message ids by push index (into pushAddressed). Each push's rows are
+  // marked when the result that consumes that push arrives: completed, or
+  // failed for an error result, so a failed turn is not recorded as answered.
+  // Retry/handoff pushes carry no rows.
+  const pushIds = new Map<number, string[]>([[0, initialBatchIds]]);
+  const takePushIds = (from: number, to: number): string[] => {
+    const ids: string[] = [];
+    for (let i = from; i < to; i++) {
+      ids.push(...(pushIds.get(i) ?? []));
+      pushIds.delete(i);
+    }
+    return ids;
+  };
   // Parallel to pushAddressed. A same-sender chat follow-up that arrives
   // before the current result supersedes that result: the provider queued the
   // follow-up as the next turn, so the current turn cannot know its contents.
@@ -1829,17 +1873,35 @@ export async function processQuery(
         // isolated turn. The task rows stay pending (never markProcessing'd
         // here), so they're not lost. `activeSender` truthy === a chat turn
         // is active (it's the chat sender; null for task-only turns).
-        if (shouldDeferTaskFromChatTurn(activeSender, newMessages) && !endedForCommand) {
+        // A bound task turn cannot absorb another task's owner or execute
+        // its script under the original principal. Optimus isolates it too.
+        const boundTaskFollowup =
+          Boolean(process.env.OPTIMUS_TURN_IDENTITY_FILE) &&
+          newMessages.some((m) => m.kind === 'task' && m.trigger === 1);
+        if ((boundTaskFollowup || shouldDeferTaskFromChatTurn(activeSender, newMessages)) && !endedForCommand) {
           if (!mayEndDeferredQuery()) return;
           const taskCount = newMessages.filter((m) => m.kind === 'task' && m.trigger === 1).length;
           log(
-            `Task trigger (${taskCount}) arrived during an active chat turn — ending stream so the task gets an isolated turn`,
+            `Task trigger (${taskCount}) arrived during an active turn — ending stream so the task gets an isolated turn`,
           );
           endedForCommand = true;
           query.end();
           return;
         }
 
+        // Never push a new addressed input or run its scripts under merely
+        // the previous turn's principal. Host selection cannot change actor.
+        if (
+          process.env.OPTIMUS_TURN_IDENTITY_FILE &&
+          !(await extendIdentityTurn(newMessages.filter((m) => m.trigger === 1).map((m) => m.id)))
+        ) {
+          if (mayEndDeferredQuery() && !endedForCommand) {
+            endedForCommand = true;
+            query.end();
+          }
+          return;
+        }
+        if (done) return;
         const newIds = newMessages.map((m) => m.id);
         markProcessing(newIds);
 
@@ -1993,6 +2055,7 @@ export async function processQuery(
         ) {
           prompt += `\n${SUPERSEDED_RESPONSE_NOTICE}`;
         }
+        pushIds.set(pushAddressed.length, keptIds);
         pushAddressed.push(isAddressedTurn(keep, assistantName));
         pushSuperseded.push(false);
         noteInput();
@@ -2011,7 +2074,7 @@ export async function processQuery(
         }
         if (answering) queuedTurns.push(next);
         else adoptTurn(next);
-        markCompleted(keptIds);
+        // keptIds stay claimed until their own result marks them.
       } catch (err) {
         // Without this catch the rejection escapes the void IIFE and Node
         // terminates the container on unhandled-rejection. The initial-batch
@@ -2129,8 +2192,16 @@ export async function processQuery(
           // A queued Codex push may have been replayed into Claude during
           // failover; Claude can merge it into this very result.
           const resultSuperseded = deliveryProviderName === 'codex' && (pushSuperseded[resultIndex] ?? false);
+          const resultIds = takePushIds(resultIndex, resultPushEnd);
           resultIndex = resultPushEnd;
-          markCompleted(initialBatchIds);
+          if (event.isError) {
+            for (const id of resultIds) {
+              markFailed(id);
+              queryMessageOutcome.failed.add(id);
+            }
+          } else {
+            markCompleted(resultIds);
+          }
           if (resultSuperseded) {
             log('Suppressing superseded chat result — a same-sender follow-up arrived before completion');
             notifyExchangeComplete(onExchangeComplete, {
@@ -2530,6 +2601,7 @@ export async function processQuery(
     throw err;
   } finally {
     done = true;
+    queryMessageOutcome.unresolved = [...pushIds.values()].flat();
     clearInterval(pollHandle);
     clearInterval(keepaliveHandle);
     // Backstop: flush any task context that never saw a `result` event

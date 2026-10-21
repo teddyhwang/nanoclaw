@@ -284,6 +284,100 @@ describe('new-agent name prompt across a restart', () => {
     expect(await host!.count('SELECT COUNT(*) AS c FROM pending_name_inputs')).toBe(0);
   });
 
+  it('startup recovery after a restart does not re-route an already-consumed name reply', async () => {
+    // Retained case: the name reply is consumed live, the host restarts, and
+    // startup recovery re-fetches the same platform message from the DM.
+    await openNamePrompt('chat-consumed-recovery');
+    await host!.routeInbound(ownerDm('name-live', 'Jon'));
+    expect(await host!.count("SELECT COUNT(*) AS c FROM agent_groups WHERE name = 'Jon'")).toBe(1);
+    const agentsAfterConsume = await host!.count('SELECT COUNT(*) AS c FROM agent_groups');
+    const wiringsAfterConsume = await host!.count('SELECT COUNT(*) AS c FROM messaging_group_agents');
+    const sessionsAfterConsume = await host!.count('SELECT COUNT(*) AS c FROM sessions');
+
+    const h = await boot(); // restart
+    await h.routeInbound(ownerDm('name-live', 'Jon')); // recovered copy
+    await h.routeInbound(ownerDm('name-live', 'Jon')); // reconnect recovery again
+
+    // Not dispatched anywhere: no interceptor saw it, no agent, wiring or session was made.
+    expect(h.passedThrough).not.toContain('name-live');
+    expect(await h.count('SELECT COUNT(*) AS c FROM agent_groups')).toBe(agentsAfterConsume);
+    expect(await h.count('SELECT COUNT(*) AS c FROM messaging_group_agents')).toBe(wiringsAfterConsume);
+    expect(await h.count('SELECT COUNT(*) AS c FROM sessions')).toBe(sessionsAfterConsume);
+    expect(
+      await h.count(
+        "SELECT COUNT(*) AS c FROM consumed_inbound_messages WHERE message_id = 'name-live' AND consumed_by = 'new-agent-name'",
+      ),
+    ).toBe(1);
+
+    // A genuinely new DM in the same chat still routes normally.
+    await h.routeInbound(ownerDm('after-recovery', 'hello'));
+    expect(h.passedThrough).toContain('after-recovery');
+  });
+
+  it('a reply missed during the downtime is recovered exactly once', async () => {
+    await openNamePrompt('chat-unconsumed-recovery');
+
+    const h = await boot(); // restart before the reply was ever processed
+    await h.routeInbound(ownerDm('name-missed', 'Missy')); // startup recovery
+    expect(await h.count("SELECT COUNT(*) AS c FROM agent_groups WHERE name = 'Missy'")).toBe(1);
+    expect(h.passedThrough).not.toContain('name-missed');
+
+    const again = await boot(); // a second restart re-fetches it too
+    await again.routeInbound(ownerDm('name-missed', 'Missy'));
+    expect(await again.count("SELECT COUNT(*) AS c FROM agent_groups WHERE name = 'Missy'")).toBe(1);
+    expect(again.passedThrough).not.toContain('name-missed');
+  });
+
+  it('a cancel reply is not replayed as chat after a restart, and the choices stay open', async () => {
+    await openNamePrompt('chat-cancel-recovery');
+    await host!.routeInbound(ownerDm('cancel-live', 'Cancel'));
+    expect(await host!.count('SELECT COUNT(*) AS c FROM pending_channel_approvals')).toBe(1);
+
+    const h = await boot();
+    deliverMock.mockClear();
+    await h.routeInbound(ownerDm('cancel-live', 'Cancel'));
+    expect(h.passedThrough).not.toContain('cancel-live');
+    expect(deliverMock).not.toHaveBeenCalled(); // choices are not re-shown twice
+    expect(await h.count('SELECT COUNT(*) AS c FROM pending_channel_approvals')).toBe(1);
+  });
+
+  it('a reply the stale-prompt path let through is not marked consumed', async () => {
+    await openNamePrompt('chat-stale-unmarked');
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(Date.now() + 24 * 60 * 60 * 1000 + 60_000);
+    const h = await boot();
+    await h.routeInbound(ownerDm('late-chat', 'hi'));
+    expect(h.passedThrough).toContain('late-chat');
+    expect(await h.count('SELECT COUNT(*) AS c FROM consumed_inbound_messages')).toBe(0);
+  });
+
+  it('a claim that loses the race records nothing', async () => {
+    await openNamePrompt('chat-claim-race');
+    const { getPendingNameInput, claimPendingNameInput, claimPendingNameInputWithReply } =
+      await import('./db/pending-name-inputs.js');
+    const prompt = (await getPendingNameInput('telegram:owner'))!;
+    expect(await claimPendingNameInput(prompt)).toBe(true); // someone else took it
+    expect(await claimPendingNameInputWithReply(prompt, ownerDm('loser', 'Late'))).toBe(false);
+    expect(await host!.count('SELECT COUNT(*) AS c FROM consumed_inbound_messages')).toBe(0);
+  });
+
+  it('migration 027 rolls back cleanly and re-applies', async () => {
+    const h = await boot();
+    const { rollbackMigration027 } = await import('../../db/migrations/027-consumed-inbound-messages.js');
+    await rollbackMigration027(h.db);
+    expect(
+      await h.count(
+        "SELECT COUNT(*) AS c FROM sqlite_master WHERE type = 'table' AND name = 'consumed_inbound_messages'",
+      ),
+    ).toBe(0);
+    const again = await boot();
+    expect(
+      await again.count(
+        "SELECT COUNT(*) AS c FROM sqlite_master WHERE type = 'table' AND name = 'consumed_inbound_messages'",
+      ),
+    ).toBe(1);
+  });
+
   it('migration 026 rolls back cleanly and re-applies', async () => {
     const h = await boot();
     const { rollbackMigration026 } = await import('../../db/migrations/026-pending-name-inputs.js');

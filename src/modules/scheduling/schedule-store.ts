@@ -349,23 +349,27 @@ export function releaseOccurrenceClaim(
   );
 }
 
-/** Stamp a claimed occurrence as fired (observability/telemetry; the Dream
- * activity window is measured from it). */
+/** Stamp fire telemetry without changing the definition/claim revision.
+ * The claim already stamped updated_at; preserving it also avoids overwriting
+ * a concurrent owner edit made while materialization was awaiting. */
 export function markSeriesFired(db: Database.Database, seriesId: string, firedAt: string): void {
   firedAt = scheduleTimestamp(firedAt);
   db.prepare(
-    `UPDATE task_series SET last_fired_at = @firedAt, updated_at = @firedAt
+    `UPDATE task_series SET last_fired_at = @firedAt
       WHERE series_id = @seriesId`,
   ).run({ seriesId, firedAt });
 }
 
-/** Cancel a series (matches by series id). Terminal. */
+/** Cancel a series, including an already-consumed native terminal claim.
+ * A fresh revision revokes in-flight authority even in the claim's millisecond. */
 export function cancelSeries(db: Database.Database, seriesId: string): number {
   return db
     .prepare(
       `UPDATE task_series SET status = 'cancelled', recurrence = NULL,
-              updated_at = @now
-        WHERE series_id = @seriesId AND status IN ('pending', 'paused')`,
+              updated_at = CASE WHEN updated_at >= @now
+                THEN coalesce(strftime('%Y-%m-%dT%H:%M:%fZ', updated_at, '+0.001 seconds'), @now)
+                ELSE @now END
+        WHERE series_id = @seriesId AND status IN ('pending', 'paused', 'cancelled')`,
     )
     .run({ seriesId, now: new Date().toISOString() }).changes;
 }

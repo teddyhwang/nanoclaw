@@ -214,3 +214,38 @@ describe('buildMounts against the policy the drivers enforce', () => {
     expect(() => validateSpec(spec, mountPolicy())).toThrow(/denied-by-policy/);
   });
 });
+
+describe('protected principal provenance mount exclusion', () => {
+  it.each(['root', 'parent', 'child', 'symlink'] as const)(
+    'rejects %s exposure through the REAL buildMounts',
+    async (kind) => {
+      const protectedRoot = path.join(DATA_DIR, 'requester-provenance');
+      fs.mkdirSync(protectedRoot, { recursive: true });
+      const alias = path.join(DATA_DIR, 'principal-mount-test-alias');
+      if (kind === 'symlink') fs.symlinkSync(protectedRoot, alias);
+      const hostPath =
+        kind === 'root'
+          ? protectedRoot
+          : kind === 'parent'
+            ? DATA_DIR
+            : kind === 'child'
+              ? path.join(protectedRoot, 'future.json')
+              : alias;
+      try {
+        await expect(
+          buildMounts(agentGroup, session, containerConfig, 'claude', {}, undefined, [
+            {
+              hostPath,
+              containerPath: '/forged-principal',
+              readonly: kind === 'root',
+              mountClass: 'allowlisted-extra',
+              scope: GROUP_ID,
+            },
+          ]),
+        ).rejects.toThrow('protected requester provenance');
+      } finally {
+        if (kind === 'symlink') fs.unlinkSync(alias);
+      }
+    },
+  );
+});
