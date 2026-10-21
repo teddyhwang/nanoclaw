@@ -508,11 +508,12 @@ export class ClaudeProvider implements AgentProvider {
 
   query(input: QueryInput): AgentQuery {
     if (!this.memorySessionHook) throw new Error('Claude memory session hook was not registered');
+    const resolver = inputEffortResolver;
     const stream = new MessageStream();
-    stream.push(input.prompt, input.imageBlocks);
+    const hasInitialInput = input.prompt !== '' || (input.imageBlocks?.length ?? 0) > 0;
+    if (!resolver || hasInitialInput) stream.push(input.prompt, input.imageBlocks);
 
     const instructions = input.systemContext?.instructions;
-    const resolver = inputEffortResolver;
     const readEffort = () => resolver
       ? resolver(this.inference.model, this.inference.effort)
       : this.inference.effort;
@@ -520,6 +521,16 @@ export class ClaudeProvider implements AgentProvider {
     let inputFailure: unknown;
     let ended = false;
     let pendingInputs = Promise.resolve();
+    // The SDK consumes stdin ahead of its answers. Control ACK alone is not
+    // a per-input boundary: hold the next setting/prompt until the preceding
+    // SDK result, so queued High/Low cannot alter an in-flight Low answer or
+    // overwrite one another before consumption. Legacy callers remain direct.
+    let completeInput = () => {};
+    let inputReady = Promise.resolve();
+    const beginInput = () => {
+      inputReady = new Promise<void>((resolve) => { completeInput = resolve; });
+    };
+    if (resolver && hasInitialInput) beginInput();
 
     // Per-spawn model override. Set by the host via container env when a
     // plugin (e.g. Optimus' maintenance-task) wants the SDK to run on a
@@ -622,6 +633,7 @@ export class ClaudeProvider implements AgentProvider {
             yield { type: 'text', text: assistantText };
           }
         } else if (message.type === 'result') {
+          completeInput();
           // `result` text exists only on subtype:"success"; error subtypes
           // (e.g. a non-retryable 403 billing_error) carry their message in
           // `errors[]` instead. Keep that actionable notice separate from
@@ -721,16 +733,21 @@ export class ClaudeProvider implements AgentProvider {
           stream.push(msg, imageBlocks);
           return;
         }
+        if (ended || aborted) return;
         // Snapshot trusted configuration synchronously at this ordinary input.
         // Do not enqueue its prompt until the supported SDK control ACKs.
         const effort = readEffort();
         pendingInputs = pendingInputs.then(async () => {
-          if (ended || aborted || inputFailure) return;
+          await inputReady;
+          if (aborted || inputFailure) return;
           if (effort !== currentEffort) {
             await sdkResult.applyFlagSettings({ effortLevel: (effort ?? null) as EffortLevel | null });
             currentEffort = effort;
           }
-          if (!ended && !aborted) stream.push(msg, imageBlocks);
+          if (!aborted) {
+            beginInput();
+            stream.push(msg, imageBlocks);
+          }
         }).catch((error) => {
           inputFailure = error;
           stream.end();
@@ -739,13 +756,21 @@ export class ClaudeProvider implements AgentProvider {
       },
       end: () => {
         ended = true;
-        stream.end();
+        // Graceful EOF drains already accepted inputs in their original
+        // order. Stop/abort below cancels them instead.
+        if (resolver) void pendingInputs.then(() => stream.end());
+        else stream.end();
       },
       events: (async function* () {
         try {
           yield* translateEvents();
         } catch (error) {
           if (!inputFailure) throw error;
+        } finally {
+          if (resolver) {
+            aborted = true;
+            completeInput();
+          }
         }
         if (inputFailure) {
           yield {
@@ -757,6 +782,7 @@ export class ClaudeProvider implements AgentProvider {
       })(),
       abort: () => {
         aborted = true;
+        completeInput();
         stream.end();
       },
     };
