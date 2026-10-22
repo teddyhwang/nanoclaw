@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { CONTAINER_PLUGINS_DIR } from '../container-config.js';
-import { DATA_DIR, GROUPS_DIR, TIMEZONE } from '../config.js';
+import { DATA_DIR, TIMEZONE } from '../config.js';
 import { createAgentGroup } from '../db/agent-groups.js';
 import {
   ensureContainerConfig,
@@ -12,7 +12,8 @@ import {
 } from '../db/container-configs.js';
 import type { McpServerConfig } from '../container-config.js';
 import { isValidTimezone } from '../timezone.js';
-import { assertValidGroupFolder, resolveGroupFolderPath } from '../group-folder.js';
+import { resolveGroupDir } from '../engine/paths.js';
+import { assertValidGroupFolder } from '../group-folder.js';
 import { stageGroupPersona } from '../group-persona.js';
 import { log } from '../log.js';
 import { normalizeName } from '../modules/agent-to-agent/db/agent-destinations.js';
@@ -102,7 +103,9 @@ export async function createAgentFromTemplate(ref: string, opts?: CreateAgentOpt
   const name = opts?.name ?? tpl.agentName ?? path.basename(dir);
   let folder = normalizeName(name);
   assertValidGroupFolder(folder);
-  if (fs.existsSync(resolveGroupFolderPath(folder))) folder = `${folder}-${randomUUID().slice(0, 8)}`;
+  // Same workspace-aware lookup the container runner mounts from, so a
+  // collision in a hook-resolved folder is seen too.
+  if (fs.existsSync(resolveGroupDir({ id, folder }))) folder = `${folder}-${randomUUID().slice(0, 8)}`;
 
   const group: AgentGroup = { id, name, folder, agent_provider: null, created_at: new Date().toISOString() };
   await createAgentGroup(group);
@@ -111,7 +114,9 @@ export async function createAgentFromTemplate(ref: string, opts?: CreateAgentOpt
 
   // group-init.ts owns the mkdir at first spawn, but it isn't called here — so we
   // create the dir ourselves to land instructions.prepend.md + context/.
-  const groupDir = path.resolve(GROUPS_DIR, folder);
+  // Resolved after the row exists so a workspace-aware groupDirResolver sees it:
+  // the stamp must land where the container runner will mount the group from.
+  const groupDir = resolveGroupDir(group);
   fs.mkdirSync(groupDir, { recursive: true });
 
   // Persona → provider-neutral prepend, inlined at the top of the group's

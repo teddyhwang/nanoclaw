@@ -35,6 +35,7 @@ import {
   sqliteMarkFailed,
   sqliteMarkProcessing,
   sqliteMarkScriptSkipped,
+  sqliteReleaseProcessing,
   sqliteResetPendingMessageSchemaCacheForTesting,
   sqliteSetState,
   sqliteTimestamp,
@@ -149,6 +150,10 @@ export class SqliteAgentMailbox implements AgentMailbox {
 
   markScriptSkipped(skips: Array<{ id: string; reason: string }>): void {
     sqliteMarkScriptSkipped(skips);
+  }
+
+  releaseProcessing(ids: string[]): void {
+    sqliteReleaseProcessing(ids);
   }
 
   getMessageIn(id: string): InboundMessage | undefined {

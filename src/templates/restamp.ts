@@ -21,7 +21,8 @@ import path from 'path';
 import { mcpServerPluginOwner, resolveGroupTimezone, type McpServerConfig } from '../container-config.js';
 import { getAgentGroup, getAllAgentGroups } from '../db/agent-groups.js';
 import { getContainerConfig, updateContainerConfigJson } from '../db/container-configs.js';
-import { resolveGroupFolderPath } from '../group-folder.js';
+import { resolveGroupDir } from '../engine/paths.js';
+import { assertValidGroupFolder } from '../group-folder.js';
 import { PERSONA_PREPEND_FILE, readGroupPersona } from '../group-persona.js';
 import { log } from '../log.js';
 import { createScheduledTask, taskNameSlug } from '../modules/scheduling/create.js';
@@ -75,7 +76,7 @@ export async function groupsCarryingPlugin(ref: string, groups?: readonly AgentG
   }
   const manifest = parsePluginManifest(JSON.parse(fs.readFileSync(manifestPath, 'utf-8')));
   return (groups ?? (await getAllAgentGroups())).filter((g) =>
-    fs.existsSync(path.join(resolveGroupFolderPath(g.folder), 'plugins', manifest.name, PLUGIN_MANIFEST_FILE)),
+    fs.existsSync(path.join(templateGroupDir(g), 'plugins', manifest.name, PLUGIN_MANIFEST_FILE)),
   );
 }
 
@@ -95,7 +96,7 @@ export async function restampAgentFromTemplate(
   if (!configRow) throw new Error(`No container config for group: ${group.id}`);
 
   const tpl = parseTemplate(resolveLocalTemplate(ref));
-  const groupDir = resolveGroupFolderPath(group.folder);
+  const groupDir = templateGroupDir(group);
   const oldPluginDir = path.join(groupDir, 'plugins', tpl.name);
   if (!fs.existsSync(path.join(oldPluginDir, PLUGIN_MANIFEST_FILE))) {
     throw new Error(
@@ -435,6 +436,16 @@ export function formatRestampResult(result: RestampResult): string {
     for (const notice of result.report) lines.push(`  - ${notice}`);
   }
   return lines.join('\n');
+}
+
+/**
+ * A group's on-disk folder through the same workspace-aware lookup the
+ * container runner mounts from (engine groupDirResolver, falling back to
+ * GROUPS_DIR/<folder>), so a restamp never reads or writes a different copy.
+ */
+function templateGroupDir(group: AgentGroup): string {
+  assertValidGroupFolder(group.folder);
+  return resolveGroupDir(group);
 }
 
 /** Resolve a context-relative extra to its workspace path, contained in groupDir. */

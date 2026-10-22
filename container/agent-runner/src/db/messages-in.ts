@@ -87,6 +87,11 @@ export function markScriptSkipped(skips: Array<{ id: string; reason: string }>):
   getAgentMailbox().operations.markScriptSkipped(skips);
 }
 
+/** Return claimed-but-unrun rows to pending (e.g. accumulate context left for the next trigger). */
+export function releaseProcessing(ids: string[]): void {
+  getAgentMailbox().operations.releaseProcessing(ids);
+}
+
 export function markFailed(id: string): void {
   getAgentMailbox().operations.markMessages([id], 'failed');
 }

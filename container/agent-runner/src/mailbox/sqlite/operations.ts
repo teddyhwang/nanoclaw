@@ -162,6 +162,16 @@ export function sqliteMarkProcessing(ids: string[]): void {
   mark(ids, 'processing');
 }
 
+/** Only 'processing' claims are released; settled acks are never reopened. */
+export function sqliteReleaseProcessing(ids: string[]): void {
+  if (ids.length === 0) return;
+  const db = getOutboundDb();
+  const statement = db.prepare("DELETE FROM processing_ack WHERE message_id = ? AND status = 'processing'");
+  db.transaction(() => {
+    for (const id of ids) statement.run(id);
+  })();
+}
+
 export function sqliteMarkCompleted(ids: string[]): void {
   mark(ids, 'completed');
 }

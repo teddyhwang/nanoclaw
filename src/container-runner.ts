@@ -531,6 +531,9 @@ async function spawnContainer(session: Session): Promise<void> {
       void finishAndResolve(session.id, runtime, failure);
     },
     afterStart: async () => {
+      // After the bind: a shared-state source swapped since buildMounts fails
+      // the start, and onFailure stops the container.
+      verifySharedStateSources(mounts);
       await markContainerRunning(session.id);
       emitEngineEvent('container.spawn', { sessionId: session.id, agentGroupId: agentGroup.id });
     },
@@ -1423,14 +1426,15 @@ export async function buildMounts(
       ['instructions.prepend.md', 'instructions.prepend.md'],
       ['CLAUDE.md', 'CLAUDE.md'],
     ] as const) {
-      const hostPath = sharedStateSource(sharedDir, name, name === 'memory' ? 'directory' : 'file');
-      if (!hostPath) continue;
+      const source = openSharedStateSource(sharedDir, name, name === 'memory' ? 'directory' : 'file');
+      if (!source) continue;
       mounts.push({
-        hostPath,
+        hostPath: source.hostPath,
         containerPath: `/workspace/shared-groups/${shared.folder}/${target}`,
         readonly: true,
         mountClass: 'shared-group-state',
         scope,
+        sourceIdentity: source.identity,
       });
     }
   }
@@ -1460,14 +1464,71 @@ export async function buildMounts(
  * the path lexically). Only a real entry of the expected type is mounted.
  */
 export function sharedStateSource(sharedDir: string, name: string, kind: 'directory' | 'file'): string | null {
+  return openSharedStateSource(sharedDir, name, kind)?.hostPath ?? null;
+}
+
+/**
+ * {@link sharedStateSource} plus the verified entry's identity. The entry is
+ * opened with O_NOFOLLOW and typed with fstat on that descriptor, so there is
+ * no lstat-then-use gap on the host side. The bind itself happens later in the
+ * runtime by path, so the identity rides on the mount and
+ * {@link verifySharedStateSources} re-checks it after the container starts.
+ */
+export function openSharedStateSource(
+  sharedDir: string,
+  name: string,
+  kind: 'directory' | 'file',
+): { hostPath: string; identity: NonNullable<VolumeMount['sourceIdentity']> } | null {
   const hostPath = path.join(sharedDir, name);
-  const st = fs.lstatSync(hostPath, { throwIfNoEntry: false });
-  if (!st) return null;
-  if (kind === 'directory' ? !st.isDirectory() : !st.isFile()) {
-    log.warn('Skipping shared group state that is not a real entry', { path: hostPath, kind });
+  const { O_RDONLY, O_NOFOLLOW, O_NONBLOCK, O_DIRECTORY } = fs.constants;
+  let fd: number;
+  try {
+    // O_NONBLOCK: a planted FIFO must not hang the spawn path on open.
+    fd = fs.openSync(hostPath, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | (kind === 'directory' ? O_DIRECTORY : 0));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    // ELOOP (a symlink), ENOTDIR, EACCES, ...: never mount what we cannot pin.
+    log.warn('Skipping shared group state that is not a real entry', {
+      path: hostPath,
+      kind,
+      code: (err as NodeJS.ErrnoException).code,
+    });
     return null;
   }
-  return hostPath;
+  try {
+    const st = fs.fstatSync(fd);
+    if (kind === 'directory' ? !st.isDirectory() : !st.isFile()) {
+      log.warn('Skipping shared group state that is not a real entry', { path: hostPath, kind });
+      return null;
+    }
+    return { hostPath, identity: { dev: st.dev, ino: st.ino, kind } };
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/**
+ * Re-verify, after the runtime has bound them, that every shared-group state
+ * source is still the exact real entry checked in buildMounts. A swap to a
+ * symlink (or any other entry) between the check and the bind throws, and the
+ * caller tears the just-started container down.
+ */
+export function verifySharedStateSources(mounts: readonly VolumeMount[]): void {
+  for (const mount of mounts) {
+    const expected = mount.sourceIdentity;
+    if (!expected) continue;
+    const st = fs.lstatSync(mount.hostPath, { throwIfNoEntry: false });
+    const sameEntry =
+      !!st &&
+      st.dev === expected.dev &&
+      st.ino === expected.ino &&
+      (expected.kind === 'directory' ? st.isDirectory() : st.isFile());
+    if (!sameEntry) {
+      throw new Error(
+        `Shared group state ${mount.hostPath} changed between verification and bind — refusing to keep the container`,
+      );
+    }
+  }
 }
 
 /** Last contributor wins one source per target, matching Docker's old argv ordering. */

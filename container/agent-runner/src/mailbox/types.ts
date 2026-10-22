@@ -74,6 +74,8 @@ export interface MailboxOperations {
   resetPendingMessageSchemaCacheForTesting?(): void;
   markMessages(ids: string[], status: ProcessingStatus): void;
   markScriptSkipped(skips: Array<{ id: string; reason: string }>): void;
+  /** Drop this runner's in-flight claim so rows it did not run return to pending. */
+  releaseProcessing(ids: string[]): void;
   getMessageIn(id: string): InboundMessage | undefined;
   findQuestionResponse(questionId: string): InboundMessage | undefined;
   findCliResponse(requestId: string): InboundMessage | undefined;

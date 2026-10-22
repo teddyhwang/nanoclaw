@@ -56,6 +56,23 @@ describe('startCliServer single-bind', () => {
     expect(fs.statSync(socketPath).mode & 0o777).toBe(0o600);
   });
 
+  it('creates the socket owner-only at bind time, before any chmod runs', async () => {
+    const socketPath = tmpSocketPath();
+    // Without the chmod, only the bind-time umask protects the socket: the
+    // file must never exist with group/other access.
+    const chmod = vi.spyOn(fs, 'chmodSync').mockImplementation(() => {});
+    const before = process.umask(0o022);
+    try {
+      await startCliServer(socketPath);
+      expect(chmod).toHaveBeenCalled();
+      expect(fs.statSync(socketPath).mode & 0o777).toBe(0o600);
+      // The process umask is restored right after the bind.
+      expect(process.umask(0o022)).toBe(0o022);
+    } finally {
+      process.umask(before);
+    }
+  });
+
   it('fails closed if owner-only permissions cannot be established', async () => {
     const socketPath = tmpSocketPath();
     vi.spyOn(fs, 'chmodSync').mockImplementationOnce(() => {
