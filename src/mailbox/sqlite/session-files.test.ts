@@ -150,6 +150,36 @@ describe('planted symlinks at mailbox write paths', () => {
 });
 
 describe('openAnchoredDb', () => {
+  it('accepts a real file reached through a linked descriptor alias (Linux /proc/self/fd)', () => {
+    // On Linux AnchoredDir.pathOf goes through /proc/self/fd/N, itself a link
+    // that SQLite resolves; identity, not the path string, must decide.
+    const leaf = path.join(SESSION, 'x.db');
+    new Database(leaf).close();
+    const alias = path.join(ROOT, 'fd-alias');
+    fs.symlinkSync(SESSION, alias);
+    const dir = AnchoredDir.open(SESSION, [])!;
+    vi.spyOn(dir, 'pathOf').mockImplementation((name: string) => path.join(alias, name));
+
+    const db = openAnchoredDb(dir, 'x.db', 'readwrite');
+    db.exec('CREATE TABLE t (a)');
+    db.close();
+    expect(new Database(leaf, { readonly: true }).prepare('SELECT name FROM sqlite_master').all()).toEqual([
+      { name: 't' },
+    ]);
+  });
+
+  it('refuses a symlink at the name even through a linked descriptor alias', () => {
+    const victim = path.join(OUTSIDE, 'v.db');
+    new Database(victim).close();
+    fs.symlinkSync(victim, path.join(SESSION, 'x.db'));
+    const alias = path.join(ROOT, 'fd-alias');
+    fs.symlinkSync(SESSION, alias);
+    const dir = AnchoredDir.open(SESSION, [])!;
+    vi.spyOn(dir, 'pathOf').mockImplementation((name: string) => path.join(alias, name));
+
+    expect(() => openAnchoredDb(dir, 'x.db', 'readwrite')).toThrow(/symlink/);
+  });
+
   it('refuses a link swapped in between the regular-file check and the open', () => {
     const leaf = path.join(SESSION, 'x.db');
     new Database(leaf).close();

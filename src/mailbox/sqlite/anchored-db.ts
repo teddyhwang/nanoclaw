@@ -7,11 +7,19 @@
  * its O_NOFOLLOW open, so a path check before `new Database(path)` is a
  * check-then-use race and the host would create or modify the link's target.
  *
- * Here the directory is pinned by descriptor (AnchoredDir), the leaf must be a
- * regular file, SQLite is never allowed to create it (`fileMustExist`), and
- * after the open the file SQLite actually resolved must be the anchored path
- * itself (no link was followed) and the leaf must still be the same inode.
- * Any mismatch closes the connection before a single query touches the file.
+ * Here the directory is pinned by descriptor (AnchoredDir) and SQLite is never
+ * allowed to create the file (`fileMustExist`). Three identity checks, any
+ * mismatch closing the connection before a single query touches the file:
+ *   1. before the open, the name in the pinned directory (lstat through the
+ *      descriptor alias = fstatat(dirfd, name, AT_SYMLINK_NOFOLLOW)) must be
+ *      a regular file; its dev/ino is recorded;
+ *   2. after the open, lstat of the path SQLite reports it opened must be a
+ *      regular file with that same dev/ino (a link swapped in at the name
+ *      makes SQLite report the link target, a different inode);
+ *   3. the pinned name is checked again and must still be that inode.
+ * The reported path is compared by identity, not by string: on Linux the
+ * descriptor alias (/proc/self/fd/N) is itself a link that SQLite resolves,
+ * so the reported path legitimately differs from the alias.
  * SQLite opens journals as `<resolved db path>-journal` with O_NOFOLLOW, so
  * they stay anchored to the same directory too.
  */
@@ -43,13 +51,16 @@ export function openAnchoredDb(dir: AnchoredDir, name: string, mode: 'readonly' 
   try {
     const before = regularIdentity(dir, name);
     if (!before) refuse(name, 'it does not exist');
-    const expected = dir.pathOf(name);
-    db = new Database(expected, { readonly: mode === 'readonly', fileMustExist: true });
+    db = new Database(dir.pathOf(name), { readonly: mode === 'readonly', fileMustExist: true });
     // database_list reads no page: it reports the path SQLite resolved.
     const main = (db.prepare('PRAGMA database_list').all() as Array<{ name: string; file: string }>).find(
       (row) => row.name === 'main',
     );
-    if (main?.file !== expected) refuse(name, 'it was reached through a symlink');
+    if (!main?.file) refuse(name, 'SQLite reported no file');
+    const resolved = fs.lstatSync(main.file, { bigint: true, throwIfNoEntry: false });
+    if (!resolved || !resolved.isFile() || resolved.dev !== before.dev || resolved.ino !== before.ino) {
+      refuse(name, 'it was reached through a symlink');
+    }
     const after = regularIdentity(dir, name);
     if (!after || after.dev !== before.dev || after.ino !== before.ino) refuse(name, 'it changed while opening');
     const opened = db;
