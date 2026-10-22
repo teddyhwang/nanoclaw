@@ -10,9 +10,9 @@
 import path from 'path';
 
 import { AnchoredDir } from '../../anchored-dir.js';
-import { GROUPS_DIR } from '../../config.js';
 import { resolveGroupTimezone } from '../../container-config.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
+import { resolveGroupDir } from '../../engine/paths.js';
 import { log } from '../../log.js';
 import { formatLocalStamp } from '../../timezone.js';
 
@@ -34,7 +34,7 @@ export async function appendRunLog(
   if (!ag) throw new Error(`agent group not found: ${agentGroupId}`);
 
   const timestamp = formatLocalStamp(new Date(), await resolveGroupTimezone(agentGroupId));
-  const groupDir = path.join(GROUPS_DIR, ag.folder);
+  const groupDir = resolveGroupDir(ag);
   const tasks = AnchoredDir.open(groupDir, ['tasks'], true);
   if (!tasks) throw new Error(`could not open tasks dir for group ${ag.folder}`);
   try {
@@ -53,7 +53,7 @@ export async function readRunLogTail(agentGroupId: string, series: string, lines
 
   let tasks: AnchoredDir | null = null;
   try {
-    tasks = AnchoredDir.open(path.join(GROUPS_DIR, ag.folder), ['tasks']);
+    tasks = AnchoredDir.open(resolveGroupDir(ag), ['tasks']);
     if (!tasks) return [];
     // readFile refuses a symlinked leaf / non-regular file; a symlinked `tasks`
     // was already refused at open. Either way: no log rather than a host read.
@@ -75,7 +75,7 @@ export async function deleteRunLog(agentGroupId: string, series: string): Promis
   // (symlinked) tasks dir leaves nothing to do rather than throwing.
   let tasks: AnchoredDir | null = null;
   try {
-    tasks = AnchoredDir.open(path.join(GROUPS_DIR, ag.folder), ['tasks']);
+    tasks = AnchoredDir.open(resolveGroupDir(ag), ['tasks']);
     tasks?.unlink(`${series}.md`);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {

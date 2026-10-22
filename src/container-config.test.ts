@@ -14,6 +14,7 @@ import { TIMEZONE } from './config.js';
 import {
   CONTAINER_PLUGINS_DIR,
   configFromDb,
+  materializeContainerJson,
   parseMcpServerConfig,
   resolveGroupTimezone,
   sanitizeStoredMcpServers,
@@ -23,6 +24,7 @@ import { createAgentGroup } from './db/agent-groups.js';
 import { closeDb, initTestDb } from './db/connection.js';
 import { ensureContainerConfig, getContainerConfig, updateContainerConfigScalars } from './db/container-configs.js';
 import { runMigrations } from './db/migrations/index.js';
+import { _resetEnginePathsForTests, setEnginePaths } from './engine/paths.js';
 import type { AgentGroup } from './types.js';
 
 const GROUP: AgentGroup = {
@@ -32,6 +34,36 @@ const GROUP: AgentGroup = {
   agent_provider: null,
   created_at: new Date().toISOString(),
 };
+
+describe('materializeContainerJson', () => {
+  const root = '/tmp/nanoclaw-test-container-json';
+  beforeEach(async () => {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.mkdirSync(path.join(root, 'groups', GROUP.folder), { recursive: true });
+    setEnginePaths({ groupsDir: path.join(root, 'groups') });
+    await runMigrations(await initTestDb());
+    await createAgentGroup(GROUP);
+    await ensureContainerConfig(GROUP.id);
+  });
+  afterEach(async () => {
+    await closeDb();
+    _resetEnginePathsForTests();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('replaces a planted container.json symlink instead of writing through it', async () => {
+    const victim = path.join(root, 'victim.txt');
+    fs.writeFileSync(victim, 'precious');
+    const file = path.join(root, 'groups', GROUP.folder, 'container.json');
+    fs.symlinkSync(victim, file);
+
+    await materializeContainerJson(GROUP.id);
+
+    expect(fs.readFileSync(victim, 'utf-8')).toBe('precious');
+    expect(fs.lstatSync(file).isFile()).toBe(true);
+    expect(JSON.parse(fs.readFileSync(file, 'utf-8'))).toBeTypeOf('object');
+  });
+});
 
 describe('resolveGroupTimezone', () => {
   beforeEach(async () => {

@@ -63,6 +63,7 @@ import {
 import { releaseGatewaySession, type GatewaySessionControl } from './gateway-session-lifecycle.js';
 import { initGroupFilesystem } from './group-init.js';
 import { getAgentMailbox } from './mailbox/index.js';
+import { AnchoredDir } from './anchored-dir.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
@@ -894,6 +895,25 @@ export async function adoptRunningSessions(): Promise<{ adopted: number; stopped
       stopped += 1;
       continue;
     }
+    // A container started before the mailbox moved inbound.db into the
+    // read-only mailbox folder still reads the old location: stop it so the layout can
+    // be migrated with nothing attached. Its queued rows survive the move and
+    // the next wake spawns a container on the new layout.
+    /* eslint-disable no-catch-all/no-catch-all -- a layout probe failure must not block adoption of other sessions */
+    let legacyLayout = false;
+    try {
+      legacyLayout =
+        getAgentMailbox().needsLayoutUpgrade?.({ agentGroupId: agentGroup.id, sessionId: session.id }) ?? false;
+    } catch (err) {
+      log.warn('Mailbox layout probe failed during adoption', { sessionId: session.id, err });
+    }
+    /* eslint-enable no-catch-all/no-catch-all */
+    if (legacyLayout) {
+      log.info('Stopping a container on the old mailbox layout instead of adopting it', { sessionId: session.id });
+      await handle.stop('mailbox-layout-upgrade').catch(() => {});
+      stopped += 1;
+      continue;
+    }
     // Claim before adopting: a lost CAS means another live process already
     // owns this session — leave its container strictly alone. A failed claim
     // WRITE also fails closed: an unfenced adoption could stomp a newer
@@ -1173,6 +1193,19 @@ export async function buildMounts(
 
   // Session workspace: mailbox-selected state plus outbox and heartbeat files.
   mounts.push({ hostPath: sessDir, containerPath: '/workspace', readonly: false, mountClass: 'group-state', scope });
+  // Host-written mailbox state the container may only read (the SQLite
+  // mailbox's mailbox/inbound.db): nested read-only over the RW session mount, so
+  // the container can neither write it nor swap the name for a symlink.
+  // prepare() right before the mount makes sure the source is the host's own
+  // real directory (it refuses a symlink and migrates an old-layout session).
+  const mailbox = getAgentMailbox();
+  if (mailbox.readonlyMounts) {
+    const mailboxKey = { agentGroupId: agentGroup.id, sessionId: session.id };
+    mailbox.prepare(mailboxKey);
+    for (const mount of mailbox.readonlyMounts(mailboxKey)) {
+      mounts.push({ ...mount, readonly: true, mountClass: 'group-state', scope });
+    }
+  }
   mounts.push({
     hostPath: sessionContextPath(agentGroup.id, session.id),
     containerPath: '/app/.nanoclaw-session.json',
@@ -1376,10 +1409,11 @@ export async function buildMounts(
   // Workspace-public group state is an explicit read-only class admitted only
   // against the exact roots carried on SessionSpec.sharedStateRoots.
   const sharedGroups = resolveSharedGroups(agentGroup);
-  if (sharedGroups.length > 0) {
-    const sessionSharedRoot = path.join(sessDir, 'shared-groups');
-    fs.mkdirSync(sessionSharedRoot, { recursive: true });
-    for (const shared of sharedGroups) fs.mkdirSync(path.join(sessionSharedRoot, shared.folder), { recursive: true });
+  // The session folder is container-writable: create the mountpoints through
+  // descriptors so a planted `shared-groups` (or `<folder>`) symlink is
+  // refused instead of making the host create directories elsewhere.
+  for (const shared of sharedGroups) {
+    AnchoredDir.open(sessDir, ['shared-groups', ...shared.folder.split('/')], true)?.close();
   }
   for (const shared of sharedGroups) {
     const unresolved = resolveGroupDir({ id: shared.id ?? '', folder: shared.folder });

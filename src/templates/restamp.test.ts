@@ -391,7 +391,7 @@ describe('restampAgentFromTemplate', () => {
     fs.mkdirSync(extraDir, { recursive: true });
     fs.writeFileSync(path.join(extraDir, 'faq.md'), '# FAQ v2\n');
 
-    await expect(restampAgentFromTemplate('sales/sdr', g.id, { apply: true })).rejects.toThrow(/resolves outside/);
+    await expect(restampAgentFromTemplate('sales/sdr', g.id, { apply: true })).rejects.toThrow(/not a real directory/);
     expect(fs.existsSync(path.join(outside, 'faq.md'))).toBe(false);
   });
 
@@ -404,8 +404,39 @@ describe('restampAgentFromTemplate', () => {
     fs.symlinkSync(outside, overlayRoot);
     writeTemplateV2();
 
-    await expect(restampAgentFromTemplate('sales/sdr', g.id, { apply: true })).rejects.toThrow(/resolves outside/);
+    await expect(restampAgentFromTemplate('sales/sdr', g.id, { apply: true })).rejects.toThrow(/not a real directory/);
     expect(fs.existsSync(path.join(outside, 'widget'))).toBe(false);
+  });
+
+  it('keeps writing into the pinned overlay when skills is swapped for a symlink mid-apply', async () => {
+    const g = await stamp();
+    const outside = path.join(TEST_ROOT, 'outside-race');
+    fs.mkdirSync(outside, { recursive: true });
+    const overlayRoot = path.join(DATA_DIR, 'v2-sessions', g.id, '.claude-shared', 'skills');
+    writeTemplateV2();
+    // The container swaps `skills` after the host checked it and before the
+    // copy. The plugin validator walks the template skill three times: when
+    // the template is parsed, inside the wholesale plugins/<name> copy, and
+    // for the overlay copy itself (after the host checked `skills`). Swap on
+    // the third walk.
+    const widgetSrc = path.join(TPL, 'skills', 'widget');
+    const readdir = fs.readdirSync;
+    let walks = 0;
+    let swapped = false;
+    vi.spyOn(fs, 'readdirSync').mockImplementation(((p: fs.PathLike, options?: { withFileTypes?: boolean }) => {
+      if (p === widgetSrc && options?.withFileTypes && ++walks === 3) {
+        swapped = true;
+        fs.renameSync(overlayRoot, `${overlayRoot}.pinned`);
+        fs.symlinkSync(outside, overlayRoot);
+      }
+      return (readdir as (...args: unknown[]) => unknown)(p, options);
+    }) as typeof fs.readdirSync);
+
+    await restampAgentFromTemplate('sales/sdr', g.id, { apply: true }).catch(() => undefined);
+
+    expect(swapped).toBe(true);
+    expect(fs.readdirSync(outside)).toEqual([]);
+    expect(fs.readFileSync(path.join(`${overlayRoot}.pinned`, 'widget', 'SKILL.md'), 'utf-8')).toContain('v2');
   });
 
   it('plans over a dangling symlink in the overlay without crashing', async () => {

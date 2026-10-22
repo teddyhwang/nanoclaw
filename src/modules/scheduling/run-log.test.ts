@@ -18,6 +18,12 @@ vi.mock('../../db/agent-groups.js', () => ({
   getAgentGroup: vi.fn(async () => ({ id: 'ag', folder: 'grp', name: 'G' })),
 }));
 vi.mock('../../container-config.js', () => ({ resolveGroupTimezone: vi.fn(async () => 'UTC') }));
+// Embedded hosts nest group folders (groups/<workspace>/<folder>); the run log
+// must follow resolveGroupDir, not GROUPS_DIR/<folder>.
+vi.mock('../../engine/paths.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../engine/paths.js')>()),
+  resolveGroupDir: vi.fn(() => '/tmp/nanoclaw-test-run-log/groups/ws/grp'),
+}));
 vi.mock('../../timezone.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../timezone.js')>()),
   formatLocalStamp: vi.fn(() => 'TS'),
@@ -25,7 +31,7 @@ vi.mock('../../timezone.js', async (importOriginal) => ({
 
 import { appendRunLog, deleteRunLog, readRunLogTail } from './run-log.js';
 
-const GROUP_DIR = path.join(TEST_ROOT, 'groups', 'grp');
+const GROUP_DIR = path.join(TEST_ROOT, 'groups', 'ws', 'grp');
 
 beforeEach(() => {
   fs.rmSync(TEST_ROOT, { recursive: true, force: true });
@@ -43,6 +49,7 @@ describe('run log happy path', () => {
     const file = path.join(GROUP_DIR, 'tasks', 'daily-digest.md');
     expect(res.path).toBe(file);
     expect(fs.readFileSync(file, 'utf-8')).toBe('TS — started\nTS — done\n');
+    expect(fs.existsSync(path.join(TEST_ROOT, 'groups', 'grp'))).toBe(false);
 
     expect(await readRunLogTail('ag', 'daily-digest')).toEqual(['TS — started', 'TS — done']);
 

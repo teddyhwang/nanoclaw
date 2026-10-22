@@ -1,13 +1,23 @@
-import fs from 'fs';
 import type Database from 'better-sqlite3';
+import path from 'path';
 
+import { DATA_DIR } from '../../config.js';
 import { log } from '../../log.js';
-import { sessionMailboxDir, sessionMailboxPath } from './paths.js';
-export { inboundDbPath, outboundDbPath, sessionMailboxDir, sessionMailboxPath } from './paths.js';
+import { CONTAINER_MAILBOX_PATH, sessionReadonlyMailboxDir, sessionMailboxPath } from './paths.js';
+export { inboundDbPath, legacyInboundDbPath, outboundDbPath, sessionMailboxDir, sessionMailboxPath } from './paths.js';
+import {
+  destroySessionFiles,
+  migrateSessionLayout,
+  openSessionInbound,
+  openSessionOutbound,
+  prepareSessionFiles,
+  sessionFilesExist,
+  sessionLayout,
+  upgradeAllSessionLayouts,
+} from './session-files.js';
 import {
   countDueMessages,
   deleteOrphanProcessingClaims,
-  ensureSchema,
   getContainerState,
   gcStaleSystemRows,
   getDeliveredIds,
@@ -33,9 +43,6 @@ import {
   markMessagesCompleted,
   migrateDeliveredTable,
   migrateMessagesInTable,
-  openInboundDb,
-  openOutboundDb,
-  openOutboundDbRw,
   replaceDestinations,
   retryWithBackoff,
   upsertSessionRouting,
@@ -522,24 +529,30 @@ export class SqliteAgentMailbox implements AgentMailbox {
   private readonly migrated = new Set<string>();
 
   async exists(key: MailboxSessionKey): Promise<boolean> {
-    return fs.existsSync(sessionMailboxPath(key, 'inbound')) && fs.existsSync(sessionMailboxPath(key, 'outbound'));
+    return sessionFilesExist(key);
   }
 
   prepare(key: MailboxSessionKey): void {
-    fs.mkdirSync(sessionMailboxDir(key), { recursive: true });
-    const inbound = sessionMailboxPath(key, 'inbound');
-    const outbound = sessionMailboxPath(key, 'outbound');
-    if (!fs.existsSync(inbound)) ensureSchema(inbound, 'inbound');
-    if (!fs.existsSync(outbound)) ensureSchema(outbound, 'outbound');
+    prepareSessionFiles(key);
+  }
+
+  /** A running container on the pre-mailbox-folder layout reads inbound.db from the old place and must not be adopted. */
+  needsLayoutUpgrade(key: MailboxSessionKey): boolean {
+    return sessionLayout(key) === 'legacy';
+  }
+
+  upgradeStoredLayouts(): void {
+    const result = upgradeAllSessionLayouts(path.join(DATA_DIR, 'v2-sessions'));
+    if (result.migrated || result.failed) log.info('Session mailbox layout migration', result);
+  }
+
+  readonlyMounts(key: MailboxSessionKey): Array<{ hostPath: string; containerPath: string }> {
+    return [{ hostPath: sessionReadonlyMailboxDir(key), containerPath: CONTAINER_MAILBOX_PATH }];
   }
 
   async destroy(key: MailboxSessionKey): Promise<void> {
-    const inbound = sessionMailboxPath(key, 'inbound');
-    this.migrated.delete(inbound);
-    for (const side of ['inbound', 'outbound'] as const) {
-      const db = sessionMailboxPath(key, side);
-      for (const suffix of ['', '-journal', '-shm', '-wal']) fs.rmSync(`${db}${suffix}`, { force: true });
-    }
+    this.migrated.delete(sessionMailboxPath(key, 'inbound'));
+    destroySessionFiles(key);
   }
 
   async runnerContext(_key: MailboxSessionKey): Promise<null> {
@@ -553,11 +566,12 @@ export class SqliteAgentMailbox implements AgentMailbox {
   async session<T>(key: MailboxSessionKey, action: (mailbox: MailboxSession) => T | Promise<T>): Promise<T> {
     const inboundPath = sessionMailboxPath(key, 'inbound');
     if (!(await this.exists(key))) throw new Error(`Mailbox is not prepared: ${key.agentGroupId}/${key.sessionId}`);
-    const inbound = openInboundDb(inboundPath);
+    migrateSessionLayout(key);
+    const inbound = openSessionInbound(key);
     let outbound: Database.Database | undefined;
     let outboundWriter: Database.Database | undefined;
-    const readableOutbound = () => (outbound ??= openOutboundDb(sessionMailboxPath(key, 'outbound')));
-    const writableOutbound = () => (outboundWriter ??= openOutboundDbRw(sessionMailboxPath(key, 'outbound')));
+    const readableOutbound = () => (outbound ??= openSessionOutbound(key, 'readonly'));
+    const writableOutbound = () => (outboundWriter ??= openSessionOutbound(key, 'readwrite'));
     try {
       if (!this.migrated.has(inboundPath)) {
         migrateMessagesInTable(inbound);

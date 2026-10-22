@@ -33,7 +33,8 @@ import { resolveLocalTemplate } from './local-dir.js';
 import { parsePluginManifest, PLUGIN_MANIFEST_FILE } from './manifest.js';
 import { pluginDataCwdSubpaths } from './mcp.js';
 import { parseTemplate, type Template } from './parse.js';
-import { copyPluginDir } from './plugin-dir.js';
+import { copyPluginDir, copyPluginDirInto } from './plugin-dir.js';
+import { AnchoredDir } from '../anchored-dir.js';
 import { prepareTemplateTasks } from './tasks.js';
 
 export interface RestampChange {
@@ -201,11 +202,7 @@ export async function restampAgentFromTemplate(
         action: live === undefined ? 'create' : 'update',
         ...(live !== undefined && live !== oldContext.get(name) ? { customized: true } : {}),
       });
-      ops.push(() => {
-        mkdirRealWithin(groupDir, path.dirname(target));
-        fs.rmSync(target, { force: true });
-        fs.writeFileSync(target, wanted, { flag: 'wx' });
-      });
+      ops.push(() => replaceContextFile(groupDir, target, wanted));
     } else if (live !== undefined) {
       changes.push({
         surface: 'context',
@@ -213,21 +210,24 @@ export async function restampAgentFromTemplate(
         action: 'remove',
         ...(live !== oldContext.get(name) ? { customized: true } : {}),
       });
-      ops.push(() => {
-        mkdirRealWithin(groupDir, path.dirname(target));
-        fs.rmSync(target, { force: true });
-      });
+      ops.push(() => replaceContextFile(groupDir, target, undefined));
     }
   }
 
   // --- skills overlay ------------------------------------------------------
   const overlayRoot = groupSkillsOverlayDir(group.id);
   // The overlay's parent (.claude-shared) is host-provisioned, but the
-  // container can replace `skills` itself with a symlink — verify before
-  // every apply-phase write under it.
-  const ensureOverlayRoot = (): void => {
-    fs.mkdirSync(path.dirname(overlayRoot), { recursive: true });
-    mkdirRealWithin(path.dirname(overlayRoot), overlayRoot);
+  // container can replace `skills` (or anything below it) with a symlink at
+  // any moment: pin `skills` by descriptor and do every apply-phase remove,
+  // mkdir and copy relative to it, never by path.
+  const withOverlayRoot = (apply: (skills: AnchoredDir) => void): void => {
+    const skills = AnchoredDir.open(path.dirname(overlayRoot), [path.basename(overlayRoot)], true);
+    if (!skills) throw new Error(`could not open the skills overlay for ${group.id}`);
+    try {
+      apply(skills);
+    } finally {
+      skills.close();
+    }
   };
   const oldSkills = new Map(old.skills.map((s) => [s.name, s.srcDir]));
   const newSkills = new Map(tpl.skills.map((s) => [s.name, s.srcDir]));
@@ -241,10 +241,7 @@ export async function restampAgentFromTemplate(
         action: 'create',
         ...(oldSrc !== undefined ? { customized: true, note: 'was removed locally; recreated' } : {}),
       });
-      ops.push(() => {
-        ensureOverlayRoot();
-        copyPluginDir(srcDir, overlay);
-      });
+      ops.push(() => withOverlayRoot((skills) => copyPluginDirInto(srcDir, skills, name)));
     } else if (dirsEqual(overlay, srcDir)) {
       changes.push({ surface: 'skill', name, action: 'unchanged' });
     } else {
@@ -254,10 +251,7 @@ export async function restampAgentFromTemplate(
         action: 'update',
         ...(oldSrc === undefined || !dirsEqual(overlay, oldSrc) ? { customized: true } : {}),
       });
-      ops.push(() => {
-        ensureOverlayRoot();
-        copyPluginDir(srcDir, overlay);
-      });
+      ops.push(() => withOverlayRoot((skills) => copyPluginDirInto(srcDir, skills, name)));
     }
   }
   for (const [name, oldSrc] of oldSkills) {
@@ -270,10 +264,7 @@ export async function restampAgentFromTemplate(
       action: 'remove',
       ...(!dirsEqual(overlay, oldSrc) ? { customized: true } : {}),
     });
-    ops.push(() => {
-      ensureOverlayRoot();
-      fs.rmSync(overlay, { recursive: true, force: true });
-    });
+    ops.push(() => withOverlayRoot((skills) => skills.removeTree(name)));
   }
 
   // --- MCP servers (by ownership marker) -----------------------------------
@@ -447,6 +438,26 @@ export function formatRestampResult(result: RestampResult): string {
 }
 
 /** Resolve a context-relative extra to its workspace path, contained in groupDir. */
+/**
+ * Replace (or, with `data` undefined, remove) a context extra in the
+ * container-writable group folder. The parent folders are opened by
+ * descriptor refusing symlinks, the old leaf is unlinked (a planted link is
+ * removed itself) and the new one created exclusively, so nothing is written
+ * outside the group folder.
+ */
+function replaceContextFile(groupDir: string, target: string, data: string | undefined): void {
+  const segments = path.relative(groupDir, target).split(path.sep);
+  const leaf = segments.pop()!;
+  const dir = AnchoredDir.open(groupDir, segments, data !== undefined);
+  if (!dir) return;
+  try {
+    if (dir.lstatExact(leaf)) dir.unlink(leaf);
+    if (data !== undefined) dir.writeNewFile(leaf, Buffer.from(data));
+  } finally {
+    dir.close();
+  }
+}
+
 function contextTarget(groupDir: string, name: string): string {
   const target = path.join(groupDir, ...name.split('/'));
   const rel = path.relative(groupDir, target);

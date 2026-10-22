@@ -4,7 +4,8 @@
  * The session uses two SQLite files to eliminate write contention across
  * the host-container mount boundary:
  *
- *   inbound.db  — host writes new messages here; container opens READ-ONLY
+ *   mailbox/inbound.db — host writes new messages here; container opens READ-ONLY
+ *                      (and the folder is a read-only mount)
  *   outbound.db — container writes responses + acks here; host opens read-only
  *
  * Each file has exactly one writer, so no cross-process lock contention.
@@ -19,7 +20,10 @@
  */
 import { Database } from 'bun:sqlite';
 
-const DEFAULT_INBOUND_PATH = '/workspace/inbound.db';
+// inbound.db sits in the host's own mailbox folder, bind-mounted read-only over
+// /workspace/mailbox (host: src/mailbox/sqlite/paths.ts CONTAINER_MAILBOX_PATH),
+// so this runner can read it but cannot write or replace it.
+const DEFAULT_INBOUND_PATH = '/workspace/mailbox/inbound.db';
 const DEFAULT_OUTBOUND_PATH = '/workspace/outbound.db';
 
 let _inbound: Database | null = null;

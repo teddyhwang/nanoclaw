@@ -542,6 +542,7 @@ describe('buildMounts agent surfaces', () => {
     expect(new Set(containerPaths).size).toBe(containerPaths.length);
     expect(containerPaths).toEqual([
       '/workspace',
+      '/workspace/mailbox',
       '/app/.nanoclaw-session.json',
       '/workspace/agent',
       '/workspace/agent/plugins',
