@@ -21,7 +21,7 @@ import { getDb } from '../../db/connection.js';
 import {
   createMessagingGroupAgent,
   getMessagingGroup,
-  setAgentGroupSessionMode,
+  setAgentGroupChannelSessionMode,
   setMessagingGroupDeniedAt,
 } from '../../db/messaging-groups.js';
 import { resolveWiringDefaults } from '../../channels/channel-defaults.js';
@@ -433,18 +433,22 @@ async function wireApprovedChannel(
         engage_pattern: engage.engage_pattern,
         // Deliberate card-flow choices, not channel defaults: the triggering
         // sender is auto-admitted below, so 'known' keeps other strangers gated;
-        // 'accumulate' / priority 0 are fixed card-flow semantics. Match the
-        // dashboard Add Chat path's agent-shared invariant: one agent with
-        // multiple chats must still have one session and one recurring-task fire.
+        // 'accumulate' / priority 0 are fixed card-flow semantics. Group
+        // chats join the agent-shared session (one session and one
+        // recurring-task fire per agent across its channels). A DM keeps its
+        // own session so private conversations never merge into a channel's.
         sender_scope: 'known',
         ignored_message_policy: 'accumulate',
-        session_mode: 'agent-shared',
+        session_mode: isGroup ? 'agent-shared' : 'shared',
         priority: 0,
         created_at: createdAt,
       });
       // The new row alone is insufficient if this agent already had a `shared`
-      // chat. Flip every sibling binding exactly as dashboard Add Chat does.
-      await setAgentGroupSessionMode(agentGroupId, 'agent-shared');
+      // group chat: flip sibling *group* bindings into the shared session.
+      // DM bindings are never touched.
+      if (isGroup) {
+        await setAgentGroupChannelSessionMode(agentGroupId, 'agent-shared');
+      }
 
       const senderUserId = await extractAndUpsertUser(event);
       if (senderUserId) {

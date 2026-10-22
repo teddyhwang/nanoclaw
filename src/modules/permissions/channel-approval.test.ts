@@ -356,6 +356,29 @@ describe('unknown-channel registration flow', () => {
       priority: 0,
       created_at: now(),
     });
+    // The same agent's private DM must keep its own session: a channel
+    // approval never merges a DM into the agent-shared channel session.
+    await createMessagingGroup({
+      id: 'mg-existing-dm',
+      channel_type: 'telegram',
+      platform_id: 'dm-existing',
+      name: 'Existing DM',
+      is_group: 0,
+      unknown_sender_policy: 'public',
+      created_at: now(),
+    });
+    await createMessagingGroupAgent({
+      id: 'mga-existing-dm',
+      messaging_group_id: 'mg-existing-dm',
+      agent_group_id: 'ag-1',
+      engage_mode: 'pattern',
+      engage_pattern: '.',
+      sender_scope: 'known',
+      ignored_message_policy: 'accumulate',
+      session_mode: 'shared',
+      priority: 0,
+      created_at: now(),
+    });
 
     await expectAsyncDelivery(() => routeInbound(groupMention('chat-approve')));
 
@@ -401,6 +424,11 @@ describe('unknown-channel registration flow', () => {
       'mga-existing-chat',
     ))!;
     expect(sibling.session_mode).toBe('agent-shared');
+    const dmSibling = (await getDb().get<{ session_mode: string }>(
+      'SELECT session_mode FROM messaging_group_agents WHERE id = ?',
+      'mga-existing-dm',
+    ))!;
+    expect(dmSibling.session_mode).toBe('shared');
 
     // Triggering sender auto-admitted so sender_scope='known' doesn't
     // bounce the replay into sender-approval.
@@ -522,11 +550,13 @@ describe('unknown-channel registration flow', () => {
     }
 
     const mga = (await getDb().get(
-      'SELECT engage_mode, engage_pattern FROM messaging_group_agents WHERE messaging_group_id = ?',
+      'SELECT engage_mode, engage_pattern, session_mode FROM messaging_group_agents WHERE messaging_group_id = ?',
       pending.messaging_group_id,
-    )) as { engage_mode: string; engage_pattern: string };
+    )) as { engage_mode: string; engage_pattern: string; session_mode: string };
     expect(mga.engage_mode).toBe('pattern');
     expect(mga.engage_pattern).toBe('.');
+    // An approved DM keeps its own session; it never joins agent-shared.
+    expect(mga.session_mode).toBe('shared');
   });
 
   // WhatsApp-like platform: groups exist but thread ids don't (threadId is

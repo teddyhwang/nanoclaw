@@ -41,6 +41,7 @@ export {
   getMessagingGroupAgentByPair,
   updateMessagingGroupAgent,
   setAgentGroupSessionMode,
+  setAgentGroupChannelSessionMode,
   deleteMessagingGroupAgent,
 } from './messaging-groups.js';
 export {
