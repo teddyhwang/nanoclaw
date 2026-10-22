@@ -217,6 +217,15 @@ export interface AgentQuery {
   readonly delivery?: { providerName: string; emitsMidTurnText: boolean };
 
   /**
+   * Whether a pushed input can be folded into the result that is in flight
+   * when it arrives. False means the query holds each pushed input until the
+   * previous result, so every push gets its own result and must be accounted
+   * to it. Absent: the poll loop assumes Claude merges and every other
+   * provider queues. Read at result time, like `delivery`.
+   */
+  readonly mergesPushedInputs?: boolean;
+
+  /**
    * Push a follow-up message into the active query. The poll loop supplies
    * `ImageContentBlock[]`; providers may narrow this to their native attachment
    * view (OpenCode uses local file descriptors). Initial-query images remain

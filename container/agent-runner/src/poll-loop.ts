@@ -2126,12 +2126,16 @@ export async function processQuery(
           deliveredAssemblyFragment = undefined;
           textProviderName = deliveryProviderName;
         }
-        const resultPushEnd = deliveryProviderName === 'claude' ? pushAddressed.length : resultIndex + 1;
+        // Claude's streaming input folds pushes into the in-flight result,
+        // unless the query serializes inputs (Optimus' effort resolver holds
+        // each push until the previous result): then every push has its own.
+        const mergesPushes = query.mergesPushedInputs ?? deliveryProviderName === 'claude';
+        const resultPushEnd = mergesPushes ? pushAddressed.length : resultIndex + 1;
         if (event.type === 'result') {
           // Consume inputs before any awaited dispatch; a push during dispatch
           // belongs to the next result. Read the wrapped query's ACTIVE harness.
           dispatchingResult = true;
-          pendingResults = deliveryProviderName === 'claude' ? 0 : Math.max(0, pendingResults - 1);
+          pendingResults = mergesPushes ? 0 : Math.max(0, pendingResults - 1);
         }
         await handleEvent(event, routing);
         touchHeartbeat();

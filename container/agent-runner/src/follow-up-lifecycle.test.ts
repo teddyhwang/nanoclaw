@@ -377,4 +377,34 @@ describe('each input is marked by its own result', () => {
       await done;
     }
   });
+
+  it('does not fold a Claude push into the earlier result when the query serializes inputs', async () => {
+    // Optimus' effort resolver holds each push until the previous result, so
+    // Claude answers it with a result of its own.
+    class SerializedClaude extends ControlledProvider {
+      query(): AgentQuery {
+        return Object.assign(super.query(), { mergesPushedInputs: false });
+      }
+    }
+    const primary = new SerializedClaude(true);
+    const { done, query } = start(primary, 'claude');
+    try {
+      chat('follow-up');
+      await waitFor(() => primary.pushes.length === 1);
+      result(primary, 'First request finished');
+      await waitFor(() => ack('initial') === 'completed');
+      await sleep(650);
+      // Its own result has not arrived: still claimed, stream still open.
+      expect(ack('follow-up')).toBe('processing');
+      expect(primary.ends).toBe(0);
+      // An empty answer to the addressed follow-up still gets the scoped fallback.
+      primary.emit({ type: 'result', text: '' });
+      await waitFor(() => ack('follow-up') === 'completed');
+      await waitFor(() => texts().length === 2);
+      expect(texts()[1]).toContain("couldn't complete that request");
+    } finally {
+      query.abort();
+      await done;
+    }
+  });
 });

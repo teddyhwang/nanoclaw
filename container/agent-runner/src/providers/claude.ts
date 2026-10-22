@@ -728,6 +728,9 @@ export class ClaudeProvider implements AgentProvider {
     }
 
     return {
+      // With an effort resolver each pushed input waits for the previous
+      // result (see beginInput), so it can no longer fold into it.
+      mergesPushedInputs: !resolver,
       push: (msg, imageBlocks) => {
         if (!resolver) {
           stream.push(msg, imageBlocks);
