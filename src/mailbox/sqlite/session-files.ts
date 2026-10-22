@@ -71,18 +71,32 @@ export function sessionLayout(key: MailboxSessionKey): SessionLayout {
   }
 }
 
-function discardLegacyInbound(session: AnchoredDir, key: MailboxSessionKey): void {
+/**
+ * Remove the session-root inbound.db and its side files. `origin` says whose
+ * file it is: the session's own pre-migration file right after its rows were
+ * copied (routine), or a file that appeared after migration, which only the
+ * container can have made (suspicious).
+ */
+function discardLegacyInbound(
+  session: AnchoredDir,
+  key: MailboxSessionKey,
+  origin: 'migrated' | 'container-made',
+): void {
   for (const suffix of SQLITE_SIDE_FILES) {
     const name = `${INBOUND_DB}${suffix}`;
     if (!session.lstatExact(name)) continue;
     if (suffix === '') {
-      log.warn('Discarding a container-made inbound.db in a migrated session folder', {
-        agentGroupId: key.agentGroupId,
-        sessionId: key.sessionId,
-      });
+      const fields = { agentGroupId: key.agentGroupId, sessionId: key.sessionId };
+      if (origin === 'migrated') log.info('Removed the pre-migration inbound.db after copying it', fields);
+      else log.warn('Discarding a container-made inbound.db in a migrated session folder', fields);
     }
     session.removeTree(name);
   }
+}
+
+/** Folder names under v2-sessions (and under an agent group) that are never sessions: `.claude-shared`, `.context`, `_by-name`, ... */
+export function isReservedSessionDirName(name: string): boolean {
+  return name.startsWith('.') || name.startsWith('_');
 }
 
 /**
@@ -95,7 +109,7 @@ export function migrateSessionLayout(key: MailboxSessionKey): void {
   if (!session) return;
   try {
     if (layoutOf(session) === 'current') {
-      discardLegacyInbound(session, key);
+      discardLegacyInbound(session, key, 'container-made');
       return;
     }
     // Not migrated: an existing `mailbox` entry is either an interrupted earlier
@@ -128,7 +142,16 @@ export function migrateSessionLayout(key: MailboxSessionKey): void {
       let rows = 0;
       try {
         copy.pragma('journal_mode = DELETE');
-        rows = (copy.prepare('SELECT COUNT(*) AS n FROM messages_in').get() as { n: number }).n;
+        // An empty (0-byte) or tableless legacy file has no rows: give the copy
+        // the schema so the new inbound.db is complete, and count zero.
+        const hasMessages = copy
+          .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages_in'")
+          .get();
+        if (hasMessages) {
+          rows = (copy.prepare('SELECT COUNT(*) AS n FROM messages_in').get() as { n: number }).n;
+        } else {
+          copy.exec(INBOUND_SCHEMA);
+        }
       } finally {
         copy.close();
       }
@@ -144,7 +167,7 @@ export function migrateSessionLayout(key: MailboxSessionKey): void {
         rows,
       });
     }
-    discardLegacyInbound(session, key);
+    discardLegacyInbound(session, key, 'migrated');
   } finally {
     session.close();
   }
@@ -163,7 +186,7 @@ export function upgradeAllSessionLayouts(sessionsRoot: string): { migrated: numb
     fs.existsSync(root)
       ? fs
           .readdirSync(root, { withFileTypes: true })
-          .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
+          .filter((entry) => entry.isDirectory() && !isReservedSessionDirName(entry.name))
           .map((entry) => entry.name)
       : [];
   for (const agentGroupId of dirs(sessionsRoot)) {
