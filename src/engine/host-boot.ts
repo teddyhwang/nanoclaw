@@ -31,6 +31,7 @@ import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, st
 import { startHostSweep, stopHostSweep } from '../host-sweep.js';
 import { routeInbound } from '../router.js';
 import { log } from '../log.js';
+import { getAgentMailbox } from '../mailbox/index.js';
 import {
   initChannelAdapters,
   teardownChannelAdapters,
@@ -251,6 +252,13 @@ export async function _bootForHost(opts: { managedSignals: boolean }): Promise<v
     resumeGatewaySessionAdmission,
   );
   await adoptRunningSessions();
+  // Adoption stopped containers still on the old mailbox layout; move their
+  // inbound.db into the read-only mailbox folder before any inbound routing.
+  try {
+    getAgentMailbox().upgradeStoredLayouts?.();
+  } catch (err) {
+    log.warn('Session mailbox layout migration pass failed; sessions migrate lazily', { err });
+  }
   releaseInbound();
   await startHostModules({ db, deliveryAdapter, signal: hostAbortController.signal });
 

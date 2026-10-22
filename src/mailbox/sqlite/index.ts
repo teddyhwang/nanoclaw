@@ -1,5 +1,7 @@
 import type Database from 'better-sqlite3';
+import path from 'path';
 
+import { DATA_DIR } from '../../config.js';
 import { log } from '../../log.js';
 import { CONTAINER_MAILBOX_PATH, sessionReadonlyMailboxDir, sessionMailboxPath } from './paths.js';
 export { inboundDbPath, legacyInboundDbPath, outboundDbPath, sessionMailboxDir, sessionMailboxPath } from './paths.js';
@@ -11,6 +13,7 @@ import {
   prepareSessionFiles,
   sessionFilesExist,
   sessionLayout,
+  upgradeAllSessionLayouts,
 } from './session-files.js';
 import {
   countDueMessages,
@@ -536,6 +539,11 @@ export class SqliteAgentMailbox implements AgentMailbox {
   /** A running container on the pre-mailbox-folder layout reads inbound.db from the old place and must not be adopted. */
   needsLayoutUpgrade(key: MailboxSessionKey): boolean {
     return sessionLayout(key) === 'legacy';
+  }
+
+  upgradeStoredLayouts(): void {
+    const result = upgradeAllSessionLayouts(path.join(DATA_DIR, 'v2-sessions'));
+    if (result.migrated || result.failed) log.info('Session mailbox layout migration', result);
   }
 
   readonlyMounts(key: MailboxSessionKey): Array<{ hostPath: string; containerPath: string }> {

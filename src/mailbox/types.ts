@@ -221,6 +221,8 @@ export interface AgentMailbox {
   readonlyMounts?(key: MailboxSessionKey): Array<{ hostPath: string; containerPath: string }>;
   /** True when a runner already running for the key uses an older storage layout and must not be adopted. */
   needsLayoutUpgrade?(key: MailboxSessionKey): boolean;
+  /** Move every stored session to the current layout (boot, after adoption, before inbound routing). */
+  upgradeStoredLayouts?(): void;
   runnerContext(key: MailboxSessionKey): Promise<unknown>;
   /** Non-secret runner configuration only; never credentials, authorization material, or identity. */
   runnerEnvironment(key: MailboxSessionKey): Promise<Record<string, string>>;

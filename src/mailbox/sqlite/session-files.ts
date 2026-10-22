@@ -150,6 +150,38 @@ export function migrateSessionLayout(key: MailboxSessionKey): void {
   }
 }
 
+/**
+ * Migrate every session still on the old layout. Run at boot after adoption
+ * stopped old-layout containers and before inbound routing starts, so readers
+ * and writers only ever see the mailbox folder. Failures are logged per
+ * session; session()/prepare() retry them lazily.
+ */
+export function upgradeAllSessionLayouts(sessionsRoot: string): { migrated: number; failed: number } {
+  let migrated = 0;
+  let failed = 0;
+  const dirs = (root: string) =>
+    fs.existsSync(root)
+      ? fs
+          .readdirSync(root, { withFileTypes: true })
+          .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
+          .map((entry) => entry.name)
+      : [];
+  for (const agentGroupId of dirs(sessionsRoot)) {
+    for (const sessionId of dirs(`${sessionsRoot}/${agentGroupId}`)) {
+      const key = { agentGroupId, sessionId };
+      try {
+        if (sessionLayout(key) !== 'legacy') continue;
+        migrateSessionLayout(key);
+        migrated += 1;
+      } catch (err) {
+        failed += 1;
+        log.warn('Session mailbox layout migration failed; will retry on next use', { ...key, err });
+      }
+    }
+  }
+  return { migrated, failed };
+}
+
 function ensureDb(dir: AnchoredDir, name: string, schema: 'inbound' | 'outbound'): void {
   try {
     const created = createEmptyDbFile(dir, name);

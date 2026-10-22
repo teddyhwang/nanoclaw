@@ -194,6 +194,21 @@ describe('legacy layout migration', () => {
     expect(mailbox.needsLayoutUpgrade(KEY)).toBe(false);
   });
 
+  it('the boot pass migrates every legacy session and leaves current ones alone', () => {
+    writeLegacyInbound(path.join(SESSION, 'inbound.db'), ['a']);
+    const other = path.join(ROOT, 'data', 'v2-sessions', 'ag-b', 'sess-b');
+    fs.mkdirSync(other, { recursive: true });
+    writeLegacyInbound(path.join(other, 'inbound.db'), ['b']);
+    const mailbox = new SqliteAgentMailbox();
+
+    mailbox.upgradeStoredLayouts();
+    mailbox.upgradeStoredLayouts();
+
+    expect(ids(path.join(MAILBOX, 'inbound.db'))).toEqual(['a']);
+    expect(ids(path.join(other, 'mailbox', 'inbound.db'))).toEqual(['b']);
+    expect(fs.existsSync(path.join(other, 'inbound.db'))).toBe(false);
+  });
+
   it('session() migrates a legacy session that was never re-prepared', async () => {
     writeLegacyInbound(path.join(SESSION, 'inbound.db'), ['a']);
     new Database(path.join(SESSION, 'outbound.db')).close();
