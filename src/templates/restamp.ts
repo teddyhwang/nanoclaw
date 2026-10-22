@@ -136,7 +136,7 @@ export async function restampAgentFromTemplate(
       copyPluginDir(tpl.dir, oldPluginDir);
       // plugin-data sits in the container-RW group mount (unlike plugins/,
       // which is its own RO mountpoint) — same symlink rules as every write.
-      mkdirRealWithin(groupDir, path.join(groupDir, 'plugin-data', tpl.name));
+      mkdirAnchored(groupDir, ['plugin-data', tpl.name]);
     });
   }
 
@@ -144,10 +144,10 @@ export async function restampAgentFromTemplate(
   // when plugins/<name> is byte-identical. An engine upgrade changes what the
   // same template ref stamps (a cwd server the old engine skipped appears on
   // restamp with no plugin-file diff), and the dir may also have been deleted
-  // since the last stamp. Idempotent; mkdirRealWithin creates parents.
+  // since the last stamp. Idempotent; mkdirAnchored creates parents.
   ops.push(() => {
     for (const sub of pluginDataCwdSubpaths(tpl.mcpServers)) {
-      mkdirRealWithin(groupDir, path.join(groupDir, 'plugin-data', tpl.name, sub));
+      mkdirAnchored(groupDir, ['plugin-data', tpl.name, ...sub.split('/').filter((s) => s !== '' && s !== '.')]);
     }
   });
 
@@ -480,20 +480,16 @@ function listFilesRecursive(root: string): Map<string, string> {
 }
 
 /**
- * Create `dir` (under trusted, existing `base`) for an apply-phase write. The
- * group dir and skills overlay are container-writable, so an agent-planted
- * symlink could redirect a host-side write anywhere: the deepest EXISTING
- * ancestor must resolve inside `base` before the rest is created (freshly
- * created components cannot be symlinks).
+ * Create `base/segments...` for an apply-phase write. The group folder is
+ * container-writable, so a running container can swap any name below it for
+ * a symlink between a check and the host's next syscall. Each segment is
+ * created and opened through its parent's descriptor, refusing a symlink or
+ * non-directory (and `..`), so nothing is created outside `base`.
  */
-function mkdirRealWithin(base: string, dir: string): void {
-  let existing = dir;
-  while (!fs.existsSync(existing)) existing = path.dirname(existing);
-  const rel = path.relative(fs.realpathSync(base), fs.realpathSync(existing));
-  if (rel.startsWith('..') || path.isAbsolute(rel)) {
-    throw new Error(`refusing to write through "${dir}": it resolves outside the agent's own directories`);
-  }
-  fs.mkdirSync(dir, { recursive: true });
+function mkdirAnchored(base: string, segments: readonly string[]): void {
+  const dir = AnchoredDir.open(base, segments, true);
+  if (!dir) throw new Error(`could not create ${segments.join('/')} in the agent's folder`);
+  dir.close();
 }
 
 /**

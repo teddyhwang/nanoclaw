@@ -479,6 +479,9 @@ export class UsageLimitFallbackProvider implements AgentProvider {
           }
         );
       },
+      get mergesPushedInputs() {
+        return activeQuery.mergesPushedInputs;
+      },
       push: (message, imageBlocks) => {
         followups.push({ message, imageBlocks });
         activeQuery.push(message, imageBlocks);

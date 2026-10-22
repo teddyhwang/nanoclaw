@@ -1423,8 +1423,8 @@ export async function buildMounts(
       ['instructions.prepend.md', 'instructions.prepend.md'],
       ['CLAUDE.md', 'CLAUDE.md'],
     ] as const) {
-      const hostPath = path.join(sharedDir, name);
-      if (!fs.existsSync(hostPath)) continue;
+      const hostPath = sharedStateSource(sharedDir, name, name === 'memory' ? 'directory' : 'file');
+      if (!hostPath) continue;
       mounts.push({
         hostPath,
         containerPath: `/workspace/shared-groups/${shared.folder}/${target}`,
@@ -1449,6 +1449,25 @@ export async function buildMounts(
       throw new Error('Container mount overlaps protected requester provenance');
   }
   return mergeVolumeMounts([], mounts);
+}
+
+/**
+ * The host path of one shared group's state entry, or null when it is absent
+ * or unsafe to mount. The shared group's own containers can write its folder,
+ * so any of these names may be a symlink they planted; Docker resolves a
+ * symlinked bind source on the host, which would hand this container a
+ * read-only view of whatever the link points at (the mount policy only checks
+ * the path lexically). Only a real entry of the expected type is mounted.
+ */
+export function sharedStateSource(sharedDir: string, name: string, kind: 'directory' | 'file'): string | null {
+  const hostPath = path.join(sharedDir, name);
+  const st = fs.lstatSync(hostPath, { throwIfNoEntry: false });
+  if (!st) return null;
+  if (kind === 'directory' ? !st.isDirectory() : !st.isFile()) {
+    log.warn('Skipping shared group state that is not a real entry', { path: hostPath, kind });
+    return null;
+  }
+  return hostPath;
 }
 
 /** Last contributor wins one source per target, matching Docker's old argv ordering. */
