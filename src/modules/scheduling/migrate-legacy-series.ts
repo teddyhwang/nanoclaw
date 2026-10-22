@@ -30,6 +30,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { log } from '../../log.js';
+import { openInboundReadonlyAt } from '../../mailbox/sqlite/session-files.js';
 import { sessionsBaseDir } from '../../session-manager.js';
 import { hasSeries, openScheduleDbAt } from './schedule-store.js';
 
@@ -75,8 +76,7 @@ interface LegacySeries {
   _ts: string;
 }
 
-function collectFromInboundDb(dbPath: string): LegacySeries[] {
-  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+function collectFromInboundDb(db: Database.Database): LegacySeries[] {
   try {
     return db
       .prepare(
@@ -146,10 +146,13 @@ export function migrateAgentGroup(agentGroupId: string, agentGroupDir: string, b
 
   for (const entry of fs.readdirSync(agentGroupDir, { withFileTypes: true })) {
     if (!entry.isDirectory() || !entry.name.startsWith('sess-')) continue;
-    const inPath = path.join(agentGroupDir, entry.name, 'inbound.db');
-    if (!fs.existsSync(inPath)) continue;
+    const inPath = path.join(agentGroupDir, entry.name);
     try {
-      consider(collectFromInboundDb(inPath));
+      // The session folder is container-writable: open inbound.db (mailbox/
+      // or the pre-migration spot) without following a planted link.
+      const db = openInboundReadonlyAt(inPath);
+      if (!db) continue;
+      consider(collectFromInboundDb(db));
     } catch (err) {
       log.warn('migrate-legacy-series: skipped unreadable inbound.db', { inPath, err });
     }

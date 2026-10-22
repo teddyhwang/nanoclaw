@@ -187,6 +187,48 @@ export class AnchoredDir {
     return fs.lstatSync(this.entryPath(name));
   }
 
+  /** lstat with exact (bigint) dev/ino; null when the name is absent. */
+  lstatExact(name: string): fs.BigIntStats | null {
+    return fs.lstatSync(this.entryPath(name), { bigint: true, throwIfNoEntry: false }) ?? null;
+  }
+
+  /**
+   * The descriptor-anchored path of `name`, for an API that must open the
+   * leaf itself (SQLite). Only the final component is looked up, but the
+   * caller must open it without following a symlink there, or verify that it
+   * did not, and keep this directory open for as long as the path is in use.
+   */
+  pathOf(name: string): string {
+    return this.entryPath(name);
+  }
+
+  /** Rename `from` to `to` inside this directory; neither name is followed. */
+  rename(from: string, to: string): void {
+    fs.renameSync(this.entryPath(from), this.entryPath(to));
+  }
+
+  /**
+   * Remove `name` and, when it is a real directory, everything below it. A
+   * symlink anywhere in the tree is unlinked itself, never followed. Absent is
+   * not an error.
+   */
+  removeTree(name: string): void {
+    const st = this.lstatExact(name);
+    if (!st) return;
+    if (!st.isDirectory()) {
+      this.unlink(name);
+      return;
+    }
+    const child = this.openDir(name);
+    if (!child) return;
+    try {
+      for (const entry of child.entries()) child.removeTree(entry);
+    } finally {
+      child.close();
+    }
+    this.rmdir(name);
+  }
+
   /** The target of the symlink `name`, without following it. */
   readlink(name: string): string {
     return fs.readlinkSync(this.entryPath(name));

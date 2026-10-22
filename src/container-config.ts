@@ -12,13 +12,11 @@
  * and the materialized JSON carries two extra fields populated from DB columns
  * added by migration 016: `suppressEmbeds` and `assistantPrefixSeparator`.
  */
-import fs from 'fs';
-import path from 'path';
-
 import { DEFAULT_MODEL, FAST_MODE, TIMEZONE } from './config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { resolveGroupDir } from './engine/paths.js';
+import { AnchoredDir } from './anchored-dir.js';
 import { isValidTimezone } from './timezone.js';
 import { log } from './log.js';
 import type { AgentGroup, ContainerConfigRow, ContainerSpeed } from './types.js';
@@ -487,9 +485,16 @@ export async function materializeContainerJson(agentGroupId: string): Promise<Co
 
   const config = configFromDb(row, group);
 
-  const dir = resolveGroupDir(group);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, 'container.json'), JSON.stringify(config, null, 2) + '\n');
+  // The group folder is mounted read-write into the container. container.json
+  // is a nested read-only mount today, but don't let safety depend on mount
+  // layout: write through a descriptor with temp file + rename, so a symlink
+  // planted at the name is replaced rather than followed.
+  const dir = AnchoredDir.open(resolveGroupDir(group), [], true)!;
+  try {
+    dir.replaceFile('container.json', JSON.stringify(config, null, 2) + '\n');
+  } finally {
+    dir.close();
+  }
 
   return config;
 }

@@ -31,6 +31,7 @@ import { _resetEnginePathsForTests, setEnginePaths } from './engine/paths.js';
 import { addSkillRoot } from './engine/skill-roots.js';
 import { resetGatewayProvider } from './gateway-providers/index.js';
 import { log } from './log.js';
+import { setSharedGroupsResolver } from './shared-groups.js';
 import {
   listProviderContainerConfigNames,
   registerProviderContainerConfig,
@@ -42,6 +43,11 @@ vi.mock('./log.js', () => ({
   log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },
 }));
 vi.mock('./modules/typing/index.js', () => ({ stopTypingRefresh: vi.fn() }));
+// buildMounts provisions the session mailbox; keep it out of the package's data/.
+vi.mock('./config.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./config.js')>()),
+  DATA_DIR: '/tmp/nanoclaw-test-container-runner/data',
+}));
 
 afterEach(() => resetGatewayProvider());
 
@@ -569,6 +575,71 @@ describe('gateway availability', () => {
     controller.abort();
     report('late-loss');
     expect(stop).not.toHaveBeenCalled();
+  });
+});
+
+describe('shared-groups mountpoints', () => {
+  it('refuses a planted shared-groups symlink instead of creating directories through it', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-shared-'));
+    const groupsDir = path.join(root, 'groups');
+    const containerSourceDir = path.join(root, 'container');
+    const groupDir = path.join(groupsDir, agentGroup.folder);
+    const outside = path.join(root, 'outside');
+    const sessDir = path.join('/tmp/nanoclaw-test-container-runner/data', 'v2-sessions', agentGroup.id, session.id);
+    fs.mkdirSync(path.join(containerSourceDir, 'agent-runner', 'src'), { recursive: true });
+    fs.mkdirSync(path.join(containerSourceDir, 'skills'), { recursive: true });
+    fs.mkdirSync(path.join(groupDir, 'plugins'), { recursive: true });
+    fs.mkdirSync(outside, { recursive: true });
+    fs.rmSync(sessDir, { recursive: true, force: true });
+    fs.mkdirSync(sessDir, { recursive: true });
+    fs.symlinkSync(outside, path.join(sessDir, 'shared-groups'));
+    if (!listProviderContainerConfigNames().includes('test-embedded-surfaces')) {
+      registerProviderContainerConfig('test-embedded-surfaces', () => ({}), { providesAgentSurfaces: true });
+    }
+    const previousSource = process.env.NANOCLAW_CONTAINER_SOURCE_DIR;
+    try {
+      setEnginePaths({ projectRoot: root, groupsDir, containerSourceDir, groupDirResolver: () => groupDir });
+      process.env.NANOCLAW_CONTAINER_SOURCE_DIR = containerSourceDir;
+      setSharedGroupsResolver(() => [{ folder: 'other-group', name: 'Other', channel: 'discord' }]);
+      await expect(
+        buildMounts(agentGroup, session, containerConfig, 'test-embedded-surfaces', { mounts: [] }),
+      ).rejects.toThrow(/not a real directory/);
+      expect(fs.readdirSync(outside)).toEqual([]);
+    } finally {
+      setSharedGroupsResolver(null);
+      if (previousSource === undefined) delete process.env.NANOCLAW_CONTAINER_SOURCE_DIR;
+      else process.env.NANOCLAW_CONTAINER_SOURCE_DIR = previousSource;
+      _resetEnginePathsForTests();
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync('/tmp/nanoclaw-test-container-runner', { recursive: true, force: true });
+    }
+  });
+
+  it('mounts the mailbox folder read-only over the session workspace', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-mailbox-'));
+    const containerSourceDir = path.join(root, 'container');
+    const groupDir = path.join(root, 'groups', agentGroup.folder);
+    fs.mkdirSync(path.join(containerSourceDir, 'agent-runner', 'src'), { recursive: true });
+    fs.mkdirSync(path.join(containerSourceDir, 'skills'), { recursive: true });
+    fs.mkdirSync(path.join(groupDir, 'plugins'), { recursive: true });
+    if (!listProviderContainerConfigNames().includes('test-embedded-surfaces')) {
+      registerProviderContainerConfig('test-embedded-surfaces', () => ({}), { providesAgentSurfaces: true });
+    }
+    const previousSource = process.env.NANOCLAW_CONTAINER_SOURCE_DIR;
+    try {
+      setEnginePaths({ projectRoot: root, containerSourceDir, groupDirResolver: () => groupDir });
+      process.env.NANOCLAW_CONTAINER_SOURCE_DIR = containerSourceDir;
+      const mounts = await buildMounts(agentGroup, session, containerConfig, 'test-embedded-surfaces', { mounts: [] });
+      const mailbox = mounts.find((mount) => mount.containerPath === '/workspace/mailbox');
+      expect(mailbox).toMatchObject({ readonly: true, mountClass: 'group-state' });
+      expect(fs.statSync(path.join(mailbox!.hostPath, 'inbound.db')).isFile()).toBe(true);
+    } finally {
+      if (previousSource === undefined) delete process.env.NANOCLAW_CONTAINER_SOURCE_DIR;
+      else process.env.NANOCLAW_CONTAINER_SOURCE_DIR = previousSource;
+      _resetEnginePathsForTests();
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync('/tmp/nanoclaw-test-container-runner', { recursive: true, force: true });
+    }
   });
 });
 

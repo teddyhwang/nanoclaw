@@ -214,6 +214,13 @@ export interface AgentMailbox {
   /** Authorize/provision this implementation's storage for a later session(). */
   prepare(key: MailboxSessionKey): void;
   destroy(key: MailboxSessionKey): Promise<void>;
+  /**
+   * Host directories the runner must see read-only (nested over its RW session
+   * mount). The spawn path calls prepare() before mounting them.
+   */
+  readonlyMounts?(key: MailboxSessionKey): Array<{ hostPath: string; containerPath: string }>;
+  /** True when a runner already running for the key uses an older storage layout and must not be adopted. */
+  needsLayoutUpgrade?(key: MailboxSessionKey): boolean;
   runnerContext(key: MailboxSessionKey): Promise<unknown>;
   /** Non-secret runner configuration only; never credentials, authorization material, or identity. */
   runnerEnvironment(key: MailboxSessionKey): Promise<Record<string, string>>;

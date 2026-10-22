@@ -159,8 +159,13 @@ export { unguarded, type Unguarded } from '../guard/index.js';
 // Session mailbox paths remain available for host-side file placement (for
 // example generated media beside a session). Mailbox reads/writes themselves
 // go through the semantic async seam; raw SQLite handles are implementation
-// details of the built-in mailbox driver.
-export { inboundDbPath, outboundDbPath } from '../mailbox/sqlite/paths.js';
+// details of the built-in mailbox driver. inbound.db lives in the read-only
+// `mailbox/` folder (legacyInboundDbPath: the pre-migration spot, directly in
+// the container-writable session folder); use sessionMailboxDir for the
+// session folder itself. Readers must open these without following a link:
+// openInboundReadonlyAt does that for either layout.
+export { inboundDbPath, legacyInboundDbPath, outboundDbPath, sessionMailboxDir } from '../mailbox/sqlite/paths.js';
+export { openInboundReadonlyAt } from '../mailbox/sqlite/session-files.js';
 export { withMailboxSession, withExistingMailboxSession, writeOutboundDirect } from '../session-manager.js';
 export type { MailboxSession, TaskUpdate, TaskSeriesSnapshotRecord } from '../mailbox/types.js';
 // Agent-group-scoped schedule store (the S405 structural fix — task

@@ -14,6 +14,8 @@
 import fs from 'fs';
 import path from 'path';
 
+import type { AnchoredDir } from '../anchored-dir.js';
+
 // Abuse bounds, not sizing guidance — the real templates are a few dozen
 // files each.
 export const MAX_PLUGIN_FILES = 2000;
@@ -103,5 +105,48 @@ export function copyPluginDir(src: string, dest: string): void {
     fs.copyFileSync(file.abs, target, fs.constants.COPYFILE_EXCL);
     // Preserve the executable bit — skills legitimately ship scripts.
     fs.chmodSync(target, file.mode & 0o777);
+  }
+}
+
+/**
+ * copyPluginDir for a destination inside a container-writable tree: `name` is
+ * replaced wholesale inside `parent`, which the caller pinned by descriptor.
+ * Every remove, mkdir and create goes through descriptors and never follows a
+ * symlink, so a container swapping a name mid-copy cannot redirect the host.
+ */
+export function copyPluginDirInto(src: string, parent: AnchoredDir, name: string): void {
+  const files = walkPluginDir(src);
+  parent.removeTree(name);
+  const root = parent.openDir(name, true);
+  if (!root) throw new Error(`could not create plugin directory '${name}'`);
+  try {
+    for (const file of files) {
+      const segments = file.rel.split('/');
+      const leaf = segments.pop()!;
+      const opened: AnchoredDir[] = [];
+      try {
+        let dir = root;
+        for (const segment of segments) {
+          const next = dir.openDir(segment, true);
+          if (!next) throw new Error(`could not create plugin directory '${segment}'`);
+          opened.push(next);
+          dir = next;
+        }
+        // O_EXCL | O_NOFOLLOW: the tree was just created, so anything already
+        // holding the name was planted — fail loudly rather than write through.
+        const fd = dir.openNewFd(leaf);
+        try {
+          fs.writeFileSync(fd, fs.readFileSync(file.abs));
+          // Preserve the executable bit — skills legitimately ship scripts.
+          fs.fchmodSync(fd, file.mode & 0o777);
+        } finally {
+          fs.closeSync(fd);
+        }
+      } finally {
+        for (const dir of opened) dir.close();
+      }
+    }
+  } finally {
+    root.close();
   }
 }

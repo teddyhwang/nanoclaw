@@ -242,7 +242,8 @@ function providerFileTransformer(name: ProviderFileTransformerId): ProviderFileT
   return transformer;
 }
 
-function prepareSpawnFile(
+/** Exported for tests. */
+export function prepareSpawnFile(
   file: ProviderHostContract['files'][number],
   volumes: ReadonlyMap<string, ProviderStateVolume>,
   agentGroupId: string,
@@ -253,8 +254,18 @@ function prepareSpawnFile(
   const volumePath = providerStateVolumePath(volume, agentGroupId, sessionDirectory);
   const filePath = resolveWithinRoot(volumePath, file.relativePath);
   if (file.prepare.operation === 'append-open-close') {
-    const flags = fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_WRONLY | fs.constants.O_NOFOLLOW;
-    fs.closeSync(fs.openSync(filePath, flags));
+    // The volume is container-writable: reach the leaf through descriptors
+    // (no symlinked parent) and AnchoredDir.appendFile (O_NOFOLLOW plus
+    // O_NONBLOCK and a regular-file check, so a planted FIFO cannot stall us).
+    const segments = path.relative(volumePath, filePath).split(path.sep);
+    const leaf = segments.pop()!;
+    const dir = AnchoredDir.open(volumePath, segments, true);
+    if (!dir) throw new Error(`Provider prepared file directory is missing: ${file.relativePath}`);
+    try {
+      dir.appendFile(leaf, '');
+    } finally {
+      dir.close();
+    }
   }
 }
 
