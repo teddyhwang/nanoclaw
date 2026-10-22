@@ -419,6 +419,26 @@ export async function setAgentGroupSessionMode(
   return result.changes;
 }
 
+/**
+ * Like setAgentGroupSessionMode, but only for the agent's group chats
+ * (messaging_groups.is_group = 1). DM bindings keep their own session mode
+ * so a private conversation never joins a shared channel session.
+ */
+export async function setAgentGroupChannelSessionMode(
+  agentGroupId: string,
+  sessionMode: MessagingGroupAgent['session_mode'],
+): Promise<number> {
+  const result = await getDb().run(
+    `UPDATE messaging_group_agents SET session_mode = ?
+      WHERE agent_group_id = ? AND session_mode != ?
+        AND messaging_group_id IN (SELECT id FROM messaging_groups WHERE is_group = 1)`,
+    sessionMode,
+    agentGroupId,
+    sessionMode,
+  );
+  return result.changes;
+}
+
 export async function deleteMessagingGroupAgent(id: string): Promise<void> {
   await getDb().run('DELETE FROM messaging_group_agents WHERE id = ?', id);
 }
