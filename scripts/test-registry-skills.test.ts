@@ -6,8 +6,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   discover,
   formatUnavailable,
+  IMAGE_BUILD_ATTEMPTS,
   missingRegistrySources,
   partitionRegistryAvailability,
+  runRetryingTransientRegistryFetch,
   selectCombinedProviders,
   type RegistrySkill,
 } from './test-registry-skills.js';
@@ -114,5 +116,40 @@ describe('self-contained provider discovery', () => {
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('runRetryingTransientRegistryFetch', () => {
+  const transient = Object.assign(new Error('command exited 1: ./container/build.sh'), {
+    output:
+      '#15 120.7 Internal Error: Server answered with HTTP 503 when performing the request to https://registry.npmjs.org/pnpm/10.34.5; for troubleshooting help',
+  });
+  const real = Object.assign(new Error('command exited 1: ./container/build.sh'), {
+    output: 'error TS2322: Type string is not assignable to type number',
+  });
+  const noSleep = vi.fn(async () => {});
+
+  it('retries an image build that failed on a registry 5xx, then succeeds', async () => {
+    const run = vi.fn().mockRejectedValueOnce(transient).mockResolvedValueOnce('built');
+    await expect(runRetryingTransientRegistryFetch('./container/build.sh', run, noSleep)).resolves.toBe('built');
+    expect(run).toHaveBeenCalledTimes(2);
+  });
+
+  it('gives up after the bounded attempts', async () => {
+    const run = vi.fn().mockRejectedValue(transient);
+    await expect(runRetryingTransientRegistryFetch('./container/build.sh build', run, noSleep)).rejects.toBe(transient);
+    expect(run).toHaveBeenCalledTimes(IMAGE_BUILD_ATTEMPTS);
+  });
+
+  it('does not retry a real build failure', async () => {
+    const run = vi.fn().mockRejectedValue(real);
+    await expect(runRetryingTransientRegistryFetch('./container/build.sh', run, noSleep)).rejects.toBe(real);
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retry commands other than the image build, even on a registry 5xx', async () => {
+    const run = vi.fn().mockRejectedValue(transient);
+    await expect(runRetryingTransientRegistryFetch('pnpm test', run, noSleep)).rejects.toBe(transient);
+    expect(run).toHaveBeenCalledTimes(1);
   });
 });

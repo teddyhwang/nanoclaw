@@ -133,23 +133,77 @@ function materializeSkill(commit: string, skill: string, skillsRoot: string): Re
   return meta;
 }
 
+class CommandError extends Error {
+  constructor(
+    message: string,
+    readonly output: string,
+  ) {
+    super(message);
+  }
+}
+
+const OUTPUT_TAIL_BYTES = 64 * 1024;
+
 // Streams as it runs so a hung step shows where it stopped; the job-level
-// timeout bounds it. stdout is also captured for the caller.
+// timeout bounds it. stdout is also captured for the caller; on failure the
+// error carries the tail of stdout+stderr so callers can classify it.
 function command(cmd: string, cwd: string, quiet = false): Promise<string> {
   if (!quiet) console.log(`  $ ${cmd}`);
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, { cwd, shell: true, stdio: ['ignore', 'pipe', 'inherit'] });
+    const child = spawn(cmd, { cwd, shell: true, stdio: ['ignore', 'pipe', 'pipe'] });
     const stdout: Buffer[] = [];
+    let tail = '';
+    const keep = (chunk: Buffer) => {
+      tail = (tail + chunk.toString('utf8')).slice(-OUTPUT_TAIL_BYTES);
+    };
     child.stdout.on('data', (chunk: Buffer) => {
       stdout.push(chunk);
+      keep(chunk);
       process.stdout.write(chunk);
     });
-    child.on('error', (error) => reject(new Error(`command failed: ${error.message}: ${cmd}`)));
+    child.stderr.on('data', (chunk: Buffer) => {
+      keep(chunk);
+      process.stderr.write(chunk);
+    });
+    child.on('error', (error) => reject(new CommandError(`command failed: ${error.message}: ${cmd}`, tail)));
     child.on('close', (status, signal) => {
       if (status === 0) return resolve(Buffer.concat(stdout).toString('utf8'));
-      reject(new Error(`command ${signal ? `killed by ${signal}` : `exited ${status}`}: ${cmd}`));
+      reject(new CommandError(`command ${signal ? `killed by ${signal}` : `exited ${status}`}: ${cmd}`, tail));
     });
   });
+}
+
+// The agent image build fetches pnpm through corepack inside the Dockerfile,
+// including in pinned historical trees whose Dockerfile can't be edited. A
+// single registry.npmjs.org 5xx there is a transient infra failure, not a
+// skill defect. Only an image build that failed with exactly that signature is
+// retried; any other failure, and the last attempt, propagates unchanged.
+const IMAGE_BUILD_COMMAND = /^\.\/container\/build\.sh(?:\s|$)/;
+const TRANSIENT_REGISTRY_FETCH =
+  /Server answered with HTTP 5\d\d when performing the request to https:\/\/registry\.npmjs\.org\//;
+export const IMAGE_BUILD_ATTEMPTS = 3;
+
+export async function runRetryingTransientRegistryFetch(
+  cmd: string,
+  run: () => Promise<string>,
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((done) => setTimeout(done, ms)),
+): Promise<string> {
+  if (!IMAGE_BUILD_COMMAND.test(cmd.trim())) return run();
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await run();
+    } catch (error) {
+      const output = (error as { output?: unknown } | null)?.output;
+      if (attempt >= IMAGE_BUILD_ATTEMPTS || typeof output !== 'string' || !TRANSIENT_REGISTRY_FETCH.test(output)) {
+        throw error;
+      }
+      const delay = attempt * 15_000;
+      console.log(
+        `  ! transient registry.npmjs.org 5xx during image build (attempt ${attempt}/${IMAGE_BUILD_ATTEMPTS}); retrying in ${delay / 1000}s`,
+      );
+      await sleep(delay);
+    }
+  }
 }
 
 export function discover(skillsRoot = SKILLS_ROOT): RegistrySkill[] {
@@ -347,7 +401,7 @@ async function testSkill(
         if (current?.kind === 'run' && STUBBED_EFFECTS.has(String(current.attrs.effect))) {
           return '';
         }
-        return command(cmd, root);
+        return runRetryingTransientRegistryFetch(cmd, () => command(cmd, root));
       },
       execStream: async () => ({ ok: true, fields: fixture.stepFields ?? {} }),
     });
