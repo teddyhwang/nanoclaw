@@ -1,5 +1,5 @@
-staged=$(git diff --cached --name-only --diff-filter=ACM -- 'src/**/*.ts')
-pnpm run format:fix
+staged=$(git diff --cached --name-only --diff-filter=ACM -- ':(glob)src/**/*.ts')
+pnpm exec prettier --write --log-level warn "src/**/*.ts"
 if [ -n "$staged" ]; then
   echo "$staged" | xargs git add
 fi
