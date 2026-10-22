@@ -23,6 +23,8 @@ import {
   parsePidsLimit,
   resolveProviderName,
   sharedStateSource,
+  openSharedStateSource,
+  verifySharedStateSources,
   syncSkillSymlinks,
   toMountSpecs,
   watchGatewayAvailability,
@@ -833,6 +835,48 @@ describe('syncSkillSymlinks', () => {
     syncSkillSymlinks(dir, { ...containerConfig, skills: ['welcome'] } as ContainerConfig);
 
     expect(fs.readdirSync(hostDir).sort()).toEqual(['stale-link']);
+  });
+});
+
+describe('verifySharedStateSources', () => {
+  it('refuses a shared-state source swapped between verification and bind', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-shared-verify-'));
+    try {
+      const sharedDir = path.join(root, 'shared');
+      const secret = path.join(root, 'secret');
+      fs.mkdirSync(path.join(sharedDir, 'memory'), { recursive: true });
+      fs.mkdirSync(secret);
+      fs.writeFileSync(path.join(sharedDir, 'CLAUDE.md'), '# shared');
+      const mountOf = (name: string, kind: 'directory' | 'file') => {
+        const source = openSharedStateSource(sharedDir, name, kind)!;
+        return {
+          hostPath: source.hostPath,
+          containerPath: `/workspace/shared-groups/other/${name}`,
+          readonly: true,
+          mountClass: 'shared-group-state' as const,
+          sourceIdentity: source.identity,
+        };
+      };
+      const memory = mountOf('memory', 'directory');
+      const claude = mountOf('CLAUDE.md', 'file');
+      // Unchanged (and ordinary content edits) keep the container.
+      fs.writeFileSync(path.join(sharedDir, 'CLAUDE.md'), '# edited');
+      expect(() => verifySharedStateSources([memory, claude])).not.toThrow();
+
+      // The race: the real entry is swapped for a symlink after the check.
+      fs.renameSync(path.join(sharedDir, 'memory'), path.join(root, 'memory.real'));
+      fs.symlinkSync(secret, path.join(sharedDir, 'memory'));
+      expect(() => verifySharedStateSources([memory])).toThrow(/changed between verification and bind/);
+
+      // A different real entry at the same path is not the verified one either.
+      // (Created before the unlink so the filesystem cannot reuse the inode.)
+      fs.writeFileSync(path.join(root, 'other.md'), '# other');
+      fs.unlinkSync(path.join(sharedDir, 'CLAUDE.md'));
+      fs.renameSync(path.join(root, 'other.md'), path.join(sharedDir, 'CLAUDE.md'));
+      expect(() => verifySharedStateSources([claude])).toThrow(/changed between verification and bind/);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

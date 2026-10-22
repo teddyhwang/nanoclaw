@@ -28,6 +28,11 @@ export interface VolumeMount {
   mountClass?: import('../drivers/types.js').MountClass;
   /** Agent group this mount is pinned to, for `group-state`. */
   scope?: string;
+  /**
+   * Shared-group state only: the identity of the real entry verified before
+   * the bind, re-checked once the container has started (after the bind).
+   */
+  sourceIdentity?: { dev: number; ino: number; kind: 'directory' | 'file' };
 }
 
 export interface ProviderContainerContext {

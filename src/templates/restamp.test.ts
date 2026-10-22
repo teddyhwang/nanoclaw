@@ -43,7 +43,8 @@ import type { AgentGroup } from '../types.js';
 import { NANOCLAW_EXTENSION_NS } from './extension.js';
 import { MCP_SCHEMA_URL, PLUGIN_SCHEMA_URL } from './manifest.js';
 import { createAgentFromTemplate } from './create-agent.js';
-import { restampAgentFromTemplate, type RestampChange } from './restamp.js';
+import { groupsCarryingPlugin, restampAgentFromTemplate, type RestampChange } from './restamp.js';
+import { _resetEnginePathsForTests, setEnginePaths } from '../engine/paths.js';
 
 const TPL = path.join(TEMPLATES_DIR, 'sales', 'sdr');
 const OCCURRENCE_DB = path.join(TEST_ROOT, 'occurrence.db');
@@ -592,5 +593,31 @@ describe('restampAgentFromTemplate', () => {
     expect(change(result.changes, 'task', 'weekday-briefing').action).toBe('remove');
     expect(fs.existsSync(overlaySkill(g.id, 'widget'))).toBe(false);
     expect(liveTasks(g.id)).toHaveLength(0);
+  });
+});
+
+describe('workspace-aware group folder lookup', () => {
+  it('stamps, finds and restamps the group where the engine groupDirResolver puts it', async () => {
+    const workspaceRoot = path.join(TEST_ROOT, 'workspace-groups');
+    setEnginePaths({ groupDirResolver: (group) => path.join(workspaceRoot, group.folder) });
+    try {
+      const g = await stamp();
+      const groupDir = path.join(workspaceRoot, g.folder);
+      expect(fs.existsSync(path.join(groupDir, 'plugins', 'sdr', 'plugin.json'))).toBe(true);
+      expect(fs.existsSync(path.join(groupDir, PERSONA_PREPEND_FILE))).toBe(true);
+      expect(fs.existsSync(path.join(GROUPS_DIR, g.folder))).toBe(false);
+
+      expect((await groupsCarryingPlugin('sales/sdr')).map((group) => group.id)).toEqual([g.id]);
+
+      writeTemplateV2();
+      const result = await restampAgentFromTemplate('sales/sdr', g.id, { apply: true });
+      expect(change(result.changes, 'context', 'playbook.md').action).toBe('update');
+      expect(fs.readFileSync(path.join(groupDir, 'playbook.md'), 'utf-8')).toBe(
+        fs.readFileSync(path.join(TPL, NANOCLAW_EXTENSION_NS, 'context', 'playbook.md'), 'utf-8'),
+      );
+      expect(fs.existsSync(path.join(GROUPS_DIR, g.folder))).toBe(false);
+    } finally {
+      _resetEnginePathsForTests();
+    }
   });
 });

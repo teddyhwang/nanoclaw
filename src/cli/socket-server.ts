@@ -66,7 +66,17 @@ export async function startCliServer(socketPath: string = DEFAULT_SOCKET_PATH): 
   server = s;
   await new Promise<void>((resolve, reject) => {
     s.once('error', reject);
-    s.listen(socketPath, () => {
+    // Create the socket owner-only from the start: listen() binds the path
+    // synchronously, so a restrictive umask held across just that call leaves
+    // no window where another local user can connect before the chmod below.
+    // The chmod stays as the mandatory backstop.
+    const previousUmask = process.umask(0o177);
+    try {
+      s.listen(socketPath, onListening);
+    } finally {
+      process.umask(previousUmask);
+    }
+    function onListening(): void {
       try {
         fs.chmodSync(socketPath, 0o600);
       } catch (err) {
@@ -77,7 +87,7 @@ export async function startCliServer(socketPath: string = DEFAULT_SOCKET_PATH): 
       }
       log.info('ncl CLI server listening', { socketPath });
       resolve();
-    });
+    }
   });
 }
 

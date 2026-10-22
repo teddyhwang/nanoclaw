@@ -11,6 +11,7 @@ import {
   markCompleted,
   markFailed,
   markScriptSkipped,
+  releaseProcessing,
   type MessageInRow,
 } from './db/messages-in.js';
 import {
@@ -785,6 +786,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         log(
           `Skipping ${keep.length} accumulate-only message(s) after script filter — leaving pending until next trigger`,
         );
+        // They were claimed by markProcessing above; without releasing the
+        // claim they stay 'processing', are excluded from the next poll and
+        // never ride along with the next trigger.
+        releaseProcessing(keep.map((m) => m.id));
         continue;
       }
 
@@ -1987,6 +1992,9 @@ export async function processQuery(
           // The real fire is recorded when the task is re-triggered and
           // runs in its own (now Bug-D-isolated) turn.
           dropUnrunTaskContexts(taskFireContexts, newMessages);
+          // Release the claim taken by markProcessing(newIds) so the rows
+          // really are pending again and ride along with the next trigger.
+          releaseProcessing(keep.map((m) => m.id));
           return;
         }
         // Re-check done — the outer query may have finished while the script
