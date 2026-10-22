@@ -395,6 +395,25 @@ describe('restampAgentFromTemplate', () => {
     expect(fs.existsSync(path.join(outside, 'faq.md'))).toBe(false);
   });
 
+  it('refuses to create plugin-data dirs through a symlinked plugin-data folder', async () => {
+    fs.writeFileSync(
+      path.join(TPL, 'mcp.json'),
+      JSON.stringify({
+        $schema: MCP_SCHEMA_URL,
+        mcpServers: { hubspot: { type: 'stdio', command: 'npx', cwd: '${PLUGIN_DATA}/state' } },
+      }),
+    );
+    const g = await stamp();
+    const groupDir = path.join(GROUPS_DIR, g.folder);
+    const outside = path.join(TEST_ROOT, 'outside-plugin-data');
+    fs.mkdirSync(outside, { recursive: true });
+    fs.rmSync(path.join(groupDir, 'plugin-data', 'sdr'), { recursive: true });
+    fs.symlinkSync(outside, path.join(groupDir, 'plugin-data', 'sdr'));
+
+    await expect(restampAgentFromTemplate('sales/sdr', g.id, { apply: true })).rejects.toThrow(/not a real directory/);
+    expect(fs.readdirSync(outside)).toEqual([]);
+  });
+
   it('refuses to write skills through a symlinked overlay root', async () => {
     const g = await stamp();
     const outside = path.join(TEST_ROOT, 'outside-skills');

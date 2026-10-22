@@ -22,6 +22,7 @@ import {
   parseMemoryMb,
   parsePidsLimit,
   resolveProviderName,
+  sharedStateSource,
   syncSkillSymlinks,
   toMountSpecs,
   watchGatewayAvailability,
@@ -832,5 +833,35 @@ describe('syncSkillSymlinks', () => {
     syncSkillSymlinks(dir, { ...containerConfig, skills: ['welcome'] } as ContainerConfig);
 
     expect(fs.readdirSync(hostDir).sort()).toEqual(['stale-link']);
+  });
+});
+
+describe('sharedStateSource', () => {
+  it('mounts only real shared-group entries, never a planted symlink', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ncl-shared-src-'));
+    try {
+      const sharedDir = path.join(root, 'shared');
+      const secret = path.join(root, 'secret');
+      fs.mkdirSync(sharedDir, { recursive: true });
+      fs.mkdirSync(secret);
+      fs.writeFileSync(path.join(secret, 'id_rsa'), 'private');
+      fs.symlinkSync(secret, path.join(sharedDir, 'memory'));
+      fs.symlinkSync(path.join(secret, 'id_rsa'), path.join(sharedDir, 'CLAUDE.md'));
+      fs.mkdirSync(path.join(sharedDir, 'instructions.prepend.md'));
+
+      expect(sharedStateSource(sharedDir, 'memory', 'directory')).toBeNull();
+      expect(sharedStateSource(sharedDir, 'CLAUDE.md', 'file')).toBeNull();
+      expect(sharedStateSource(sharedDir, 'instructions.prepend.md', 'file')).toBeNull();
+      expect(sharedStateSource(sharedDir, 'absent', 'file')).toBeNull();
+
+      fs.unlinkSync(path.join(sharedDir, 'memory'));
+      fs.mkdirSync(path.join(sharedDir, 'memory'));
+      fs.unlinkSync(path.join(sharedDir, 'CLAUDE.md'));
+      fs.writeFileSync(path.join(sharedDir, 'CLAUDE.md'), '# shared');
+      expect(sharedStateSource(sharedDir, 'memory', 'directory')).toBe(path.join(sharedDir, 'memory'));
+      expect(sharedStateSource(sharedDir, 'CLAUDE.md', 'file')).toBe(path.join(sharedDir, 'CLAUDE.md'));
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });
