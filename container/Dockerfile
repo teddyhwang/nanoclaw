@@ -103,7 +103,16 @@ ENV PATH="$PNPM_HOME:$PATH"
 # bin chmod — the agent then crashes at runtime with "native binary not
 # installed". Keep this in lockstep with package.json's `packageManager`.
 ARG PNPM_VERSION=10.34.5
-RUN corepack enable && corepack prepare pnpm@${PNPM_VERSION} --activate
+# Only the registry fetch is retried (3 tries, 15s/30s backoff): a transient
+# registry.npmjs.org 5xx shouldn't fail an image build. A persistent failure
+# still fails the build after the last try; the version pin is unchanged.
+RUN corepack enable && \
+    for attempt in 1 2 3; do \
+      corepack prepare "pnpm@${PNPM_VERSION}" --activate && exit 0; \
+      echo "corepack prepare pnpm@${PNPM_VERSION} failed (attempt ${attempt}/3)" >&2; \
+      [ "$attempt" -lt 3 ] && sleep $((attempt * 15)); \
+    done; \
+    exit 1
 
 # The npm bundled with node:22-slim (10.9.8) vendors tar <7.5.19, which
 # carries a fixable critical (GHSA-23hp-3jrh-7fpw) that the publish gate
