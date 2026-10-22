@@ -20,7 +20,8 @@ vi.mock('../../config.js', async () => {
 import { AnchoredDir } from '../../anchored-dir.js';
 import { openAnchoredDb } from './anchored-db.js';
 import { SqliteAgentMailbox } from './index.js';
-import { openInboundReadonlyAt } from './session-files.js';
+import { log } from '../../log.js';
+import { openInboundReadonlyAt, upgradeAllSessionLayouts } from './session-files.js';
 import { INBOUND_SCHEMA } from './schema.js';
 
 const KEY = { agentGroupId: 'ag-a', sessionId: 'sess-a' };
@@ -64,7 +65,12 @@ function insert(mailbox: SqliteAgentMailbox, id: string): Promise<void> {
   );
 }
 
+vi.mock('../../log.js', () => ({
+  log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },
+}));
+
 beforeEach(() => {
+  vi.clearAllMocks();
   fs.rmSync(ROOT, { recursive: true, force: true });
   fs.mkdirSync(SESSION, { recursive: true });
   fs.mkdirSync(OUTSIDE, { recursive: true });
@@ -237,6 +243,59 @@ describe('legacy layout migration', () => {
     expect(ids(path.join(MAILBOX, 'inbound.db'))).toEqual(['a']);
     expect(ids(path.join(other, 'mailbox', 'inbound.db'))).toEqual(['b']);
     expect(fs.existsSync(path.join(other, 'inbound.db'))).toBe(false);
+  });
+
+  it('the boot pass skips _- and .-prefixed folders that are not sessions', () => {
+    const index = path.join(ROOT, 'data', 'v2-sessions', '_by-name', 'coworkers');
+    const hidden = path.join(ROOT, 'data', 'v2-sessions', 'ag-a', '.context');
+    const underscored = path.join(ROOT, 'data', 'v2-sessions', 'ag-a', '_scratch');
+    for (const dir of [index, hidden, underscored]) {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'inbound.db'), '');
+      fs.writeFileSync(path.join(dir, 'outbound.db'), '');
+    }
+
+    expect(upgradeAllSessionLayouts(path.join(ROOT, 'data', 'v2-sessions'))).toEqual({ migrated: 0, failed: 0 });
+    for (const dir of [index, hidden, underscored]) {
+      expect(fs.readdirSync(dir).sort()).toEqual(['inbound.db', 'outbound.db']);
+    }
+  });
+
+  it('an empty or tableless legacy inbound.db migrates as zero rows into a complete schema', async () => {
+    fs.writeFileSync(path.join(SESSION, 'inbound.db'), '');
+    const other = path.join(ROOT, 'data', 'v2-sessions', 'ag-a', 'sess-b');
+    fs.mkdirSync(other, { recursive: true });
+    const tableless = new Database(path.join(other, 'inbound.db'));
+    tableless.exec('CREATE TABLE unrelated (a)');
+    tableless.close();
+
+    expect(upgradeAllSessionLayouts(path.join(ROOT, 'data', 'v2-sessions'))).toEqual({ migrated: 2, failed: 0 });
+    for (const dir of [SESSION, other]) {
+      expect(ids(path.join(dir, 'mailbox', 'inbound.db'))).toEqual([]);
+      expect(fs.existsSync(path.join(dir, 'inbound.db'))).toBe(false);
+      expect(fs.existsSync(path.join(dir, 'mailbox', 'inbound.db.migrating'))).toBe(false);
+    }
+    fs.writeFileSync(path.join(SESSION, 'outbound.db'), '');
+    await insert(new SqliteAgentMailbox(), 'first');
+    expect(ids(path.join(MAILBOX, 'inbound.db'))).toEqual(['first']);
+  });
+
+  it('logs a session own migrated file as routine and only a later file as container-made', async () => {
+    writeLegacyInbound(path.join(SESSION, 'inbound.db'), ['a']);
+    const mailbox = new SqliteAgentMailbox();
+    mailbox.prepare(KEY);
+    expect(vi.mocked(log.warn).mock.calls.map((c) => c[0])).not.toContain(
+      'Discarding a container-made inbound.db in a migrated session folder',
+    );
+    expect(vi.mocked(log.info).mock.calls.map((c) => c[0])).toContain(
+      'Removed the pre-migration inbound.db after copying it',
+    );
+
+    writeLegacyInbound(path.join(SESSION, 'inbound.db'), ['forged']);
+    mailbox.prepare(KEY);
+    expect(vi.mocked(log.warn).mock.calls.map((c) => c[0])).toContain(
+      'Discarding a container-made inbound.db in a migrated session folder',
+    );
   });
 
   it('session() migrates a legacy session that was never re-prepared', async () => {
