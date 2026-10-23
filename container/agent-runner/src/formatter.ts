@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { findByRouting } from './destinations.js';
-import { isInheritableReplyTarget } from './reply-target.js';
+import { isHostSyntheticContent, isInheritableReplyTarget } from './reply-target.js';
 import { readLatestTaskFire } from './db/task-fires.js';
 import type { MessageInRow } from './db/messages-in.js';
 import { TIMEZONE, formatLocalTime, formatLocalStamp } from './timezone.js';
@@ -199,6 +199,13 @@ export interface RoutingContext {
   taskFire: boolean;
   /** Every non-echo row that woke this turn is a failure notice. */
   failureNoticeWake?: boolean;
+  /**
+   * Every non-echo row that woke this turn is a host-synthesized system wake
+   * (escalation resume/result, Chats reply, operator nudge: `senderId`
+   * `'system'`). No person wrote anything this turn, so a deliberate
+   * internal-only result is a no-op, not a failed reply. Set only when true.
+   */
+  systemWake?: boolean;
 }
 
 /**
@@ -306,7 +313,16 @@ export function extractRouting(messages: MessageInRow[]): RoutingContext {
     taskFire: messages.some((m) => m.kind === 'task') && messages.every((m) => m.kind === 'task' || isSessionEcho(m)),
     // Accumulated trigger=0 context rides along but did not wake the turn.
     failureNoticeWake: waking.length > 0 && waking.every(isFailureNotice),
+    ...(isSystemWake(waking) ? { systemWake: true } : {}),
   };
+}
+
+/** True when every waking row is a host-synthesized chat wake (no human input). */
+function isSystemWake(waking: MessageInRow[]): boolean {
+  return (
+    waking.length > 0 &&
+    waking.every((m) => (m.kind === 'chat' || m.kind === 'chat-sdk') && isHostSyntheticContent(m.content))
+  );
 }
 
 /**

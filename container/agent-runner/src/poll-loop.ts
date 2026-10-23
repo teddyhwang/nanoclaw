@@ -2896,6 +2896,7 @@ interface MidTurnDeliveryOptions {
 /** Complete internal spans are private scratchpad and never a content door. */
 const INTERNAL_SPAN_RE = /<internal\b[\s\S]*?<\/internal>/gi;
 const EXPLICIT_SILENT_TURN_RE = /<internal\b[^>]*>\s*silent turn\s*<\/internal>/i;
+const NONEMPTY_INTERNAL_SPAN_RE = /<internal\b[^>]*>[\s\S]*?\S[\s\S]*?<\/internal>/i;
 const OPEN_INTERNAL_RE = /<internal\b/i;
 const OPEN_MESSAGE_RE = /<message\b/;
 
@@ -3358,6 +3359,18 @@ export async function dispatchResultText(
   // Delivery normalization strips every private <internal> span first, so the
   // intent marker must be recognized against the original provider result.
   const explicitlySilent = EXPLICIT_SILENT_TURN_RE.test(originalText);
+  // A host system wake (escalation resume/result, Chats reply) carries no
+  // human input. When the model answers it with only a private <internal>
+  // note and no <message> block, that is a deliberate no-op (for example the
+  // origin request was already answered), not a failed reply. Keyed on the
+  // structured turn origin plus the explicit internal-only shape, never on
+  // the note's wording. A truly empty result still gets the fallback.
+  const systemWakeNoOp =
+    routing.systemWake === true &&
+    resultBlocks === 0 &&
+    !scratchpad &&
+    NONEMPTY_INTERNAL_SPAN_RE.test(originalText) &&
+    stripInternalSpansForDelivery(originalText).trim() === '';
   // An informed retry explicitly offers this ending when the original send
   // was the full reply. Do not turn that acknowledgment into a false failure.
   const informedDone =
@@ -3404,8 +3417,12 @@ export async function dispatchResultText(
     // even when the engagement gate marked the inbound as addressed; otherwise
     // a trailing attachment that adds nothing can manufacture a failure after
     // the preceding turn already answered successfully.
-    if (explicitlySilent || informedDone) {
-      log('Explicit silent-turn marker — suppressing degraded fallback');
+    if (explicitlySilent || informedDone || systemWakeNoOp) {
+      log(
+        systemWakeNoOp
+          ? 'System wake answered with an internal-only no-op — suppressing degraded fallback'
+          : 'Explicit silent-turn marker — suppressing degraded fallback',
+      );
       await emitSilentTurnComplete();
       return { sent, hasUnwrapped, dispatched, resultBlocks, dropped };
     }
