@@ -980,6 +980,38 @@ describe('dispatchResultText safety net (local fork patch)', () => {
     expect(out[0].channel_type).toBe(ROUTING.channelType);
   });
 
+  it('treats an internal-only result on a host system wake as a deliberate no-op', async () => {
+    // 2026-10-22 Nicole Telegram DM: an escalation resume and its result wake
+    // (isMention, sender 'system') arrived after the request was already
+    // answered. The agent correctly returned only an <internal> note, but the
+    // addressed safety net sent the user-facing failure fallback twice.
+    insertChannelDestination('boys-night');
+
+    await dispatchResultText(
+      '<internal>Already answered earlier; no new request or user-facing update needed.</internal>',
+      { ...ROUTING, systemWake: true },
+      true, // addressed (system wakes set isMention)
+    );
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].kind).toBe('system');
+    expect(JSON.parse(out[0].content)).toEqual({ action: 'silent_turn_complete' });
+  });
+
+  it('still sends the failure fallback for a truly empty result on a system wake', async () => {
+    insertChannelDestination('boys-night');
+
+    await dispatchResultText('', { ...ROUTING, systemWake: true }, true);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].kind).toBe('chat');
+    expect(JSON.parse(out[0].content).text).toBe(
+      "I couldn't complete that request or produce a reliable reply. Please try again.",
+    );
+  });
+
   it('honors an explicit silent-turn marker on an addressed follow-up', async () => {
     // New York Crew, 2026-09-03: the taco question was answered, then a
     // trailing video arrived as a second addressed push. The provider marked

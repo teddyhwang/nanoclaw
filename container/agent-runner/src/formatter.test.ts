@@ -262,6 +262,32 @@ describe('session echo formatting and safety', () => {
       failureNoticeWake: false,
     });
   });
+
+  it('marks a turn woken only by host system rows as a system wake', () => {
+    insertMessage(
+      'sys-escresume-x',
+      'chat',
+      { sender: 'system', senderId: 'system', text: 'resume', isMention: true, source: 'auto_escalation_resume' },
+      { platformId: 'C123', channelType: 'telegram' },
+    );
+    expect(extractRouting(getPendingMessages()).systemWake).toBe(true);
+  });
+
+  it('does not mark a turn with a human waking row as a system wake', () => {
+    insertMessage(
+      'sys-escresume-x',
+      'chat',
+      { sender: 'system', senderId: 'system', text: 'resume', isMention: true },
+      { platformId: 'C123', channelType: 'telegram' },
+    );
+    insertMessage(
+      'm2',
+      'chat',
+      { sender: 'Nicole', text: 'which one?' },
+      { platformId: 'C123', channelType: 'telegram' },
+    );
+    expect(extractRouting(getPendingMessages()).systemWake).toBeUndefined();
+  });
 });
 
 describe('structured chat links', () => {

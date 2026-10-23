@@ -491,6 +491,43 @@ describe('poll loop integration', () => {
     await loopPromise.catch(() => {});
   });
 
+  it('escalation system wake answered internal-only completes silently without the failure fallback', async () => {
+    // Nicole Telegram DM, 2026-10-22: the request was already answered, so the
+    // resume wake was correctly answered with only a private note.
+    insertMessage(
+      'sys-escresume-autoesc-test',
+      {
+        sender: 'system',
+        senderId: 'system',
+        senderName: 'system',
+        text: '[Auto-escalation follow-up] retry the earlier request',
+        isMention: true,
+        source: 'auto_escalation_resume',
+      },
+      { platformId: 'chan-1', channelType: 'telegram' },
+    );
+
+    const provider = new MockProvider(
+      {},
+      () => '<internal>Already answered earlier; no new request or user-facing update needed.</internal>',
+    );
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
+
+    await waitFor(
+      () =>
+        getUndeliveredMessages().some(
+          (row) => row.kind === 'system' && JSON.parse(row.content).action === 'silent_turn_complete',
+        ),
+      1500,
+    );
+    controller.abort();
+
+    expect(getUndeliveredMessages().filter((row) => row.kind === 'chat')).toHaveLength(0);
+
+    await loopPromise.catch(() => {});
+  });
+
   it.each([
     ['empty-string', ''],
     ['null', null],
