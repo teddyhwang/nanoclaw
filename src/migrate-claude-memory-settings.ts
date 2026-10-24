@@ -5,6 +5,9 @@ import { log } from './log.js';
 import type { ProviderFileDiagnostic, ProviderFileTransformer } from './provider-contracts/registry.js';
 
 const CLAUDE_SETTINGS_FILE = 'settings.json';
+// settings.json is a small JSON document (a few KiB); 1 MiB leaves room for
+// large hook/permission lists while refusing a container-planted giant.
+export const CLAUDE_SETTINGS_MAX_BYTES = 1024 * 1024;
 const PRE_COMPACT_COMMAND = 'bun /app/src/compact-instructions.ts';
 const LEGACY_MEMORY_SESSION_START_COMMAND = 'bun /app/src/memory-hook.ts';
 
@@ -47,7 +50,7 @@ export function prepareClaudeMemorySettings(claudeDir: string): 'created' | 'rec
     if (!dir) throw new Error(`Claude settings directory is missing: '${claudeDir}'`);
     let current: string;
     try {
-      current = dir.readFile(CLAUDE_SETTINGS_FILE).toString('utf-8');
+      current = dir.readFile(CLAUDE_SETTINGS_FILE, { maxBytes: CLAUDE_SETTINGS_MAX_BYTES }).toString('utf-8');
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
       dir.writeNewFile(CLAUDE_SETTINGS_FILE, Buffer.from(CLAUDE_DEFAULT_SETTINGS));

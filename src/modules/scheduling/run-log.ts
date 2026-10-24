@@ -7,6 +7,7 @@
  *   - the `task_log` outbound row a task run's final text produces
  *     (container/agent-runner poll-loop auto-append; delivery.ts routes it here)
  */
+import fs from 'fs';
 import path from 'path';
 
 import { AnchoredDir } from '../../anchored-dir.js';
@@ -46,6 +47,33 @@ export async function appendRunLog(
 }
 
 /** Last `lines` lines of a series' run log, newest last. [] if absent or unsafe. */
+/**
+ * The run log is append-only and grows for the life of the series, so the
+ * tail is read from its last 64 KiB (hundreds of lines) rather than the whole
+ * container-writable file.
+ */
+export const RUN_LOG_TAIL_MAX_BYTES = 64 * 1024;
+
+/** The last `maxBytes` of `name` as text; a line cut at the window start is dropped. */
+function readTail(dir: AnchoredDir, name: string, maxBytes: number): string {
+  const fd = dir.openReadFd(name);
+  try {
+    const start = Math.max(0, fs.fstatSync(fd).size - maxBytes);
+    // Fixed buffer: a file that grows after fstat cannot make this read longer.
+    const buf = Buffer.allocUnsafe(maxBytes);
+    let total = 0;
+    while (total < buf.length) {
+      const n = fs.readSync(fd, buf, total, buf.length - total, start + total);
+      if (n === 0) break;
+      total += n;
+    }
+    const text = buf.subarray(0, total).toString('utf8');
+    return start === 0 ? text : text.slice(text.indexOf('\n') + 1);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 export async function readRunLogTail(agentGroupId: string, series: string, lines = 10): Promise<string[]> {
   if (!/^[a-z0-9-]+$/.test(series)) return [];
   const ag = await getAgentGroup(agentGroupId);
@@ -55,9 +83,9 @@ export async function readRunLogTail(agentGroupId: string, series: string, lines
   try {
     tasks = AnchoredDir.open(resolveGroupDir(ag), ['tasks']);
     if (!tasks) return [];
-    // readFile refuses a symlinked leaf / non-regular file; a symlinked `tasks`
+    // openReadFd refuses a symlinked leaf / non-regular file; a symlinked `tasks`
     // was already refused at open. Either way: no log rather than a host read.
-    const text = tasks.readFile(`${series}.md`).toString('utf8');
+    const text = readTail(tasks, `${series}.md`, RUN_LOG_TAIL_MAX_BYTES);
     return text.trimEnd().split('\n').filter(Boolean).slice(-lines);
   } catch {
     return [];

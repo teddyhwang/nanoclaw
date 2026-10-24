@@ -6,7 +6,7 @@ import { AsyncLocalStorage } from 'async_hooks';
 import fs from 'fs';
 import path from 'path';
 
-import { AnchoredDir } from './anchored-dir.js';
+import { AnchoredDir, AnchoredFileTooLargeError } from './anchored-dir.js';
 import { deriveAttachmentName } from './attachment-naming.js';
 import { isSafeAttachmentName } from './attachment-safety.js';
 import type { OutboundFile } from './channels/adapter.js';
@@ -655,6 +655,14 @@ export function writeOutboundDirect(
 }
 
 /**
+ * Largest single outbox attachment the host loads into memory for delivery.
+ * 100 MiB matches the largest upload any channel accepts (Discord, boosted
+ * servers); a larger file could not be delivered anyway, so it is skipped
+ * with a warning instead of being read.
+ */
+export const OUTBOX_FILE_MAX_BYTES = 100 * 1024 * 1024;
+
+/**
  * Load outbox attachments for a delivered message.
  *
  * Symmetric with `extractAttachmentFiles` on the inbound side: the container
@@ -695,8 +703,17 @@ export function readOutboxFiles(
         continue;
       }
       try {
-        files.push({ filename, data: outbox.readFile(filename) });
+        files.push({ filename, data: outbox.readFile(filename, { maxBytes: OUTBOX_FILE_MAX_BYTES }) });
       } catch (err) {
+        if (err instanceof AnchoredFileTooLargeError) {
+          log.warn('Outbox file over the size limit, not delivered', {
+            messageId,
+            filename,
+            size: err.size,
+            maxBytes: err.maxBytes,
+          });
+          continue;
+        }
         log.warn('Outbox file missing or not a regular file', { messageId, filename, err });
       }
     }

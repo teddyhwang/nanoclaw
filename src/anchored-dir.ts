@@ -28,6 +28,36 @@ function errno(err: unknown): string | undefined {
   return (err as NodeJS.ErrnoException | null)?.code;
 }
 
+/**
+ * Largest file `AnchoredDir.readFile` returns when the caller names no limit.
+ * Every file it reads is container-writable, so the host never lets the file
+ * pick how much memory a read takes.
+ */
+export const DEFAULT_ANCHORED_READ_MAX_BYTES = 8 * 1024 * 1024;
+
+/**
+ * `readFile` refused a file larger than its limit. Nothing of the file is
+ * returned. `size` is what fstat reported at open, or, when the file grew past
+ * the limit during the read, the bytes seen before the read stopped.
+ */
+export class AnchoredFileTooLargeError extends Error {
+  readonly code = 'EFBIG';
+
+  constructor(
+    readonly fileName: string,
+    readonly maxBytes: number,
+    readonly size: number,
+  ) {
+    super(`refusing '${fileName}': larger than the ${maxBytes}-byte read limit`);
+    this.name = 'AnchoredFileTooLargeError';
+  }
+}
+
+export interface AnchoredReadOptions {
+  /** Largest accepted size in bytes; defaults to DEFAULT_ANCHORED_READ_MAX_BYTES. */
+  maxBytes?: number;
+}
+
 export class AnchoredDir {
   private constructor(
     private readonly fd: number,
@@ -114,11 +144,39 @@ export class AnchoredDir {
     return fs.openSync(this.entryPath(name), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o666);
   }
 
-  /** Read the regular file `name`. Throws if it is missing, a symlink, or anything else. */
-  readFile(name: string): Buffer {
+  /**
+   * Read the regular file `name`, at most `maxBytes` of it. Throws if it is
+   * missing, a symlink or anything else, and throws AnchoredFileTooLargeError
+   * (code EFBIG) with no partial result when it is larger than the limit.
+   * The size is checked on the opened descriptor, and the read itself stops
+   * one byte past the limit, so a file that grows after the check is refused
+   * too rather than read without bound.
+   */
+  readFile(name: string, options: AnchoredReadOptions = {}): Buffer {
+    const maxBytes = options.maxBytes ?? DEFAULT_ANCHORED_READ_MAX_BYTES;
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+      throw new RangeError(`readFile maxBytes must be a non-negative integer, got ${maxBytes}`);
+    }
     const fd = this.openReadFd(name);
     try {
-      return fs.readFileSync(fd);
+      const size = fs.fstatSync(fd).size;
+      if (size > maxBytes) throw new AnchoredFileTooLargeError(name, maxBytes, size);
+      // Size the buffer from fstat, but never let the read run past the limit:
+      // one spare byte is enough to tell that the file grew beyond it.
+      let buf = Buffer.allocUnsafe(Math.min(size, maxBytes) + 1);
+      let total = 0;
+      for (;;) {
+        if (total === buf.length) {
+          if (total > maxBytes) throw new AnchoredFileTooLargeError(name, maxBytes, total);
+          const grown = Buffer.allocUnsafe(Math.min(buf.length * 2, maxBytes + 1));
+          buf.copy(grown, 0, 0, total);
+          buf = grown;
+        }
+        const n = fs.readSync(fd, buf, total, buf.length - total, total);
+        if (n === 0) break;
+        total += n;
+      }
+      return buf.subarray(0, total);
     } finally {
       fs.closeSync(fd);
     }
