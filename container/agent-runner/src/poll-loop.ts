@@ -1711,12 +1711,26 @@ export async function processQuery(
           const sameSender: typeof newMessages = [];
           const deferred: string[] = [];
           for (const m of newMessages) {
+            // Only another sender's *trigger* is cross-sender work. Accumulated
+            // trigger=0 rows are unaddressed room context from the same route
+            // (the mailbox already filtered to it); they must ride with the
+            // same-sender trigger. Deferring them by sender hid everyone
+            // else's messages from the turn (Boys Night 2026-10-23: four
+            // people posted bets, the mention saw only Teddy's own). Context
+            // from another route still defers, and context alone never pushes.
             const s = extractMessageSender(m);
-            if (s && s !== activeSender) {
+            const sameRouteContext =
+              m.trigger !== 1 && m.platform_id === routing.platformId && m.channel_type === routing.channelType;
+            if (s && s !== activeSender && !sameRouteContext) {
               deferred.push(m.id);
             } else {
               sameSender.push(m);
             }
+          }
+          if (!sameSender.some((m) => m.trigger === 1)) {
+            // Only context remained: leave it pending for the deferred trigger.
+            for (const m of sameSender) deferred.push(m.id);
+            sameSender.length = 0;
           }
           if (deferred.length > 0) {
             log(`Deferring ${deferred.length} cross-sender follow-up(s) — will re-process after active turn`);
