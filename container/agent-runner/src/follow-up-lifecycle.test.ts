@@ -212,6 +212,54 @@ describe('deferred work must not preempt any unfinished input', () => {
     }
   });
 
+  it("carries other people's unaddressed room context with a same-sender follow-up", async () => {
+    // Boys Night 2026-10-23: Mack/Will/Josh posted bets as ambient rows, then
+    // Teddy mentioned the agent in his warm turn. Their context was deferred
+    // by sender, so the agent saw only Teddy's own bet.
+    const primary = new ControlledProvider();
+    const { done, query } = start(primary);
+    try {
+      result(primary, 'First finished');
+      await waitFor(() => texts().length === 1);
+      chat('mack-856', 'Mack', 0);
+      chat('will-900', 'Will', 0);
+      chat('teddy-937', 'Teddy', 0);
+      chat('lock-these');
+      await waitFor(() => primary.pushes.length === 1);
+      for (const id of ['mack-856', 'will-900', 'teddy-937', 'lock-these']) {
+        expect(primary.pushes[0]).toContain(id);
+      }
+      result(primary, 'Locked');
+      await waitFor(() => texts().includes('Locked'));
+      await waitFor(() => getPendingMessages().length === 0);
+    } finally {
+      query.abort();
+      await done;
+    }
+  });
+
+  it('never pushes context alone when the only trigger is another sender', async () => {
+    const primary = new ControlledProvider();
+    const { done, query } = start(primary);
+    try {
+      result(primary, 'First finished');
+      await waitFor(() => texts().length === 1);
+      chat('teddy-aside', 'Teddy', 0);
+      chat('bob-ask', 'Bob');
+      await waitFor(() => primary.ends === 1);
+      expect(primary.pushes).toHaveLength(0);
+      await done;
+      expect(
+        getPendingMessages()
+          .map((row) => row.id)
+          .sort(),
+      ).toEqual(['bob-ask', 'teddy-aside']);
+    } finally {
+      query.abort();
+      await done;
+    }
+  });
+
   it('protects a wrapping retry from reflection after a warm follow-up', async () => {
     const primary = new ControlledProvider();
     const { done, query } = start(primary);
