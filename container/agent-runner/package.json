@@ -21,11 +21,11 @@
   },
   "overrides": {
     "@hono/node-server": ">=1.19.15 <2",
-    "body-parser": ">=2.3.0 <3",
+    "body-parser": ">=2.4.0 <3",
     "express-rate-limit": ">=8.7.0 <9",
-    "fast-uri": ">=3.1.8 <4",
+    "fast-uri": ">=3.1.9 <4",
     "hono": ">=4.13.12 <5",
-    "ip-address": ">=10.7.2 <11",
+    "ip-address": ">=10.7.4 <11",
     "proxy-addr": ">=2.0.8 <3",
     "qs": ">=6.16.0 <7"
   }
