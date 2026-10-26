@@ -35,6 +35,7 @@
 import { getChannelAdapter, getChannelAdapterExact } from '../../channels/channel-registry.js';
 import { getMessagingGroup, getMessagingGroupByPlatform, createMessagingGroup } from '../../db/messaging-groups.js';
 import { log } from '../../log.js';
+import { logId } from '../../log-id.js';
 import type { MessagingGroup, User } from '../../types.js';
 import { getUser } from './db/users.js';
 import { getUserDm, upsertUserDm } from './db/user-dms.js';
@@ -57,13 +58,13 @@ export async function ensureUserDm(
 ): Promise<MessagingGroup | null> {
   const user = await getUser(userId);
   if (!user) {
-    log.warn('ensureUserDm: user not found', privacySafeLogs ? undefined : { userId });
+    log.warn('ensureUserDm: user not found', privacySafeLogs ? undefined : { userId: logId(userId) });
     return null;
   }
 
   const { channelType, handle } = parseUserId(user);
   if (!channelType || !handle) {
-    log.warn('ensureUserDm: user id not namespaced', privacySafeLogs ? undefined : { userId });
+    log.warn('ensureUserDm: user id not namespaced', privacySafeLogs ? undefined : { userId: logId(userId) });
     return null;
   }
 
@@ -82,7 +83,7 @@ export async function ensureUserDm(
         // Row points to a deleted messaging_group — fall through and re-resolve.
         log.warn(
           'ensureUserDm: cached row references missing messaging_group, re-resolving',
-          privacySafeLogs ? { channelType } : { userId, messagingGroupId: cached.messaging_group_id },
+          privacySafeLogs ? { channelType } : { userId: logId(userId), messagingGroupId: cached.messaging_group_id },
         );
       }
     }
@@ -115,7 +116,7 @@ export async function ensureUserDm(
     await createMessagingGroup(mg);
     log.info(
       'ensureUserDm: created DM messaging_group',
-      privacySafeLogs ? { channelType } : { userId, channelType, messagingGroupId: mgId },
+      privacySafeLogs ? { channelType } : { userId: logId(userId), channelType, messagingGroupId: mgId },
     );
   }
 
@@ -154,7 +155,10 @@ async function resolveDmPlatformId(
   try {
     return await adapter.openDM(handle);
   } catch (err) {
-    log.error('ensureUserDm: adapter.openDM failed', privacySafeLogs ? { channelType } : { channelType, handle, err });
+    log.error(
+      'ensureUserDm: adapter.openDM failed',
+      privacySafeLogs ? { channelType } : { channelType, handle: logId(handle), err },
+    );
     return null;
   }
   /* eslint-enable no-catch-all/no-catch-all */

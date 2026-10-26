@@ -13,6 +13,7 @@
 import { requestWake } from '../../request-wake.js';
 import { deletePendingApproval, transitionPendingApprovalStatus } from '../../db/sessions.js';
 import { log } from '../../log.js';
+import { logId } from '../../log-id.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { PendingApproval, Session } from '../../types.js';
 import { notifyApprovalResolved } from './primitive.js';
@@ -52,7 +53,7 @@ export async function finalizeReject(
   log.info('Approval rejected', {
     approvalId: approval.approval_id,
     action: approval.action,
-    userId,
+    userId: logId(userId),
     withReason: reason !== undefined,
   });
 

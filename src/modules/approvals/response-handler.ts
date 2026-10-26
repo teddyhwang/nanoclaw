@@ -22,6 +22,7 @@ import {
 } from '../../db/sessions.js';
 import type { ResponsePayload } from '../../response-registry.js';
 import { log } from '../../log.js';
+import { logId } from '../../log-id.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { PendingApproval } from '../../types.js';
 import { hasAdminPrivilege, isGlobalAdmin, isOwner } from '../permissions/db/user-roles.js';
@@ -37,7 +38,7 @@ export async function handleApprovalsResponse(payload: ResponsePayload): Promise
     log.warn('Ignoring unauthorized approval response', {
       approvalId: approval.approval_id,
       action: approval.action,
-      userId: payload.userId,
+      userId: logId(payload.userId),
       channelType: payload.channelType,
     });
     return true;
@@ -85,7 +86,7 @@ async function handleRegisteredApproval(
         approvalId: approval.approval_id,
         action: approval.action,
         selectedOption,
-        userId,
+        userId: logId(userId),
       });
       await deletePendingApproval(approval.approval_id);
       await notifyApprovalResolved({ approval, session, outcome: 'reject', userId });
@@ -126,7 +127,7 @@ async function handleRegisteredApproval(
   const payload = JSON.parse(approval.payload);
   try {
     await handler({ session, payload, approval, userId, notify });
-    log.info('Approval handled', { approvalId: approval.approval_id, action: approval.action, userId });
+    log.info('Approval handled', { approvalId: approval.approval_id, action: approval.action, userId: logId(userId) });
   } catch (err) {
     log.error('Approval handler threw', { approvalId: approval.approval_id, action: approval.action, err });
     await notify(

@@ -29,6 +29,7 @@ import {
   markApprovalAwaitingReason,
 } from '../../db/sessions.js';
 import { log } from '../../log.js';
+import { logId } from '../../log-id.js';
 import { registerMessageInterceptor } from '../../router.js';
 import type { PendingApproval, Session } from '../../types.js';
 import { finalizeReject } from './finalize.js';
@@ -96,7 +97,7 @@ export async function armReasonCapture(approval: PendingApproval, session: Sessi
   if (!userId || !channelType || !platformId || !adapter) {
     log.warn('reject-with-reason: cannot reach approver, finalizing plain reject', {
       approvalId: approval.approval_id,
-      userId,
+      userId: logId(userId),
       hasDeliveryAddress: Boolean(channelType && platformId),
       hasAdapter: Boolean(adapter),
     });
@@ -134,7 +135,7 @@ export async function armReasonCapture(approval: PendingApproval, session: Sessi
   // Prompt is out — now hold the row and arm capture. Order matters: a reply
   // can't arrive before the prompt is read, so there's no lost-message window.
   awaitingReason.set(dmKey(channelType, platformId, instance), { approvalId: approval.approval_id, userId, threadId });
-  log.info('reject-with-reason: awaiting reason reply', { approvalId: approval.approval_id, userId });
+  log.info('reject-with-reason: awaiting reason reply', { approvalId: approval.approval_id, userId: logId(userId) });
 }
 
 /**

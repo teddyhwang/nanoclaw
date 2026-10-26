@@ -21,6 +21,7 @@ import { sqliteRaw } from '../../db/drivers/sqlite.js';
 import { createMessagingGroup } from '../../db/messaging-groups.js';
 import { runMigrations } from '../../db/migrations/index.js';
 import { log } from '../../log.js';
+import { logId } from '../../log-id.js';
 import { createUser } from './db/users.js';
 import { upsertUserDm } from './db/user-dms.js';
 import { ensureUserDm } from './user-dm.js';
@@ -71,7 +72,7 @@ afterEach(async () => {
 });
 
 describe('ensureUserDm privacy-safe logging', () => {
-  it('preserves the existing detailed log shape by default', async () => {
+  it('keeps the detailed log shape by default, with the handle hashed', async () => {
     const failure = new Error('default-sdk-error-sentinel');
     registerTestAdapter('legacy-default', async () => {
       throw failure;
@@ -83,9 +84,10 @@ describe('ensureUserDm privacy-safe logging', () => {
 
     expect(log.error).toHaveBeenCalledWith('ensureUserDm: adapter.openDM failed', {
       channelType: 'legacy-default',
-      handle: 'default-handle-sentinel',
+      handle: logId('default-handle-sentinel'),
       err: failure,
     });
+    expect(JSON.stringify(vi.mocked(log.error).mock.calls)).not.toContain('default-handle-sentinel');
   });
 
   it('omits identities, messaging-group ids, and SDK errors when requested', async () => {

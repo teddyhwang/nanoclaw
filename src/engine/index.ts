@@ -8,6 +8,7 @@
  */
 export { createNanoClawHost, type NanoClawHost, type NanoClawHostOptions } from './host.js';
 export type { NanoClawPlugin, PluginContext } from './plugin.js';
+export { setLogIdHasher, logId, type LogIdHasher } from '../log-id.js';
 
 export { engineEvents, type EngineEventBus, type EngineEventMap, type EngineEventName } from './events.js';
 
