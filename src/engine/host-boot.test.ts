@@ -157,6 +157,17 @@ it('observes question cards and terminal edits as readable history, not blank te
     expect(observed).toHaveBeenLastCalledWith(
       expect.objectContaining({ operation: 'edit', text: 'Choose an agent\n\nWhich agent?\n\nDegenerates by Teddy' }),
     );
+    expect(observed.mock.lastCall?.[0]).not.toHaveProperty('plainText');
+    await adapter.deliver(
+      'discord',
+      'discord:@me:room',
+      null,
+      'chat-sdk',
+      JSON.stringify({ text: 'fallback', markdown: '**shown**' }),
+    );
+    expect(observed).toHaveBeenLastCalledWith(
+      expect.objectContaining({ operation: 'send', text: '**shown**', plainText: true }),
+    );
     expect(observed.mock.lastCall?.[0]).not.toHaveProperty('files');
     const files = [{ filename: 'chart.png', data: Buffer.from('png') }];
     await adapter.deliver(
