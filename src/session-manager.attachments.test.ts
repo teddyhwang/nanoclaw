@@ -151,7 +151,12 @@ describe('extractAttachmentFiles — inbox dir swapped after the checks', () => 
   });
 
   it('still saves attachments when nothing interferes', async () => {
-    await writeSessionMessage(AG, SESS, attachmentMessage('plain', ['a.txt', 'b.txt']));
+    const persisted = await writeSessionMessage(AG, SESS, attachmentMessage('plain', ['a.txt', 'b.txt']));
+    // Returned content is exactly the stored row (provenance hashes must match).
+    const rows = await withMailboxSession(AG, SESS, (mailbox) => mailbox.getRecentPendingTriggeringChats('2000-01-01'));
+    expect(rows[0].content).toBe(persisted);
+    expect(persisted).not.toContain('"data"');
+    expect(persisted).toContain('localPath');
 
     const inbox = path.join(sessionDir(AG, SESS), 'inbox', 'plain');
     expect(fs.readFileSync(path.join(inbox, 'a.txt'), 'utf-8')).toBe('bytes-a.txt');

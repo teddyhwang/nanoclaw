@@ -748,7 +748,7 @@ async function deliverToAgent(
   if (wake) content = stampEngagement(content, agent.engage_mode);
 
   const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);
-  await writeSessionMessage(session.agent_group_id, session.id, {
+  const persistedContent = await writeSessionMessage(session.agent_group_id, session.id, {
     id: messageId,
     kind: event.message.kind,
     timestamp: event.message.timestamp,
@@ -770,7 +770,7 @@ async function deliverToAgent(
       agentGroupId: session.agent_group_id,
       messageId,
       kind: 'human',
-      content,
+      content: persistedContent,
       channelType: event.channelType,
       platformId: event.platformId,
       threadId: event.threadId ?? null,

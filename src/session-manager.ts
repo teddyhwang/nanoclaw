@@ -350,7 +350,7 @@ export async function writeSessionMessage(
      */
     onWake?: boolean;
   },
-): Promise<void> {
+): Promise<string> {
   // Documented reset: operators `rm -rf` a session folder to clear a stuck
   // session. The sessions row survives, so the next message takes the
   // existing-session path and lands here with a missing mailbox — the open
@@ -384,6 +384,10 @@ export async function writeSessionMessage(
   // fails transiently is retried within the queue's cadence instead of
   // waiting for the next resync tick. No-op when the sweep isn't running.
   enqueueSessionReconcile(sessionId);
+  // The exact content persisted (attachment `data` replaced by `localPath`).
+  // Trusted callers forward THIS to provenance capture so its hash matches the
+  // stored row; it is the insertion value, not a mailbox reread.
+  return content;
 }
 
 /**

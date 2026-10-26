@@ -23,6 +23,9 @@ import { initChannelAdapters, registerChannelAdapter, teardownChannelAdapters } 
 import { registerSessionCreatedHook, routeInbound, type SessionCreatedEvent } from './router.js';
 import type { ChannelAdapter, ChannelDefaults } from './channels/adapter.js';
 import type { MessagingGroupAgent } from './types.js';
+import { createHash } from 'crypto';
+import { engineEvents, _clearEngineEventsForTests, type EngineEventMap } from './engine/events.js';
+import { withMailboxSession } from './session-manager.js';
 
 // Mock container runner to prevent actual Docker spawning
 vi.mock('./container-runner.js', () => ({
@@ -209,6 +212,46 @@ describe('registerSessionCreatedHook', () => {
     expect(events).toHaveLength(1);
     expect(events[0].sessionMode).toBe('per-thread');
     expect(events[0].threadId).toBe('testchat:C1:333');
+  });
+
+  it('principal.input carries the persisted content for an attachment message (hash matches the stored row)', async () => {
+    await activate();
+    await seedWiring({ sessionMode: 'per-thread' });
+    const seen: EngineEventMap['principal.input'][] = [];
+    engineEvents.on('principal.input', (p) => {
+      seen.push(p);
+    });
+    try {
+      await routeInbound({
+        channelType: 'testchat',
+        platformId: 'testchat:C1',
+        threadId: 'testchat:C1:777',
+        message: {
+          id: 'att-1',
+          kind: 'chat-sdk',
+          content: JSON.stringify({
+            sender: 'Alex',
+            senderId: 'U1',
+            text: 'receipt',
+            attachments: [{ name: 'image0.jpg', data: Buffer.from('jpeg-bytes').toString('base64') }],
+          }),
+          timestamp: now(),
+          isMention: true,
+          isGroup: false,
+        },
+      });
+      expect(seen).toHaveLength(1);
+      const p = seen[0];
+      expect(p.content).not.toContain('"data"');
+      const rows = await withMailboxSession(p.agentGroupId, p.sessionId, (m) =>
+        m.getRecentPendingTriggeringChats('2000-01-01'),
+      );
+      const row = rows.find((r) => r.id === p.messageId)!;
+      const h = (s: string) => createHash('sha256').update(s).digest('hex');
+      expect(h(p.content)).toBe(h(row.content));
+    } finally {
+      _clearEngineEventsForTests();
+    }
   });
 
   it('a throwing hook (sync or async) never breaks routing', async () => {

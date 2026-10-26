@@ -18,7 +18,9 @@ export interface EngineEventMap {
   'session.resolved': { session: Session };
   'session.cleared': { sessionId: string; agentGroupId: string };
   'inbound.routed': { event: InboundEvent; userId: string | null };
-  /** Original arguments from trusted router/schedule insertion, NOT a mailbox reread. */
+  /** Original arguments from trusted router/schedule insertion, NOT a mailbox reread.
+   * `content` is the value the insertion persisted (after attachment extraction),
+   * so a provenance hash of it matches the stored row. */
   'principal.input': {
     sessionId: string;
     agentGroupId: string;
