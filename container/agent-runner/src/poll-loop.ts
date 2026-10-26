@@ -289,7 +289,31 @@ export function selectInitialBatch(messages: MessageInRow[]): {
     }
   }
 
+  // 4. Operator-note isolation (Optimus) — a Dashboard Chats operator note
+  //    (`chief-nudge:` row) has its own protected principal, the note's
+  //    issuer; a routed user message has the user's. One turn has exactly one
+  //    principal, so a mixed batch made the host refuse it and the turn ran
+  //    with no user. Run whichever arrived first; the rest stays pending for
+  //    its own turn. The host's protected queue accepts the same split.
+  const batchTriggers = batch.filter((m) => m.trigger === 1);
+  const notes = batchTriggers.filter(isOperatorNoteRow);
+  if (notes.length > 0 && notes.length < batchTriggers.length) {
+    const noteFirst = isOperatorNoteRow(batchTriggers[0]);
+    const kept = batch.filter((m) => isOperatorNoteRow(m) === noteFirst);
+    logs.push(
+      `Operator note and routed input co-arrived: running the ${noteFirst ? 'operator note(s)' : 'routed input'} first, ` +
+        `deferring ${batch.length - kept.length} row(s) — left pending for their own turn`,
+    );
+    batch = kept;
+  }
+
   return { batch, logs };
+}
+
+/** Optimus Dashboard Chats operator note row (host bridge `chief-nudge:<id>`). */
+export const OPERATOR_NOTE_ID_PREFIX = 'chief-nudge:';
+function isOperatorNoteRow(m: MessageInRow): boolean {
+  return m.kind === 'chat' && m.id.startsWith(OPERATOR_NOTE_ID_PREFIX);
 }
 
 /**

@@ -24,6 +24,22 @@ function row(id: string, kind: MessageInRow['kind'], opts: { trigger?: 0 | 1; se
 }
 
 describe('selectInitialBatch', () => {
+  it('runs a co-arriving operator note and user message in separate turns (first arrival first)', () => {
+    const user = row('u1:ag-1', 'chat-sdk');
+    const note = row('chief-nudge:appr-1', 'chat');
+    const ambient = row('a1', 'chat-sdk', { trigger: 0 });
+    const userFirst = selectInitialBatch([user, note, ambient]);
+    expect(userFirst.batch.map((m) => m.id)).toEqual(['u1:ag-1', 'a1']);
+    expect(userFirst.logs.join('\n')).toContain('deferring 1 row(s)');
+    const noteFirst = selectInitialBatch([note, user, ambient]);
+    expect(noteFirst.batch.map((m) => m.id)).toEqual(['chief-nudge:appr-1']);
+    // Notes alone, or users alone, are unchanged.
+    expect(selectInitialBatch([note]).logs).toEqual([]);
+    expect(selectInitialBatch([user, ambient]).batch).toEqual([user, ambient]);
+    // Only a trigger note splits; a same-id prefix on another kind does not.
+    expect(selectInitialBatch([user, row('chief-nudge:x', 'chat-sdk')]).logs).toEqual([]);
+  });
+
   it('passes through a chat-only batch unchanged (no isolation triggered)', () => {
     const m = [row('c1', 'chat-sdk'), row('c2', 'chat')];
     const { batch, logs } = selectInitialBatch(m);
