@@ -15,6 +15,7 @@
  */
 import { emitEngineEvent } from '../engine/events.js';
 import { log } from '../log.js';
+import { logId } from '../log-id.js';
 import {
   getMessagingGroupAgents,
   getMessagingGroupByPlatform,
@@ -33,8 +34,8 @@ export async function handleChatMigrated(
     if (!mg) {
       log.warn('onChatMigrated: no messaging group for old platform id (already rewritten or never wired)', {
         channelType,
-        oldPlatformId,
-        newPlatformId,
+        oldPlatformId: logId(oldPlatformId),
+        newPlatformId: logId(newPlatformId),
       });
       return;
     }
@@ -43,8 +44,8 @@ export async function handleChatMigrated(
     log.info('Rewrote messaging_groups.platform_id', {
       messagingGroupId: mg.id,
       channelType,
-      oldPlatformId,
-      newPlatformId,
+      oldPlatformId: logId(oldPlatformId),
+      newPlatformId: logId(newPlatformId),
     });
     // writeSessionRouting reads from the now-updated messaging_groups row,
     // so it picks up the new platform_id automatically.
@@ -79,8 +80,8 @@ export async function handleChatMigrated(
   } catch (err) {
     log.error('onChatMigrated failed', {
       channelType,
-      oldPlatformId,
-      newPlatformId,
+      oldPlatformId: logId(oldPlatformId),
+      newPlatformId: logId(newPlatformId),
       err,
     });
   }

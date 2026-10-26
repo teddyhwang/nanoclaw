@@ -31,6 +31,7 @@ import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, st
 import { startHostSweep, stopHostSweep } from '../host-sweep.js';
 import { routeInbound } from '../router.js';
 import { log } from '../log.js';
+import { logId } from '../log-id.js';
 import { getAgentMailbox } from '../mailbox/index.js';
 import {
   initChannelAdapters,
@@ -146,11 +147,12 @@ export async function _bootForHost(opts: { managedSignals: boolean }): Promise<v
           });
       },
       onMetadata(platformId, name, isGroup) {
+        // Hashed id only — never the raw platform id (JIDs embed phone
+        // numbers) and never the name beside it.
         log.info('Channel metadata discovered', {
           channelType: adapter.channelType,
           instance: adapter.instance ?? adapter.channelType,
-          platformId,
-          name,
+          chat: logId(platformId),
           isGroup,
         });
         emitEngineEvent('channel.metadata', {

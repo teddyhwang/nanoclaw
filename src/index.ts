@@ -26,6 +26,7 @@ import { getGatewayProvider } from './gateway-providers/index.js';
 import { routeInbound } from './router.js';
 import { emitEngineEvent } from './engine/events.js';
 import { log } from './log.js';
+import { logId } from './log-id.js';
 import { enforceUpgradeTripwire } from './upgrade-state.js';
 
 // Response registry lives in response-registry.ts to break the
@@ -145,10 +146,10 @@ async function main(): Promise<void> {
           });
       },
       onMetadata(platformId, name, isGroup) {
+        // Hashed id only — never the raw platform id or the name beside it.
         log.info('Channel metadata discovered', {
           channelType: adapter.channelType,
-          platformId,
-          name,
+          chat: logId(platformId),
           isGroup,
         });
         emitEngineEvent('channel.metadata', {

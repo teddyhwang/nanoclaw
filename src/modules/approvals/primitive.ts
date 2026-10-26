@@ -27,6 +27,7 @@ import { createPendingApproval, deletePendingApproval, getSession } from '../../
 import { getDeliveryAdapter } from '../../delivery.js';
 import { requestWake } from '../../request-wake.js';
 import { log } from '../../log.js';
+import { logId } from '../../log-id.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { MessagingGroup, PendingApproval, Session } from '../../types.js';
 import { getAdminsOfAgentGroup, getGlobalAdmins, getOwners } from '../permissions/db/user-roles.js';
@@ -317,7 +318,7 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
     return;
   }
 
-  log.info('Approval requested', { action, approvalId, agentName, approver: target.userId });
+  log.info('Approval requested', { action, approvalId, agentName, approver: logId(target.userId) });
 }
 
 export interface RequestConfirmationOptions {

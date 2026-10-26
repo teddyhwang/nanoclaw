@@ -17,6 +17,7 @@ import { setEnginePaths, getEnginePaths, type EnginePathOverrides } from './path
 import { applyPlugins, createPluginContext, type NanoClawPlugin, type PluginContext } from './plugin.js';
 import { engineEvents, type EngineEventBus } from './events.js';
 import { getReadDal, type ReadDal } from './db-extensions.js';
+import { setLogIdHasher, type LogIdHasher } from '../log-id.js';
 
 export interface NanoClawHostOptions {
   /** Path overrides. Missing fields fall back to standalone defaults. */
@@ -33,6 +34,12 @@ export interface NanoClawHostOptions {
    * process owns signal handling (Optimus host).
    */
   managedSignals?: boolean;
+  /**
+   * Hasher for log-safe identifiers (platform ids, user ids, handles). Lets
+   * the host key engine log ids the same as its own privacy-safe logs.
+   * Default: HMAC under a per-process random key.
+   */
+  logIdHasher?: LogIdHasher;
 }
 
 export interface NanoClawHost {
@@ -70,6 +77,7 @@ export interface NanoClawHost {
  */
 export async function createNanoClawHost(options: NanoClawHostOptions = {}): Promise<NanoClawHost> {
   if (options.paths) setEnginePaths(options.paths);
+  if (options.logIdHasher) setLogIdHasher(options.logIdHasher);
 
   const ctx: PluginContext = createPluginContext();
 

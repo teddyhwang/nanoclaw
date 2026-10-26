@@ -24,6 +24,7 @@ import {
   type ReactionEvent,
 } from 'chat';
 import { log } from '../log.js';
+import { logId } from '../log-id.js';
 import { emitEngineEvent } from '../engine/events.js';
 import { SqliteStateAdapter } from '../state-sqlite.js';
 import { registerWebhookAdapter } from '../webhook-server.js';
@@ -236,10 +237,10 @@ function dispatchAgentDmOpened(event: AgentDmOpenedEvent): void {
   if (!agentDmOpenedHandler) return;
   try {
     Promise.resolve(agentDmOpenedHandler(event)).catch((err) =>
-      log.warn('Agent-DM opened handler failed', { channelId: event.channelId, err }),
+      log.warn('Agent-DM opened handler failed', { channelId: logId(event.channelId), err }),
     );
   } catch (err) {
-    log.warn('Agent-DM opened handler threw', { channelId: event.channelId, err });
+    log.warn('Agent-DM opened handler threw', { channelId: logId(event.channelId), err });
   }
 }
 
@@ -433,16 +434,16 @@ function dispatchMembership(event: MembershipEvent): void {
     Promise.resolve(handler(event)).catch((err) =>
       log.error('Membership handler failed', {
         channelType: event.channelType,
-        channelId: event.channelId,
-        userId: event.userId,
+        channelId: logId(event.channelId),
+        userId: logId(event.userId),
         err,
       }),
     );
   } catch (err) {
     log.error('Membership handler threw', {
       channelType: event.channelType,
-      channelId: event.channelId,
-      userId: event.userId,
+      channelId: logId(event.channelId),
+      userId: logId(event.userId),
       err,
     });
   }
@@ -1280,16 +1281,16 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         if (newPlatformId === oldPlatformId) return true;
         log.info('Chat platform-id migration detected', {
           channelType: adapter.name,
-          oldPlatformId,
-          newPlatformId,
+          oldPlatformId: logId(oldPlatformId),
+          newPlatformId: logId(newPlatformId),
         });
         try {
           await setupConfig.onChatMigrated?.(adapter.name, oldPlatformId, newPlatformId);
         } catch (err) {
           log.error('onChatMigrated handler threw', {
             channelType: adapter.name,
-            oldPlatformId,
-            newPlatformId,
+            oldPlatformId: logId(oldPlatformId),
+            newPlatformId: logId(newPlatformId),
             err,
           });
         }
@@ -1334,9 +1335,10 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         const channelId = adapter.channelIdFromThreadId(thread.id);
         log.info('Inbound DM received', {
           adapter: adapter.name,
-          channelId,
-          sender: (message.author as any)?.fullName ?? (message.author as any)?.userId ?? 'unknown',
-          threadId: thread.id,
+          channelId: logId(channelId),
+          // Hashed user id only: display names and raw ids stay out of the log.
+          sender: logId((message.author as any)?.userId) ?? 'unknown',
+          threadId: logId(thread.id),
         });
         const inbound = await messageToInbound(message, true, false);
         // Agent-mode app context: DM-only by platform design.
@@ -1899,7 +1901,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       } catch (err) {
         log.warn('recoverMissedMessages threw', {
           adapter: adapter.name,
-          platformId,
+          platformId: logId(platformId),
           err: err instanceof Error ? err.message : String(err),
         });
         return { recoveredCount, earliestTimestamp };

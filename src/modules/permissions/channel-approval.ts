@@ -53,6 +53,7 @@ import { getDeliveryAdapter } from '../../delivery.js';
 import { groupFolderExistsOnDisk } from '../../group-folder.js';
 import { initGroupFilesystem } from '../../group-init.js';
 import { log } from '../../log.js';
+import { logId } from '../../log-id.js';
 import type { InboundEvent, ResolvedConversation } from '../../channels/adapter.js';
 import type { AgentGroup, MessagingGroup } from '../../types.js';
 import { pickApprovalDelivery, pickApprover } from '../approvals/primitive.js';
@@ -384,7 +385,7 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
     log.info('Channel registration card delivered', {
       messagingGroupId,
       agentGroupCount: agentGroups.length,
-      approver: delivery.userId,
+      approver: logId(delivery.userId),
     });
   } catch (err) {
     log.error('Channel registration card delivery failed', { messagingGroupId, err });

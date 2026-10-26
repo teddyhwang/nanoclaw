@@ -18,6 +18,7 @@ import { wakeContainer } from '../../container-runner.js';
 import { getSession } from '../../db/sessions.js';
 import { emitEngineEvent } from '../../engine/events.js';
 import { log } from '../../log.js';
+import { logId } from '../../log-id.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { Session } from '../../types.js';
 import {
@@ -64,7 +65,7 @@ export async function handleScheduleTask(content: Record<string, unknown>, sessi
   } finally {
     db.close();
   }
-  log.info('Scheduled task created', { taskId, processAfter, recurrence, createdByUserId });
+  log.info('Scheduled task created', { taskId, processAfter, recurrence, createdByUserId: logId(createdByUserId) });
   // Notify plugins. seriesId equals taskId on schedule (the series id is
   // the original task id and is stable across recurrence occurrences).
   // Host-side owner tracking listens here to persist

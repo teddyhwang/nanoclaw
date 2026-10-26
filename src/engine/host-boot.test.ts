@@ -175,3 +175,33 @@ it('observes question cards and terminal edits as readable history, not blank te
     await _shutdownForHost('test');
   }
 });
+
+it('logs channel metadata with a hashed id only — no raw JID, no group name', async () => {
+  const { _bootForHost } = await import('./host-boot.js');
+  const { setLogIdHasher } = await import('../log-id.js');
+  const { engineEvents } = await import('./events.js');
+  await _bootForHost({ managedSignals: false });
+  const jid = '120363012345678901@g.us';
+  setLogIdHasher((raw) => (raw === jid ? 'abcdef0123' : 'other'));
+  const writes: string[] = [];
+  const spy = vi.spyOn(process.stdout, 'write').mockImplementation((chunk: string | Uint8Array) => {
+    writes.push(String(chunk));
+    return true;
+  });
+  const emitted = vi.fn();
+  const off = engineEvents.on('channel.metadata', emitted);
+  try {
+    setups[0].onMetadata(jid, 'Secret Family Group', true);
+  } finally {
+    spy.mockRestore();
+    off();
+    setLogIdHasher(undefined);
+  }
+  const line = writes.find((w) => w.includes('Channel metadata discovered'));
+  expect(line).toBeDefined();
+  expect(line).toContain('abcdef0123');
+  expect(line).not.toContain('120363012345678901');
+  expect(line).not.toContain('Secret Family Group');
+  // The engine event still carries the raw id for host inventory.
+  expect(emitted).toHaveBeenCalledWith(expect.objectContaining({ platformId: jid, name: 'Secret Family Group' }));
+});
