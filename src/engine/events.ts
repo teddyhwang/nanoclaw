@@ -196,6 +196,13 @@ export interface EngineEventMap {
     messageId: string;
     operation: 'send' | 'edit' | 'delete';
     text: string | null;
+    /**
+     * Set on a `send` the Chat SDK bridge posts through its plain-text path,
+     * the only one that splits text over the adapter's `maxTextLength`; the
+     * returned `messageId` is then the head chunk's. Absent for cards,
+     * questions and edits, which are posted whole.
+     */
+    plainText?: boolean;
     ts: string;
     /**
      * Attachments delivered with a `send` (the in-memory outbox buffers).
