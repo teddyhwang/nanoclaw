@@ -34,11 +34,11 @@ ARG BUN_VERSION=1.4.0
 # SIGTERM instead of being orphaned by the shell entrypoint.
 #
 # APT_REFRESH is a cache key, not a pin: bump it to force a fresh apt layer
-# when Debian ships security updates (chromium, expat, ca-certificates).
+# when Debian ships security updates (chromium, expat, ca-certificates, openssl).
 # Otherwise BuildKit reuses the cached layer and the image keeps the old
 # packages indefinitely. `apt-get upgrade` also lifts packages the base
 # image already ships (e.g. libexpat1), which `install` alone leaves as-is.
-ARG APT_REFRESH=2026-10-24
+ARG APT_REFRESH=2026-10-26
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     echo "apt refresh: ${APT_REFRESH}" && \
