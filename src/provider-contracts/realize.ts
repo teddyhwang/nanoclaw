@@ -20,6 +20,10 @@ import {
   type ProviderStateVolume,
 } from './registry.js';
 
+// Reconciled provider files are settings documents (JSON/TOML, a few KiB); the
+// volume is container-writable, so an oversized one is refused, not read.
+export const PROVIDER_SETTINGS_MAX_BYTES = 1024 * 1024;
+
 /**
  * The host file a contract's project document is rendered from. Every
  * contract renders from core's canonical instruction template; a contract
@@ -218,7 +222,9 @@ function initializeFile(
     const transformerProvider = file.reconcile.transformerProvider ?? provider;
     const transformer = providerFileTransformer(file.reconcile.transformer);
     try {
-      const result = transformer.transform(dir.readFile(name).toString('utf-8'), filePath);
+      // An oversized file throws EFBIG and is reported through mapIoFailure.
+      const current = dir.readFile(name, { maxBytes: PROVIDER_SETTINGS_MAX_BYTES }).toString('utf-8');
+      const result = transformer.transform(current, filePath);
       emitDiagnostics(result.diagnostics);
       if (result.kind === 'replace') {
         dir.replaceFile(name, result.content);

@@ -13,7 +13,7 @@ vi.mock('./config.js', async () => {
   return { ...actual, DATA_DIR: '/tmp/nanoclaw-test-outbox-root' };
 });
 
-import { clearOutbox, readOutboxFiles, sessionDir } from './session-manager.js';
+import { OUTBOX_FILE_MAX_BYTES, clearOutbox, readOutboxFiles, sessionDir } from './session-manager.js';
 
 const TEST_DIR = '/tmp/nanoclaw-test-outbox-root';
 const AG = 'ag-outbox';
@@ -39,6 +39,26 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
   fs.rmSync(TEST_DIR, { recursive: true, force: true });
+});
+
+describe('outbox file size limit', () => {
+  it('delivers files up to the limit and skips one over it without reading it', () => {
+    const msgDir = path.join(outboxRoot(), 'msg-big');
+    fs.mkdirSync(msgDir);
+    fs.writeFileSync(path.join(msgDir, 'small.txt'), 'ok');
+    // Sparse files: only the reported size matters.
+    fs.writeFileSync(path.join(msgDir, 'at-limit.bin'), '');
+    fs.truncateSync(path.join(msgDir, 'at-limit.bin'), OUTBOX_FILE_MAX_BYTES);
+    fs.writeFileSync(path.join(msgDir, 'huge.bin'), '');
+    fs.truncateSync(path.join(msgDir, 'huge.bin'), OUTBOX_FILE_MAX_BYTES + 1);
+
+    const files = readOutboxFiles(AG, SESS, 'msg-big', ['small.txt', 'huge.bin', 'at-limit.bin']);
+
+    expect(files?.map((f) => [f.filename, f.data.length])).toEqual([
+      ['small.txt', 2],
+      ['at-limit.bin', OUTBOX_FILE_MAX_BYTES],
+    ]);
+  });
 });
 
 describe('outbox root replaced by a symlink', () => {

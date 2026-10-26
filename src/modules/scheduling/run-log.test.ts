@@ -29,7 +29,7 @@ vi.mock('../../timezone.js', async (importOriginal) => ({
   formatLocalStamp: vi.fn(() => 'TS'),
 }));
 
-import { appendRunLog, deleteRunLog, readRunLogTail } from './run-log.js';
+import { RUN_LOG_TAIL_MAX_BYTES, appendRunLog, deleteRunLog, readRunLogTail } from './run-log.js';
 
 const GROUP_DIR = path.join(TEST_ROOT, 'groups', 'ws', 'grp');
 
@@ -55,6 +55,23 @@ describe('run log happy path', () => {
 
     await deleteRunLog('ag', 'daily-digest');
     expect(fs.existsSync(file)).toBe(false);
+  });
+});
+
+describe('run log tail is bounded', () => {
+  it('reads only the last window of a large log, dropping the cut line', async () => {
+    fs.mkdirSync(path.join(GROUP_DIR, 'tasks'), { recursive: true });
+    const lines = Array.from({ length: 5000 }, (_, i) => `TS — run ${String(i).padStart(4, '0')} ${'x'.repeat(40)}`);
+    fs.writeFileSync(path.join(GROUP_DIR, 'tasks', 'big.md'), lines.join('\n') + '\n');
+    expect(fs.statSync(path.join(GROUP_DIR, 'tasks', 'big.md')).size).toBeGreaterThan(RUN_LOG_TAIL_MAX_BYTES);
+
+    const readSync = vi.spyOn(fs, 'readSync');
+    expect(await readRunLogTail('ag', 'big', 3)).toEqual(lines.slice(-3));
+    const window = await readRunLogTail('ag', 'big', 10_000);
+    expect(window.length).toBeLessThan(lines.length);
+    expect(window).toEqual(lines.slice(-window.length));
+    const requested = readSync.mock.calls.reduce((sum, call) => sum + ((call as unknown[])[3] as number), 0);
+    expect(requested).toBeLessThanOrEqual(2 * RUN_LOG_TAIL_MAX_BYTES);
   });
 });
 

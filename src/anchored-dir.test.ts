@@ -4,7 +4,12 @@ import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { AnchoredDir, copyRegularFile } from './anchored-dir.js';
+import {
+  AnchoredDir,
+  AnchoredFileTooLargeError,
+  DEFAULT_ANCHORED_READ_MAX_BYTES,
+  copyRegularFile,
+} from './anchored-dir.js';
 
 let root: string;
 let outside: string;
@@ -15,6 +20,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   fs.rmSync(root, { recursive: true, force: true });
   fs.rmSync(outside, { recursive: true, force: true });
 });
@@ -55,6 +61,106 @@ describe('AnchoredDir.open', () => {
     } finally {
       dir.close();
     }
+  });
+});
+
+describe('AnchoredDir.readFile size limit', () => {
+  function withFile(bytes: number | Buffer, run: (dir: AnchoredDir) => void): void {
+    const file = path.join(root, 'f.bin');
+    if (typeof bytes === 'number') {
+      // Sparse: the size is what matters, not the content.
+      fs.writeFileSync(file, '');
+      fs.truncateSync(file, bytes);
+    } else {
+      fs.writeFileSync(file, bytes);
+    }
+    const dir = openOrThrow([]);
+    try {
+      run(dir);
+    } finally {
+      dir.close();
+    }
+  }
+
+  it('reads a file under the limit in full', () => {
+    withFile(Buffer.from('hello'), (dir) => {
+      expect(dir.readFile('f.bin', { maxBytes: 6 }).toString()).toBe('hello');
+    });
+  });
+
+  it('reads a file exactly at the limit, including an empty file at zero', () => {
+    withFile(Buffer.from('hello'), (dir) => {
+      expect(dir.readFile('f.bin', { maxBytes: 5 }).toString()).toBe('hello');
+    });
+    withFile(Buffer.alloc(0), (dir) => {
+      expect(dir.readFile('f.bin', { maxBytes: 0 }).length).toBe(0);
+    });
+  });
+
+  it('refuses a file over the limit with a typed EFBIG error and reads nothing', () => {
+    withFile(Buffer.from('hello!'), (dir) => {
+      const readSync = vi.spyOn(fs, 'readSync');
+      expect(() => dir.readFile('f.bin', { maxBytes: 5 })).toThrow(AnchoredFileTooLargeError);
+      expect(() => dir.readFile('f.bin', { maxBytes: 5 })).toThrow(
+        expect.objectContaining({ code: 'EFBIG', fileName: 'f.bin', maxBytes: 5, size: 6 }),
+      );
+      // Checked on the opened descriptor before any byte is read.
+      expect(readSync).not.toHaveBeenCalled();
+    });
+  });
+
+  it('applies the default limit when the caller names none, and a per-caller override', () => {
+    withFile(DEFAULT_ANCHORED_READ_MAX_BYTES + 1, (dir) => {
+      expect(() => dir.readFile('f.bin')).toThrow(AnchoredFileTooLargeError);
+      expect(dir.readFile('f.bin', { maxBytes: DEFAULT_ANCHORED_READ_MAX_BYTES + 1 }).length).toBe(
+        DEFAULT_ANCHORED_READ_MAX_BYTES + 1,
+      );
+    });
+    withFile(Buffer.from('0123456789'), (dir) => {
+      expect(dir.readFile('f.bin').toString()).toBe('0123456789');
+      expect(() => dir.readFile('f.bin', { maxBytes: 4 })).toThrow(/larger than the 4-byte read limit/);
+    });
+  });
+
+  it('rejects an invalid limit', () => {
+    withFile(Buffer.from('x'), (dir) => {
+      for (const maxBytes of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+        expect(() => dir.readFile('f.bin', { maxBytes })).toThrow(RangeError);
+      }
+    });
+  });
+
+  it('stops at the limit when the file grows past it after the size check', () => {
+    withFile(Buffer.from('small'), (dir) => {
+      const realRead = fs.readSync;
+      let grown = false;
+      const readSync = vi.spyOn(fs, 'readSync').mockImplementation(((...args: Parameters<typeof fs.readSync>) => {
+        if (!grown) {
+          grown = true;
+          fs.appendFileSync(path.join(root, 'f.bin'), Buffer.alloc(10_000, 1));
+        }
+        return realRead(...args);
+      }) as never);
+      expect(() => dir.readFile('f.bin', { maxBytes: 100 })).toThrow(AnchoredFileTooLargeError);
+      // Never more than limit + 1 bytes requested in total.
+      const requested = readSync.mock.calls.reduce((sum, call) => sum + ((call as unknown[])[3] as number), 0);
+      expect(requested).toBeLessThanOrEqual(101);
+    });
+  });
+
+  it('reads a file that grows after the size check but stays within the limit', () => {
+    withFile(Buffer.from('ab'), (dir) => {
+      const realRead = fs.readSync;
+      let grown = false;
+      vi.spyOn(fs, 'readSync').mockImplementation(((...args: Parameters<typeof fs.readSync>) => {
+        if (!grown) {
+          grown = true;
+          fs.appendFileSync(path.join(root, 'f.bin'), 'cdefgh');
+        }
+        return realRead(...args);
+      }) as never);
+      expect(dir.readFile('f.bin', { maxBytes: 8 }).toString()).toBe('abcdefgh');
+    });
   });
 });
 
