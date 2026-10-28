@@ -155,6 +155,8 @@ export interface InboundMailbox {
   /** The id names a host-synthesized/non-platform inbound row (never a native reply target). */
   isSyntheticInboundMessage(messageId: string): boolean;
   getMostRecentPeerSourceSessionId(peerAgentGroupId: string): string | null;
+  /** True once another agent has messaged this session, answered or not. */
+  hasMessagesFromOtherAgents(selfAgentGroupId: string): boolean;
   insertTask(task: Task): Promise<void>;
   hasLiveTaskOccurrence(seriesId: string): boolean;
   materializeTaskOccurrence(occurrence: TaskOccurrenceWrite): Promise<void>;
@@ -226,6 +228,8 @@ export interface OutboundMailbox {
   writeDirect(message: DirectOutboundMessage): Promise<void>;
   getOutboundHistory(limit: number): MailboxHistoryMessage[];
   getTopLevelOutbound(limit: number): MailboxTimelineMessage[];
+  /** True once this session has messaged another agent, which routes its replies back here. */
+  hasMessagesToOtherAgents(selfAgentGroupId: string): boolean;
 }
 
 export interface MailboxSession extends InboundMailbox, OutboundMailbox {}

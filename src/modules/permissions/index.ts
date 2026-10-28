@@ -63,7 +63,6 @@ import {
 import {
   claimPendingNameInput,
   claimPendingNameInputWithReply,
-  deletePendingNameInput,
   getPendingNameInput,
   isNameInputExpired,
   setPendingNameInput,
@@ -614,14 +613,15 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
       });
       return true;
     }
-    await setPendingNameInput({
+    const prompt = {
       approver_user_id: row.approver_user_id,
       messaging_group_id: row.messaging_group_id,
       dm_channel_type: approverDm.channel_type,
       dm_platform_id: approverDm.platform_id,
       dm_instance: approverDm.instance ?? approverDm.channel_type,
       created_at: new Date().toISOString(),
-    });
+    };
+    await setPendingNameInput(prompt);
 
     try {
       await adapter.deliver(
@@ -642,7 +642,9 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         messagingGroupId: row.messaging_group_id,
         err,
       });
-      await deletePendingNameInput(row.approver_user_id);
+      // A newer prompt (a refused name's re-arm, or another channel's) may have replaced this one;
+      // claim deletes only this exact row.
+      await claimPendingNameInput(prompt);
     }
     return true;
   }
@@ -782,7 +784,43 @@ addMessageInterceptor(async (event: InboundEvent): Promise<boolean> => {
     return true;
   }
 
-  const ag = await createNewAgentGroup(text);
+  const created = await createNewAgentGroup(text);
+  if (typeof created === 'string') {
+    const adapter = getDeliveryAdapter();
+    if (!adapter) return true;
+    // Nothing was written; re-arm so the approver's next reply is the name, unless they opened
+    // another channel's prompt meanwhile. A fresh created_at, so only this re-arm's failure can drop it.
+    const rearmed = (await getPendingNameInput(userId))
+      ? undefined
+      : { ...prompt, created_at: new Date().toISOString() };
+    if (rearmed) await setPendingNameInput(rearmed);
+    try {
+      await adapter.deliver(
+        event.channelType,
+        event.platformId,
+        null,
+        'chat-sdk',
+        JSON.stringify({
+          text: `⚠️ Cannot create agent "${text}": ${created}. Nothing was created.${rearmed ? ' Reply with another name:' : ''}`,
+        }),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        event.instance,
+      );
+    } catch (err) {
+      log.error('Channel registration: name re-prompt delivery failed', {
+        messagingGroupId: row.messaging_group_id,
+        err,
+      });
+      // A newer prompt may have replaced ours while this was in flight; claim deletes only ours.
+      if (rearmed) await claimPendingNameInput(rearmed);
+    }
+    return true;
+  }
+  const ag = created;
   log.info('Channel registration: new agent group created', {
     messagingGroupId: row.messaging_group_id,
     agentGroupId: ag.id,

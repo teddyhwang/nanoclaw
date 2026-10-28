@@ -1,4 +1,5 @@
 import type {
+  DeliveryRecord,
   DestinationRecord,
   InboundRecord,
   OutboundRecord,
@@ -100,6 +101,11 @@ export interface MailboxOperations {
   hasChatMessageTextSince(cursor: string, text: string): boolean;
   hasChatMessageToDestinationSince(cursor: string, destination: { channelType: string; platformId: string }): boolean;
   hasIdenticalSend(platformId: string, channelType: string, text: string): boolean;
+  /**
+   * The host's delivery outcome for an outbound message, null until it has one.
+   * Optional: without it, a question whose card fails to post waits out its timeout.
+   */
+  getDeliveryStatus?(messageOutId: string): DeliveryRecord['status'] | null;
   getState(key: string): StateValue | undefined;
   setState(key: string, value: string): void;
   deleteState(key: string): void;

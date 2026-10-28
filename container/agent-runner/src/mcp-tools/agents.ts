@@ -47,6 +47,11 @@ export const createAgent: McpToolDefinition = {
           type: 'string',
           description: 'CLAUDE.md content for the new agent (personality, role, instructions)',
         },
+        template: {
+          type: 'string',
+          description:
+            'Optional template ref the user chose (e.g. "sales/sdr"), from `ncl templates list`. The template supplies the persona; `instructions` is ignored.',
+        },
       },
       required: ['name'],
     },
@@ -64,6 +69,7 @@ export const createAgent: McpToolDefinition = {
         requestId,
         name,
         instructions: (args.instructions as string) || null,
+        ...(typeof args.template === 'string' && args.template ? { template: args.template } : {}),
       }),
     });
 

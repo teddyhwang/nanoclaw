@@ -173,3 +173,8 @@ export function outboundDbNow(): string {
 export function hasIdenticalSend(platformId: string, channelType: string, text: string): boolean {
   return getAgentMailbox().operations.hasIdenticalSend(platformId, channelType, text);
 }
+
+/** Null until the host delivers the message or gives up on it, and on mailboxes that do not report it. */
+export function getDeliveryStatus(messageOutId: string): 'delivered' | 'failed' | null {
+  return getAgentMailbox().operations.getDeliveryStatus?.(messageOutId) ?? null;
+}

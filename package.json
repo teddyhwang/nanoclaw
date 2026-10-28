@@ -1,6 +1,6 @@
 {
   "name": "nanoclaw",
-  "version": "2026.10.0",
+  "version": "2026.10.1-rc.2",
   "description": "Personal AI assistant. Lightweight, secure, customizable.",
   "type": "module",
   "packageManager": "pnpm@10.34.5",
@@ -57,7 +57,7 @@
     "@google/genai": "^1.52.0",
     "@onecli-sh/sdk": "2.2.1",
     "better-sqlite3": "13.0.3",
-    "chat": "4.34.0",
+    "chat": "4.41.1",
     "cron-parser": "5.5.0",
     "kleur": "^4.1.5",
     "openai": "^6.36.0",

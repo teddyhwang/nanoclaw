@@ -8,10 +8,11 @@ import { closeSessionDb, getInboundDb, initTestSessionDb } from './mailbox/sqlit
 import { FAILED_TURN_KEY, type FailedTurnRecord } from './failed-turn-notice.js';
 import { runPollLoop } from './poll-loop.js';
 import type { AgentProvider, ProviderEvent, ProviderExchange } from './providers/types.js';
+import { GENERIC_FAILURE_NOTICE } from './formatter.js';
 
 const CONTRACT = { textDelivery: 'mid-turn-complete', commands: { formatting: 'xml' } } as const;
 const DIAGNOSTIC = 'Private native provider diagnostic';
-const NOTICE = "Sorry, I hit a problem and couldn't finish that. Please send it again.";
+const NOTICE = GENERIC_FAILURE_NOTICE;
 
 function insertMessage(id: string, threadId: string, kind = 'chat', text = id): void {
   getInboundDb()

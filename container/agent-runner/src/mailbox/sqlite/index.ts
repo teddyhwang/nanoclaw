@@ -15,6 +15,7 @@ import {
   sqliteFindCliResponse,
   sqliteFindQuestionResponse,
   sqliteGetAllDestinations,
+  sqliteGetDeliveryStatus,
   sqliteGetLatestInboundRoute,
   sqliteGetMessageIn,
   sqliteGetMessageIdBySeq,
@@ -237,6 +238,10 @@ export class SqliteAgentMailbox implements AgentMailbox {
 
   hasIdenticalSend(platformId: string, channelType: string, text: string): boolean {
     return sqliteHasIdenticalSend(platformId, channelType, text);
+  }
+
+  getDeliveryStatus(messageOutId: string) {
+    return sqliteGetDeliveryStatus(messageOutId);
   }
 
   getState(key: string) {

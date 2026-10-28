@@ -1,3 +1,4 @@
+import net from 'net';
 import path from 'path';
 
 import { getEnginePaths } from './engine/paths.js';
@@ -19,6 +20,7 @@ const envConfig = readEnvFile([
   'NANOCLAW_EGRESS_LOCKDOWN',
   'NANOCLAW_EGRESS_NETWORK',
   'WEBHOOK_PORT',
+  'WEBHOOK_HOST',
   'NANOCLAW_ABSOLUTE_CEILING_MS',
   'NANOCLAW_CLAIM_STUCK_MS',
 ]);
@@ -77,9 +79,9 @@ export const STORE_DIR = _paths.storeDir;
 export const GROUPS_DIR = _paths.groupsDir;
 export const DATA_DIR = _paths.dataDir;
 export const CENTRAL_DB_PATH = path.join(DATA_DIR, 'v2.db');
-// Local agent-template library. Committed but ships empty (+ README). Resolved
-// once at load. Override to another LOCAL path via NANOCLAW_TEMPLATES_DIR; never
-// a remote URL, never an ncl flag, never runtime-mutable.
+// Local agent-template library: ships with only a README; setup and create_agent
+// copy library templates in (gitignored). Resolved once at load. Override to
+// another LOCAL path via NANOCLAW_TEMPLATES_DIR; never a remote URL or an ncl flag.
 export const TEMPLATES_DIR = process.env.NANOCLAW_TEMPLATES_DIR
   ? path.resolve(process.env.NANOCLAW_TEMPLATES_DIR)
   : path.resolve(PROJECT_ROOT, 'templates');
@@ -147,6 +149,19 @@ export function getWebhookPort(): number {
     throw new Error(`Invalid WEBHOOK_PORT ${JSON.stringify(raw)}: expected an integer from 1 to 65535`);
   }
   return port;
+}
+
+// Loopback by default: platforms reach the port through a tunnel or reverse
+// proxy on this machine, so other hosts on the network never see it. Set an
+// IP address (0.0.0.0 for every interface) when the proxy runs elsewhere.
+export function getWebhookHost(): string {
+  const host = process.env.WEBHOOK_HOST || envConfig.WEBHOOK_HOST || '127.0.0.1';
+  if (!net.isIP(host) || host.includes('%')) {
+    throw new Error(
+      `Invalid WEBHOOK_HOST ${JSON.stringify(host)}: expected an IP address such as 127.0.0.1 or 0.0.0.0`,
+    );
+  }
+  return host;
 }
 
 // Timezone for scheduled tasks, message formatting, etc.

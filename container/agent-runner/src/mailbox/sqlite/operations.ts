@@ -1,4 +1,6 @@
-import { getOutboundDb, openInboundDb, withInboundDb } from './connection.js';
+import type { Database } from 'bun:sqlite';
+
+import { getOutboundDb, withInboundDb } from './connection.js';
 import { isInheritableReplyTarget, isPlatformReplyTarget } from '../../reply-target.js';
 import type { MessageInRow } from '../../db/messages-in.js';
 import type { MessageOutRow } from '../../db/messages-out.js';
@@ -34,7 +36,7 @@ export function sqliteTimestamp(value: string): string {
   return Number.isFinite(milliseconds) ? new Date(milliseconds).toISOString() : value;
 }
 
-function hasOnWakeColumn(db: ReturnType<typeof openInboundDb>): boolean {
+function hasOnWakeColumn(db: Database): boolean {
   if (hasOnWake !== null) return hasOnWake;
   const columns = db.prepare("PRAGMA table_info('messages_in')").all() as Array<{ name: string }>;
   hasOnWake = columns.some(({ name }) => name === 'on_wake');
@@ -368,6 +370,17 @@ export function sqliteGetReplyTargetMessageIdBySeq(sequence: number): string | n
         .get(outboundRow.id) as { platform_message_id: string | null } | undefined,
   );
   return delivered?.platform_message_id ?? null;
+}
+
+export function sqliteGetDeliveryStatus(messageOutId: string): 'delivered' | 'failed' | null {
+  const row = withInboundDb(
+    (inbound) =>
+      inbound.prepare('SELECT status FROM delivered WHERE message_out_id = ?').get(messageOutId) as
+        | { status: string }
+        | undefined,
+  );
+  if (!row) return null;
+  return row.status === 'failed' ? 'failed' : 'delivered';
 }
 
 export function sqliteGetRoutingBySeq(

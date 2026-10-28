@@ -979,12 +979,16 @@ async function deliverMessage(
     log.debug('Failed to resolve per-session assistant brand', { err, sessionId: session.id });
   }
 
+  // Agent-asked questions keep their own markup; host-built cards never come
+  // through here, so only they get a channel's card-text escape.
+  const deliveredContent =
+    content.type === 'ask_question' ? JSON.stringify({ ...content, fromAgent: true }) : msg.content;
   const platformMsgId = await deliveryAdapter.deliver(
     msg.channelType,
     msg.platformId,
     msg.threadId,
     msg.kind,
-    msg.content,
+    deliveredContent,
     files,
     msg.inReplyTo,
     assistantName,

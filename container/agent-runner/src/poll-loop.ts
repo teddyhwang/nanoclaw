@@ -74,6 +74,7 @@ import {
   extractImageAttachments,
   categorizeMessage,
   FAILURE_NOTICE_FIELD,
+  GENERIC_FAILURE_NOTICE,
   isClearCommand,
   isRunnerCommand,
   isSessionEcho,
@@ -103,8 +104,9 @@ import type { ProviderRuntimeContract } from './provider-contracts/registry.js';
  * Written for the person in the chat, not the operator: diagnostics stay in
  * the runner log and exchange archive. The next same-chat turn also gets a
  * one-shot reminder of the unfinished request (failed-turn-notice.ts).
+ * The text lives in formatter.ts so the host's setup/chat copies stay in sync.
  */
-export const FAILED_RUN_USER_TEXT = "Sorry, I hit a problem and couldn't finish that. Please send it again.";
+export const FAILED_RUN_USER_TEXT = GENERIC_FAILURE_NOTICE;
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
@@ -1055,7 +1057,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         }
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
-        log(`Query error: ${errMsg}`);
+        log(`Query error: ${err instanceof Error ? (err.stack ?? err.message) : errMsg}`);
 
         // A retryable provider failure with no result (processQuery's
         // `retryable provider error, no result:` throw) must NOT be marked
