@@ -23,7 +23,7 @@ import Database from 'better-sqlite3';
 import { AnchoredDir } from '../../anchored-dir.js';
 import { log } from '../../log.js';
 import type { MailboxSessionKey } from '../types.js';
-import { assertPlainSchema, createEmptyDbFile, openAnchoredDb } from './anchored-db.js';
+import { createEmptyDbFile, openAnchoredDb, UnsafeSessionDbError } from './anchored-db.js';
 import { INBOUND_DB, MAILBOX_DIR, OUTBOUND_DB, sessionMailboxDir } from './paths.js';
 import { INBOUND_SCHEMA, OUTBOUND_SCHEMA } from './schema.js';
 import { isRegular, layoutOf, type SessionLayout } from './session-readers.js';
@@ -108,37 +108,33 @@ export function migrateSessionLayout(key: MailboxSessionKey): void {
         sessionId: key.sessionId,
       });
     } else {
-      const mailboxForPath = openMailbox(key);
-      const target = mailboxForPath.pathOf(MIGRATING);
+      // The copy gets the host's own schema; only the rows (columns the host
+      // schema knows) come from the container-writable legacy file, read
+      // through the guarded opener. Its schema is never copied: it becomes
+      // the trusted, unguarded inbound.db.
+      const mailboxDir = openMailbox(key);
       try {
-        // Read-write so SQLite can roll back a hot journal before copying.
-        const source = openAnchoredDb(openSession(key)!, INBOUND_DB, 'readwrite');
-        try {
-          source.pragma('busy_timeout = 5000');
-          source.exec(`VACUUM INTO '${target.replaceAll("'", "''")}'`);
-        } finally {
-          source.close();
-        }
+        createEmptyDbFile(mailboxDir, MIGRATING);
       } finally {
-        mailboxForPath.close();
+        mailboxDir.close();
       }
-      // The copy is host-owned (inside mailbox/), but VACUUM INTO copied the
-      // legacy file's container-written schema: refuse a view, trigger or
-      // virtual table before it becomes the trusted inbound.db.
       const copy = openAnchoredDb(openMailbox(key), MIGRATING, 'readwrite', { schema: 'host' });
       let rows = 0;
       try {
-        assertPlainSchema(copy, INBOUND_DB);
         copy.pragma('journal_mode = DELETE');
-        // An empty (0-byte) or tableless legacy file has no rows: give the copy
-        // the schema so the new inbound.db is complete, and count zero.
-        const hasMessages = copy
-          .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages_in'")
-          .get();
-        if (hasMessages) {
-          rows = (copy.prepare('SELECT COUNT(*) AS n FROM messages_in').get() as { n: number }).n;
-        } else {
-          copy.exec(INBOUND_SCHEMA);
+        copy.exec(INBOUND_SCHEMA);
+        try {
+          rows = copyLegacyRows(key, copy);
+        } catch (err) {
+          if (!(err instanceof UnsafeSessionDbError)) throw err;
+          // A container-made schema: the rows are not the host's to trust.
+          log.warn('Legacy inbound.db has an unsafe schema; starting an empty mailbox', {
+            agentGroupId: key.agentGroupId,
+            sessionId: key.sessionId,
+            err: err.message,
+          });
+          for (const t of tablesOf(copy)) copy.prepare(`DELETE FROM ${quoteName(t)}`).run();
+          rows = 0;
         }
       } finally {
         copy.close();
@@ -191,6 +187,58 @@ export function upgradeAllSessionLayouts(sessionsRoot: string): { migrated: numb
     }
   }
   return { migrated, failed };
+}
+
+function quoteName(name: string): string {
+  return `"${name.replaceAll('"', '""')}"`;
+}
+
+function tablesOf(db: Database.Database): string[] {
+  return (
+    db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all() as Array<{
+      name: string;
+    }>
+  ).map((r) => r.name);
+}
+
+/**
+ * Copy the legacy inbound.db's rows into `copy` (host schema already
+ * applied), table by table, for the columns both share. Read-write so
+ * SQLite can roll back a hot journal first. Returns the messages_in count.
+ */
+function copyLegacyRows(key: MailboxSessionKey, copy: Database.Database): number {
+  const source = openAnchoredDb(openSession(key)!, INBOUND_DB, 'readwrite');
+  try {
+    source.pragma('busy_timeout = 5000');
+    const present = new Set(tablesOf(source));
+    const move = copy.transaction(() => {
+      for (const table of tablesOf(copy)) {
+        if (!present.has(table)) continue;
+        const theirs = new Set(
+          (source.prepare('SELECT name FROM pragma_table_info(?)').all(table) as Array<{ name: string }>).map(
+            (c) => c.name,
+          ),
+        );
+        const cols = (copy.prepare('SELECT name FROM pragma_table_info(?)').all(table) as Array<{ name: string }>)
+          .map((c) => c.name)
+          .filter((c) => theirs.has(c));
+        if (!cols.length) continue;
+        const list = cols.map(quoteName).join(', ');
+        const insert = copy.prepare(
+          `INSERT OR IGNORE INTO ${quoteName(table)} (${list}) VALUES (${cols.map(() => '?').join(', ')})`,
+        );
+        for (const row of source
+          .prepare(`SELECT ${list} FROM ${quoteName(table)}`)
+          .raw()
+          .iterate())
+          insert.run(...(row as unknown[]));
+      }
+    });
+    move();
+  } finally {
+    source.close();
+  }
+  return (copy.prepare('SELECT COUNT(*) AS n FROM messages_in').get() as { n: number }).n;
 }
 
 function ensureDb(dir: AnchoredDir, name: string, schema: 'inbound' | 'outbound'): void {

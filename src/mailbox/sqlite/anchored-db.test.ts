@@ -46,6 +46,47 @@ describe('FIFO watchdog', () => {
     expect(() => open('outbound.db')).toThrow(UnsafeSessionDbError);
   });
 
+  it('a FIFO planted at -journal (read-only, read-write) does not hang the first read', () => {
+    for (const mode of ['readonly', 'readwrite'] as const) {
+      seed('outbound.db', "CREATE TABLE IF NOT EXISTS t (v); DELETE FROM t; INSERT INTO t VALUES ('x')");
+      const journal = path.join(root, 'outbound.db-journal');
+      fs.rmSync(journal, { force: true });
+      execFileSync('mkfifo', [journal]);
+      const started = Date.now();
+      const db = open('outbound.db', mode);
+      try {
+        // Released: SQLite reads nothing from it (an I/O error at worst).
+        db.prepare('SELECT v FROM t').all();
+      } catch (err) {
+        expect(String(err)).toMatch(/disk I\/O error/);
+      } finally {
+        db.close();
+      }
+      expect(Date.now() - started).toBeLessThan(10_000);
+      fs.rmSync(journal);
+    }
+  });
+
+  it('a read-only (0444) FIFO planted at -wal of a WAL database does not hang', () => {
+    seed('outbound.db', "PRAGMA journal_mode = WAL; CREATE TABLE t (v); INSERT INTO t VALUES ('x')");
+    for (const side of ['-wal', '-shm']) fs.rmSync(path.join(root, `outbound.db${side}`), { force: true });
+    execFileSync('mkfifo', ['-m', '0444', path.join(root, 'outbound.db-wal')]);
+    const started = Date.now();
+    try {
+      const db = open('outbound.db');
+      try {
+        db.prepare('SELECT v FROM t').all();
+      } catch {
+        /* an error is fine; a hang is not */
+      } finally {
+        db.close();
+      }
+    } catch {
+      /* refusing at open is fine too */
+    }
+    expect(Date.now() - started).toBeLessThan(10_000);
+  });
+
   it('never opens a regular file for writing', () => {
     seed('outbound.db', 'CREATE TABLE t (v)');
     const before = fs.statSync(path.join(root, 'outbound.db')).mtimeMs;
@@ -113,10 +154,50 @@ describe('container-authored schema', () => {
     db.close();
   });
 
-  it('refuses a virtual table', () => {
+  it('refuses a virtual table, even with its CREATE rewritten', () => {
     seed('outbound.db', 'CREATE VIRTUAL TABLE t USING fts5(v)');
-    const db = open('outbound.db');
-    expect(() => db.prepare("SELECT name FROM sqlite_master WHERE name = 't'").get()).toThrow(/schema has a table/);
+    let db = open('outbound.db');
+    expect(() => db.prepare('SELECT 1').get()).toThrow(/non-plain table/);
+    db.close();
+    const raw = new Database(path.join(root, 'outbound.db'));
+    raw.unsafeMode(true);
+    raw.pragma('writable_schema = ON');
+    raw
+      .prepare(
+        "UPDATE sqlite_master SET sql = replace(sql, 'CREATE VIRTUAL', 'CREATE' || char(10) || 'VIRTUAL') WHERE name = 't'",
+      )
+      .run();
+    raw.close();
+    db = open('outbound.db');
+    expect(() => db.prepare('SELECT * FROM t').all()).toThrow(UnsafeSessionDbError);
+    db.close();
+  });
+
+  it.each([
+    ['a generated column', 'CREATE TABLE t (a, b AS (length(hex(zeroblob(1000)))))'],
+    ['an expression default', "CREATE TABLE t (a, b DEFAULT (strftime('%s','now')))"],
+    ['a CHECK', 'CREATE TABLE t (a CHECK (length(a) < 10))'],
+    ['an expression index', 'CREATE TABLE t (a); CREATE INDEX i ON t (lower(a))'],
+    ['a partial index', 'CREATE TABLE t (a); CREATE INDEX i ON t (a) WHERE a > 0'],
+  ])('refuses %s', (_label, sql) => {
+    seed('outbound.db', sql);
+    const db = open('outbound.db', 'readwrite');
+    expect(() => db.prepare('SELECT * FROM t').all()).toThrow(UnsafeSessionDbError);
+    expect(() => db.prepare('INSERT INTO t (a) VALUES (1)').run()).toThrow(UnsafeSessionDbError);
+    db.close();
+  });
+
+  it('allows the host and runner schemas (literal defaults, single-row CHECK, column indexes)', () => {
+    seed(
+      'outbound.db',
+      `CREATE TABLE s (id INTEGER PRIMARY KEY CHECK (id = 1), v TEXT NOT NULL DEFAULT '[]', n INTEGER DEFAULT 0, f REAL DEFAULT -1.5, x DEFAULT NULL);
+       CREATE TABLE u (a TEXT UNIQUE, b); CREATE INDEX u_b ON u (b, a);`,
+    );
+    const db = open('outbound.db', 'readwrite');
+    db.prepare('INSERT INTO s (id) VALUES (1)').run();
+    expect(db.prepare('SELECT v, n FROM s').get()).toEqual({ v: '[]', n: 0 });
+    // RETURNING writes take the write lock up front.
+    expect(db.prepare("INSERT INTO u VALUES ('k', 1) RETURNING a").get()).toEqual({ a: 'k' });
     db.close();
   });
 
