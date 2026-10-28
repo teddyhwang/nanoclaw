@@ -143,6 +143,13 @@ export {
 // the engine uses for normal outbound. Read-only — plugins can't replace
 // the adapter, only call deliver/setTyping on it.
 export { getDeliveryAdapter, type ChannelDeliveryAdapter } from '../delivery.js';
+
+// Mid-turn stop for host plugins: drop a session's queued outbound
+// (suppressor), wait out an in-flight send and drain once (settle), and end
+// the session's runtime (killContainer: graceful stop, then SIGKILL after the
+// stop grace).
+export { registerOutboundSuppressor, settleSessionDelivery, type OutboundSuppressor } from '../delivery.js';
+export { killContainer, isContainerRunning } from '../container-runner.js';
 export {
   ChannelUnavailableError,
   isChannelUnavailableError,

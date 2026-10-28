@@ -13,6 +13,7 @@
 import {
   getRunningSessions,
   getActiveSessions,
+  getSession,
   createPendingQuestion,
   isTaskThread,
   TASKS_SYSTEM_THREAD_ID,
@@ -182,8 +183,64 @@ async function clearAttemptRow(messageId: string): Promise<void> {
  *
  * Skipping (vs. queueing) is correct: any message left over when the
  * second caller skips will be picked up on the next poll tick (~1s).
+ * The value is the running drain, so `settleSessionDelivery` can wait for
+ * an in-flight send to finish instead of racing it.
  */
-const inflightDeliveries = new Set<string>();
+const inflightDeliveries = new Map<string, Promise<void>>();
+
+/**
+ * Outbound suppressor. Called for every due row before it is sent; a
+ * non-null string drops the row: it is marked failed mailbox-side (so it is
+ * never retried or sent later) without the agent-facing failure feedback a
+ * real delivery failure produces. A host uses this to cancel the rest of a
+ * turn the user asked it to stop. Suppressors must not throw; a throw is
+ * logged and treated as "not suppressed" so a broken hook can never wedge
+ * delivery.
+ */
+export type OutboundSuppressor = (msg: OutboundMessage, session: Session) => string | null;
+
+const outboundSuppressors: OutboundSuppressor[] = [];
+
+export function registerOutboundSuppressor(fn: OutboundSuppressor): () => void {
+  outboundSuppressors.push(fn);
+  return () => {
+    const i = outboundSuppressors.indexOf(fn);
+    if (i >= 0) outboundSuppressors.splice(i, 1);
+  };
+}
+
+function suppressionReason(msg: OutboundMessage, session: Session): string | null {
+  for (const suppress of outboundSuppressors) {
+    try {
+      const reason = suppress(msg, session);
+      if (reason) return reason;
+      // eslint-disable-next-line no-catch-all/no-catch-all -- a broken host hook must never wedge delivery
+    } catch (err) {
+      log.warn('Outbound suppressor threw — ignoring', { messageId: msg.id, sessionId: session.id, err });
+    }
+  }
+  return null;
+}
+
+/**
+ * Wait for any in-flight drain of this session's outbound queue (a send
+ * already handed to the channel cannot be recalled, so it is allowed to
+ * finish), then run one full drain pass so suppressors see every queued
+ * row now. Resolves once both have finished. No-op for an unknown session.
+ */
+export async function settleSessionDelivery(sessionId: string): Promise<void> {
+  const running = inflightDeliveries.get(sessionId);
+  if (running) await running.catch(() => undefined);
+  const session = await getSession(sessionId);
+  if (!session) return;
+  await deliverSessionMessages(session).catch((err) =>
+    log.warn('settleSessionDelivery drain failed', { sessionId, err }),
+  );
+  // A poll may have started a drain between the wait and our call (ours then
+  // skipped). That drain read the queue after this call began; wait for it.
+  const raced = inflightDeliveries.get(sessionId);
+  if (raced) await raced.catch(() => undefined);
+}
 
 export interface ChannelDeliveryAdapter {
   deliver(
@@ -329,13 +386,11 @@ export async function deliverSessionMessages(session: Session): Promise<void> {
   // Reject re-entry from a concurrent poll on the same session — see the
   // comment on inflightDeliveries above.
   if (inflightDeliveries.has(session.id)) return;
-  inflightDeliveries.add(session.id);
-
-  try {
-    await drainSession(session);
-  } finally {
+  const run = drainSession(session).finally(() => {
     inflightDeliveries.delete(session.id);
-  }
+  });
+  inflightDeliveries.set(session.id, run);
+  await run;
 }
 
 async function drainSession(session: Session): Promise<void> {
@@ -396,6 +451,11 @@ async function drainSession(session: Session): Promise<void> {
   const blockedDestinations = new Set<string>();
 
   for (const msg of pending) {
+    const suppressed = outboundSuppressors.length > 0 ? suppressionReason(msg, session) : null;
+    if (suppressed) {
+      await dropSuppressed(agentGroup.id, session, msg, suppressed);
+      continue;
+    }
     const destination = destinationKey(msg);
     const attemptRow = attemptRows.get(msg.id);
     if (destination !== null && blockedDestinations.has(destination)) {
@@ -491,6 +551,33 @@ async function drainSession(session: Session): Promise<void> {
         });
       }
     }
+  }
+}
+
+/** A suppressed row is closed as failed (never sent, never retried), quietly. */
+async function dropSuppressed(
+  agentGroupId: string,
+  session: Session,
+  msg: OutboundMessage,
+  reason: string,
+): Promise<void> {
+  try {
+    const marked = await withExistingMailboxSession(agentGroupId, session.id, (mailbox) => {
+      mailbox.markDeliveryFailed(msg.id);
+      return true;
+    });
+    if (marked === undefined) throw new Error(`mailbox disappeared before dropping ${msg.id}`);
+    await clearAttemptRow(msg.id);
+    log.info('Outbound suppressed — not delivered', {
+      messageId: msg.id,
+      sessionId: session.id,
+      kind: msg.kind,
+      reason,
+    });
+    // eslint-disable-next-line no-catch-all/no-catch-all -- the row stays due; the next poll re-applies the suppressor
+  } catch (err) {
+    // Left due: the next poll consults the suppressor again before any send.
+    log.error('Failed to drop suppressed outbound', { messageId: msg.id, sessionId: session.id, err });
   }
 }
 
