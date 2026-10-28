@@ -143,7 +143,9 @@ describe('CursorProvider through the real poll-loop', () => {
 
       expect(sent).toHaveLength(2);
       expect(sent[1]).toContain('was not delivered');
-      const out = getUndeliveredMessages();
+      // Optimus also writes a silent_turn_complete system row (typing-indicator
+      // control) for the suppressed first result; only chat rows reach the user.
+      const out = getUndeliveredMessages().filter((row) => row.kind === 'chat');
       expect(out).toHaveLength(1);
       expect(JSON.parse(out[0]!.content).text).toBe('WRAP_OK');
     } finally {
