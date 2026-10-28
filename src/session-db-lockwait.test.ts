@@ -34,10 +34,16 @@ import { updateSession } from './db/sessions.js';
 import { inboundDbPath, outboundDbPath } from './mailbox/sqlite/paths.js';
 import {
   _carryForwardRecentPendingChatRowsForTesting,
+  completeInboundDurably,
   resolveSession,
+  settlePendingCompletions,
   writeSessionMessage,
   writeSessionRouting,
 } from './session-manager.js';
+import { getPendingCompletions } from './db/pending-completions.js';
+import { reconcileSession } from './reconcile-session.js';
+import { wakeContainer } from './container-runner.js';
+import { createDestination, deleteDestination } from './modules/agent-to-agent/db/agent-destinations.js';
 import { writeDestinations } from './modules/agent-to-agent/write-destinations.js';
 import {
   deliverSessionMessages,
@@ -199,4 +205,116 @@ describe('writes that wait out a brief runner lock', () => {
     await deliverSessionMessages(session);
     expect(calls).toBe(1);
   });
+});
+
+async function pendingChat(sessionId: string, id: string): Promise<void> {
+  await writeSessionMessage('ag-1', sessionId, {
+    id,
+    kind: 'chat',
+    timestamp: now(),
+    platformId: 'chan-1',
+    channelType: 'discord',
+    content: '{"text":"hi"}',
+    trigger: true,
+  });
+}
+
+describe('serialized projections (no stale overwrite)', () => {
+  it('a slow retried destination write never lands after a newer one', async () => {
+    const session = await seed();
+    await createAgentGroup({ id: 'ag-peer', name: 'Old peer', folder: 'p', agent_provider: null, created_at: now() });
+    await createAgentGroup({ id: 'ag-new', name: 'New peer', folder: 'n', agent_provider: null, created_at: now() });
+    await createDestination({
+      agent_group_id: 'ag-1',
+      local_name: 'peer',
+      target_type: 'agent',
+      target_id: 'ag-peer',
+      created_at: now(),
+    });
+    // A runner lock outlives both writers' first attempts. A starts first
+    // (computes "Old peer"), the destination changes, B starts later.
+    const lock = holdInbound(session.id, 330);
+    const a = writeDestinations('ag-1', session.id);
+    await new Promise((r) => setTimeout(r, 200));
+    await deleteDestination('ag-1', 'peer');
+    await createDestination({
+      agent_group_id: 'ag-1',
+      local_name: 'peer',
+      target_type: 'agent',
+      target_id: 'ag-new',
+      created_at: now(),
+    });
+    const b = writeDestinations('ag-1', session.id);
+    await Promise.all([a, b, lock.released]);
+    expect(inbound(session.id, "SELECT display_name FROM destinations WHERE name = 'peer'")).toEqual({
+      display_name: 'New peer',
+    });
+  });
+});
+
+describe('sweep steps are independent', () => {
+  it('a busy ack sync does not skip the due-message wake', async () => {
+    const session = await seed();
+    await pendingChat(session.id, 'due-1');
+    // A terminal ack the sweep must sync into inbound.db (a write).
+    const out = new Database(outboundDbPath('ag-1', session.id));
+    out.prepare("INSERT INTO processing_ack VALUES ('older', 'completed', datetime('now'))").run();
+    out.close();
+    vi.mocked(wakeContainer).mockClear();
+    const lock = holdInbound(session.id, 300);
+    await reconcileSession(session.id);
+    expect(lock.held()).toBe(true); // the sync really met the lock
+    expect(wakeContainer).toHaveBeenCalledTimes(1);
+    await lock.released;
+  });
+});
+
+describe('owed completions (a Stop whose completion cannot land)', () => {
+  it('stays owed durably, blocks no-one but the runner, and settles before any spawn', async () => {
+    const session = await seed();
+    await pendingChat(session.id, 'stopped-1');
+    const lock = holdInbound(session.id, 300);
+    await expect(
+      completeInboundDurably('ag-1', session.id, ['stopped-1'], { reason: 'user-stop' }),
+    ).rejects.toMatchObject({ code: expect.stringMatching(/^SQLITE_BUSY/) });
+    expect(await getPendingCompletions(session.id)).toEqual(['stopped-1']);
+    await lock.released;
+    // The spawn gate (and every sweep pass) settles it before a runner runs.
+    expect(await settlePendingCompletions('ag-1', session.id)).toBe(true);
+    expect(inbound(session.id, "SELECT status FROM messages_in WHERE id = 'stopped-1'")).toEqual({
+      status: 'completed',
+    });
+    expect(await getPendingCompletions(session.id)).toEqual([]);
+  });
+
+  it('the sweep settles an owed completion before deciding a wake', async () => {
+    const session = await seed();
+    await pendingChat(session.id, 'stopped-2');
+    const lock = holdInbound(session.id, 100);
+    await expect(
+      completeInboundDurably('ag-1', session.id, ['stopped-2'], { reason: 'user-stop' }),
+    ).rejects.toBeDefined();
+    await lock.released;
+    vi.mocked(wakeContainer).mockClear();
+    await reconcileSession(session.id);
+    expect(inbound(session.id, "SELECT status FROM messages_in WHERE id = 'stopped-2'")).toEqual({
+      status: 'completed',
+    });
+    expect(await getPendingCompletions(session.id)).toEqual([]);
+    expect(wakeContainer).not.toHaveBeenCalled(); // nothing else was due
+  });
+
+  it('settlePendingCompletions reports false while the lock outlasts its retry', async () => {
+    const session = await seed();
+    await pendingChat(session.id, 'stopped-3');
+    const first = holdInbound(session.id, 50);
+    await expect(
+      completeInboundDurably('ag-1', session.id, ['stopped-3'], { reason: 'user-stop' }),
+    ).rejects.toBeDefined();
+    await first.released;
+    const long = holdInbound(session.id, 6000);
+    expect(await settlePendingCompletions('ag-1', session.id)).toBe(false);
+    expect(await getPendingCompletions(session.id)).toEqual(['stopped-3']);
+    await long.released;
+  }, 15_000);
 });

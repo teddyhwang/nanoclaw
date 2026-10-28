@@ -815,7 +815,7 @@ async function deliverMessage(
 
   // System actions — handle internally (cli_request, etc.)
   if (msg.kind === 'system') {
-    await handleSystemAction(content, session);
+    await handleSystemAction(content, session, { messageId: msg.id });
     return;
   }
 
@@ -1073,7 +1073,19 @@ export function registerPostDeliveryHook(hook: PostDeliveryHook): void {
  * accept or capture an open MailboxSession here: implementations may
  * serialize session() per key, and a held session would deadlock them.
  */
-export type DeliveryActionHandler = (content: Record<string, unknown>, session: Session) => Promise<void>;
+/** Where a delivered action came from. `messageId` is the outbound row id:
+ * stable across delivery retries of the same row, so handlers can derive
+ * idempotency keys from it (a handler that fails after a durable effect is
+ * re-run with the same id). */
+export interface DeliveryActionContext {
+  messageId: string;
+}
+
+export type DeliveryActionHandler = (
+  content: Record<string, unknown>,
+  session: Session,
+  context?: DeliveryActionContext,
+) => Promise<void>;
 
 type DeliveryEntry =
   | { guard: Unguarded; handler: DeliveryActionHandler }
@@ -1163,13 +1175,17 @@ export function getDeliveryAction(action: string): DeliveryActionHandler | undef
  * These are written to messages_out because the container can't write to inbound.db.
  * The host applies them to inbound.db here.
  */
-async function handleSystemAction(content: Record<string, unknown>, session: Session): Promise<void> {
+async function handleSystemAction(
+  content: Record<string, unknown>,
+  session: Session,
+  context?: DeliveryActionContext,
+): Promise<void> {
   const action = content.action as string;
   log.info('System action from agent', { sessionId: session.id, action });
 
   const registered = getDeliveryAction(action);
   if (registered) {
-    await registered(content, session);
+    await registered(content, session, context);
     return;
   }
 

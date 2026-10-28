@@ -95,6 +95,7 @@ import {
   sessionContextPath,
   sessionDir,
   writeSessionContext,
+  settlePendingCompletions,
   writeSessionRouting,
 } from './session-manager.js';
 import type { AgentGroup, Session } from './types.js';
@@ -474,6 +475,13 @@ async function spawnContainer(session: Session): Promise<void> {
   if (!agentGroup) {
     log.error('Agent group not found', { agentGroupId: session.agent_group_id });
     return;
+  }
+
+  // Inputs the host already decided are done (a user's Stop) must be
+  // completed before any runner starts: a new runner clears its claims and
+  // would run them again. Refuse the spawn (the sweep retries) until settled.
+  if (!(await settlePendingCompletions(agentGroup.id, session.id))) {
+    throw new Error(`owed inbound completions unsettled for ${session.id}; not spawning`);
   }
 
   // Refresh the destination map and current-thread routing so any admin

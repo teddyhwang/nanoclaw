@@ -166,7 +166,7 @@ export {
 // schedule_task). The handler runs in the host with the session row
 // + inbound DB handle so it can write follow-up state without the
 // container touching inbound.db directly.
-export { registerDeliveryAction, type DeliveryActionHandler } from '../delivery.js';
+export { registerDeliveryAction, type DeliveryActionContext, type DeliveryActionHandler } from '../delivery.js';
 export { unguarded, type Unguarded } from '../guard/index.js';
 
 // Session mailbox paths remain available for host-side file placement (for
@@ -180,7 +180,12 @@ export { unguarded, type Unguarded } from '../guard/index.js';
 // for the container-written outbound.db.
 export { inboundDbPath, legacyInboundDbPath, outboundDbPath, sessionMailboxDir } from '../mailbox/sqlite/paths.js';
 export { openInboundReadonlyAt, openOutboundReadonlyAt } from '../mailbox/sqlite/session-files.js';
-export { withMailboxSession, withExistingMailboxSession, writeOutboundDirect } from '../session-manager.js';
+export {
+  completeInboundDurably,
+  withMailboxSession,
+  withExistingMailboxSession,
+  writeOutboundDirect,
+} from '../session-manager.js';
 // Session-DB lock waits are short and synchronous; wrap a mailbox session
 // whose action is one all-or-nothing host write in retryWhileBusy so a brief
 // runner lock neither blocks the event loop nor loses the write.

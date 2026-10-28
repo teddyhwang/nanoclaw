@@ -14,6 +14,7 @@ import { getContainerStartedAtMs, isContainerRunning, killContainer } from './co
 import type { Session } from './types.js';
 
 import { getSessionClaim } from './db/coordination.js';
+import { clearPendingCompletions, getPendingCompletions } from './db/pending-completions.js';
 import { requestWake } from './request-wake.js';
 
 export const MCP_TOOL_CEILING_MS = 60 * 60 * 1000;
@@ -216,12 +217,29 @@ async function reconcileActiveSession(session: Session): Promise<void> {
   let shouldWake = false;
 
   try {
+    // Completions a host Stop owes (see db/pending-completions.ts): settled
+    // first, so nothing below can wake a runner for those inputs.
+    const owed = await getPendingCompletions(session.id);
+    let owedSettled = false;
     // Phase 1: one existing mailbox action. No external wake while this key is
     // open; recurrence writes and snapshot replacement go through this mailbox.
     const exists = await withExistingMailboxSession(agentGroup.id, session.id, async (mailbox) => {
-      mailbox.applyProcessingAcks(mailbox.getTerminalProcessingAcks());
-      const gcCount = mailbox.gcStaleSystemRows();
-      if (gcCount > 0) log.debug('GC stranded system rows', { sessionId: session.id, count: gcCount });
+      // Independent bookkeeping steps: one failing (a busy lock above all)
+      // must not skip task arming, the snapshot or the wake below. Unsynced
+      // acks only leave acknowledged rows pending a little longer; the runner
+      // skips acknowledged rows itself, so a wake for them replays nothing.
+      if (owed.length)
+        sweepStep(session, 'owed completions', () => {
+          mailbox.markMessagesCompleted(owed);
+          owedSettled = true;
+        });
+      sweepStep(session, 'ack sync', () => {
+        mailbox.applyProcessingAcks(mailbox.getTerminalProcessingAcks());
+      });
+      sweepStep(session, 'system row GC', () => {
+        const gcCount = mailbox.gcStaleSystemRows();
+        if (gcCount > 0) log.debug('GC stranded system rows', { sessionId: session.id, count: gcCount });
+      });
 
       await maintainScheduling(mailbox, session);
       dueCount = mailbox.countDueMessages();
@@ -230,6 +248,7 @@ async function reconcileActiveSession(session: Session): Promise<void> {
       if (!shouldWake) await maintainSessionMailbox(mailbox, session, agentGroup.id, false, dueCount);
       return true;
     });
+    if (owedSettled) await clearPendingCompletions(session.id, owed);
     if (!exists || !shouldWake) return;
 
     // Phase 2: the mailbox is closed before plugin events and wakeContainer,
@@ -252,6 +271,17 @@ async function reconcileActiveSession(session: Session): Promise<void> {
     });
   } catch (err) {
     log.error('Session mailbox sweep failed', { agentGroupId: agentGroup.id, sessionId: session.id, err });
+  }
+}
+
+/** Run one sweep bookkeeping step; a failure is logged and the sweep goes on
+ * (the step re-runs from the same state next pass). */
+function sweepStep(session: Session, step: string, run: () => void): void {
+  try {
+    run();
+    // eslint-disable-next-line no-catch-all/no-catch-all -- one bookkeeping step must not abort the session sweep
+  } catch (err) {
+    log.warn('Session sweep step failed; continuing', { sessionId: session.id, step, err });
   }
 }
 

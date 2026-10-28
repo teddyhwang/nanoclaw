@@ -31,6 +31,7 @@ import {
 import { log } from './log.js';
 import { getAgentMailbox, type InboundMessage, type MailboxSession } from './mailbox/index.js';
 import { retryWhileBusy } from './mailbox/sqlite/busy.js';
+import { clearPendingCompletions, getPendingCompletions, recordPendingCompletions } from './db/pending-completions.js';
 import { enqueueSessionReconcile } from './reconcile-feeds.js';
 import type { Session } from './types.js';
 
@@ -304,7 +305,86 @@ export async function destroySessionMailbox(agentGroupId: string, sessionId: str
  * writeDestinations() (when installed) so the latest routing is always in
  * place, including after admin rewiring.
  */
-export async function writeSessionRouting(agentGroupId: string, sessionId: string): Promise<void> {
+/**
+ * Mark host-decided-done inputs completed (a user's Stop) so no runner ever
+ * runs them again. The debt is recorded in the host-only central DB first,
+ * then the mailbox write is attempted (once, or retrying a busy lock with
+ * `wait`); the record is cleared only once that write lands. If it throws,
+ * the record stays: spawnContainer settles it before any runner starts and
+ * every sweep pass retries it (reconcile-session).
+ */
+export async function completeInboundDurably(
+  agentGroupId: string,
+  sessionId: string,
+  messageIds: readonly string[],
+  options: { reason: string; wait?: boolean },
+): Promise<void> {
+  if (messageIds.length === 0) return;
+  await recordPendingCompletions(sessionId, messageIds, options.reason);
+  const write = () =>
+    withExistingMailboxSession(agentGroupId, sessionId, (mailbox) => {
+      mailbox.markMessagesCompleted(messageIds);
+      return true;
+    });
+  await (options.wait ? retryWhileBusy(write) : write());
+  // Landed (or the mailbox is gone: nothing left to run). Settled.
+  await clearPendingCompletions(sessionId, messageIds);
+}
+
+/**
+ * Settle every completion owed to this session (completeInboundDurably).
+ * True when nothing is owed any more; false while the mailbox write still
+ * fails, in which case no runner may start for the session.
+ */
+export async function settlePendingCompletions(agentGroupId: string, sessionId: string): Promise<boolean> {
+  const owed = await getPendingCompletions(sessionId);
+  if (owed.length === 0) return true;
+  try {
+    await retryWhileBusy(() =>
+      withExistingMailboxSession(agentGroupId, sessionId, (mailbox) => {
+        mailbox.markMessagesCompleted(owed);
+      }),
+    );
+    // eslint-disable-next-line no-catch-all/no-catch-all -- reported as false; the caller refuses the spawn
+  } catch (err) {
+    log.warn('Owed inbound completions still unsettled', { sessionId, count: owed.length, err });
+    return false;
+  }
+  await clearPendingCompletions(sessionId, owed);
+  return true;
+}
+
+const projectionChains = new Map<string, Promise<void>>();
+
+/**
+ * Run a session projection (compute from central state, then write it into
+ * the session mailbox) after every earlier one for the same `key` settles.
+ * The write retries a busy lock for seconds; unserialized, a slow retry that
+ * computed its value earlier could land after a newer write from another
+ * path (chat migration, the destinations CLI, create-agent) and leave the
+ * session stale. Serialized, each run computes after the previous one wrote,
+ * so the last write always reflects the latest state. A failed run does not
+ * block later ones.
+ */
+export function serializeSessionProjection(key: string, run: () => Promise<void>): Promise<void> {
+  const previous = projectionChains.get(key) ?? Promise.resolve();
+  const next = previous.catch(() => undefined).then(run);
+  projectionChains.set(key, next);
+  void next
+    .catch(() => undefined)
+    .finally(() => {
+      if (projectionChains.get(key) === next) projectionChains.delete(key);
+    });
+  return next;
+}
+
+export function writeSessionRouting(agentGroupId: string, sessionId: string): Promise<void> {
+  return serializeSessionProjection(`routing:${agentGroupId}:${sessionId}`, () =>
+    writeSessionRoutingNow(agentGroupId, sessionId),
+  );
+}
+
+async function writeSessionRoutingNow(agentGroupId: string, sessionId: string): Promise<void> {
   const session = await getSession(sessionId);
   if (!session) return;
 
