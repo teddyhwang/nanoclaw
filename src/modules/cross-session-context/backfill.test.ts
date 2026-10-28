@@ -53,6 +53,7 @@ vi.mock('../../session-manager.js', () => ({
       getInboundHistory: (limit: number) => targetHistory.slice(0, limit),
       insertMessage: async (msg: Record<string, unknown>) => {
         written.push({ sessionId, ...msg });
+        return true;
       },
     });
   },

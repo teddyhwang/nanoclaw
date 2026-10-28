@@ -53,6 +53,38 @@ export class AnchoredFileTooLargeError extends Error {
   }
 }
 
+/**
+ * Read at most `maxBytes` from the start of the open file `fd` (the caller
+ * owns and closes it). Throws AnchoredFileTooLargeError (code EFBIG), with no
+ * partial result, when the file is larger than the limit: the size is checked
+ * on the descriptor and the read stops one byte past the limit, so a file that
+ * grows after the check is refused too rather than read without bound.
+ * `fileName` only labels the error.
+ */
+export function readFdBounded(fd: number, fileName: string, maxBytes: number): Buffer {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+    throw new RangeError(`readFile maxBytes must be a non-negative integer, got ${maxBytes}`);
+  }
+  const size = fs.fstatSync(fd).size;
+  if (size > maxBytes) throw new AnchoredFileTooLargeError(fileName, maxBytes, size);
+  // Size the buffer from fstat, but never let the read run past the limit:
+  // one spare byte is enough to tell that the file grew beyond it.
+  let buf = Buffer.allocUnsafe(Math.min(size, maxBytes) + 1);
+  let total = 0;
+  for (;;) {
+    if (total === buf.length) {
+      if (total > maxBytes) throw new AnchoredFileTooLargeError(fileName, maxBytes, total);
+      const grown = Buffer.allocUnsafe(Math.min(buf.length * 2, maxBytes + 1));
+      buf.copy(grown, 0, 0, total);
+      buf = grown;
+    }
+    const n = fs.readSync(fd, buf, total, buf.length - total, total);
+    if (n === 0) break;
+    total += n;
+  }
+  return buf.subarray(0, total);
+}
+
 export interface AnchoredReadOptions {
   /** Largest accepted size in bytes; defaults to DEFAULT_ANCHORED_READ_MAX_BYTES. */
   maxBytes?: number;
@@ -159,24 +191,7 @@ export class AnchoredDir {
     }
     const fd = this.openReadFd(name);
     try {
-      const size = fs.fstatSync(fd).size;
-      if (size > maxBytes) throw new AnchoredFileTooLargeError(name, maxBytes, size);
-      // Size the buffer from fstat, but never let the read run past the limit:
-      // one spare byte is enough to tell that the file grew beyond it.
-      let buf = Buffer.allocUnsafe(Math.min(size, maxBytes) + 1);
-      let total = 0;
-      for (;;) {
-        if (total === buf.length) {
-          if (total > maxBytes) throw new AnchoredFileTooLargeError(name, maxBytes, total);
-          const grown = Buffer.allocUnsafe(Math.min(buf.length * 2, maxBytes + 1));
-          buf.copy(grown, 0, 0, total);
-          buf = grown;
-        }
-        const n = fs.readSync(fd, buf, total, buf.length - total, total);
-        if (n === 0) break;
-        total += n;
-      }
-      return buf.subarray(0, total);
+      return readFdBounded(fd, name, maxBytes);
     } finally {
       fs.closeSync(fd);
     }

@@ -63,6 +63,16 @@ describe('persistent OneCLI files', () => {
     expect(fs.readdirSync(path.join(dir, 'onecli'))).toEqual([path.basename(file)]);
   });
 
+  it('treats an oversized staged file as a mismatch without reading past the expected size', () => {
+    const first = stageOnecliFile(dir, 'ca', 'CA');
+    // Same name, more bytes than expected (e.g. appended to): republished.
+    fs.writeFileSync(first, 'CA' + 'x'.repeat(1024 * 1024));
+    const readSync = vi.spyOn(fs, 'readFileSync');
+    expect(stageOnecliFile(dir, 'ca', 'CA')).toBe(first);
+    expect(readSync).not.toHaveBeenCalled();
+    expect(fs.readFileSync(first, 'utf8')).toBe('CA');
+  });
+
   it('refuses a staged file owned by another user', () => {
     const file = stageOnecliFile(dir, 'ca', 'CA');
     const stat = fs.lstatSync;

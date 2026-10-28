@@ -93,18 +93,22 @@ export function nextEvenSeq(db: Database.Database): number {
   return maxSeq < 2 ? 2 : maxSeq + 2 - (maxSeq % 2);
 }
 
-export function insertMessage(db: Database.Database, message: InboundWrite, sequence = nextEvenSeq(db)): void {
+/** True when the row was inserted; false when a row with that id already existed. */
+export function insertMessage(db: Database.Database, message: InboundWrite, sequence = nextEvenSeq(db)): boolean {
   const record = createInboundRecord(message, sequence);
   // Duplicate channel delivery and startup replay are idempotent by message id.
-  db.prepare(
-    `INSERT INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, content, process_after, recurrence, series_id, trigger, source_session_id, on_wake)
+  const { changes } = db
+    .prepare(
+      `INSERT INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, content, process_after, recurrence, series_id, trigger, source_session_id, on_wake)
      VALUES (@id, @sequence, @kind, @timestamp, @status, @platformId, @channelType, @threadId, @content, @processAfter, @recurrence, @seriesId, @trigger, @sourceSessionId, @onWake)
      ON CONFLICT(id) DO NOTHING`,
-  ).run({
-    ...record,
-    trigger: record.trigger ? 1 : 0,
-    onWake: record.onWake ? 1 : 0,
-  });
+    )
+    .run({
+      ...record,
+      trigger: record.trigger ? 1 : 0,
+      onWake: record.onWake ? 1 : 0,
+    });
+  return changes > 0;
 }
 
 export function countDueMessages(db: Database.Database): number {

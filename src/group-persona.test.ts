@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import fs from 'fs';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -6,7 +7,7 @@ vi.mock('./log.js', () => ({
   log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },
 }));
 
-import { PERSONA_PREPEND_FILE, readGroupPersona, stageGroupPersona } from './group-persona.js';
+import { PERSONA_MAX_BYTES, PERSONA_PREPEND_FILE, readGroupPersona, stageGroupPersona } from './group-persona.js';
 import { log } from './log.js';
 
 const TMP = '/tmp/nanoclaw-group-persona-test';
@@ -47,6 +48,28 @@ describe('readGroupPersona', () => {
       'Could not read group standing instructions; omitting persona',
       expect.objectContaining({ file: path.join(TMP, PERSONA_PREPEND_FILE) }),
     );
+  });
+});
+
+describe('readGroupPersona bounds', () => {
+  it('reads a file at the limit and refuses one past it, without reading it whole', () => {
+    const file = path.join(TMP, PERSONA_PREPEND_FILE);
+    fs.writeFileSync(file, 'a'.repeat(PERSONA_MAX_BYTES));
+    expect(readGroupPersona(TMP)).toHaveLength(PERSONA_MAX_BYTES);
+    fs.writeFileSync(file, 'a'.repeat(PERSONA_MAX_BYTES + 1));
+    const readSync = vi.spyOn(fs, 'readFileSync');
+    expect(readGroupPersona(TMP)).toBeNull();
+    expect(readSync).not.toHaveBeenCalled();
+    readSync.mockRestore();
+    expect(log.warn).toHaveBeenCalledWith(
+      'Could not read group standing instructions; omitting persona',
+      expect.objectContaining({ error: expect.stringContaining('read limit') }),
+    );
+  });
+
+  it('does not block on a planted FIFO', () => {
+    execFileSync('mkfifo', [path.join(TMP, PERSONA_PREPEND_FILE)]);
+    expect(readGroupPersona(TMP)).toBeNull();
   });
 });
 

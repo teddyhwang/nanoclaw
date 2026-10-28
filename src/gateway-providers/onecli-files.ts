@@ -2,6 +2,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { AnchoredFileTooLargeError, readFdBounded } from '../anchored-dir.js';
+
 // Keep the SDK's system trust order and its proxy-only fallback.
 const SYSTEM_CA_PATHS = ['/etc/ssl/cert.pem', '/etc/ssl/certs/ca-certificates.crt', '/etc/pki/tls/certs/ca-bundle.crt'];
 
@@ -44,9 +46,17 @@ export function stageOnecliFile(dataDir: string, kind: 'ca' | 'combined' | 'stub
     if (!stat.isFile() || stat.uid !== directoryStat.uid) {
       throw new Error(`OneCLI staged file has an unexpected type or owner: ${destination}`);
     }
-    const fd = fs.openSync(destination, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const fd = fs.openSync(destination, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
     try {
-      return (stat.mode & 0o777) === mode && fs.readFileSync(fd, 'utf8') === content;
+      if ((stat.mode & 0o777) !== mode) return false;
+      // Never read more than the expected bytes: a larger file is a mismatch.
+      const expected = Buffer.from(content, 'utf8');
+      try {
+        return readFdBounded(fd, destination, expected.length).equals(expected);
+      } catch (error) {
+        if (error instanceof AnchoredFileTooLargeError) return false;
+        throw error;
+      }
     } finally {
       fs.closeSync(fd);
     }

@@ -228,9 +228,9 @@ describe('insertMessage', () => {
     const db = new Database(':memory:');
     db.exec(INBOUND_SCHEMA);
 
-    insertMessage(db, { id: 'msg-1', ...baseMsg });
-    insertMessage(db, { id: 'msg-1', ...baseMsg }); // duplicate — skipped
-    insertMessage(db, { id: 'msg-2', ...baseMsg });
+    expect(insertMessage(db, { id: 'msg-1', ...baseMsg })).toBe(true);
+    expect(insertMessage(db, { id: 'msg-1', ...baseMsg })).toBe(false); // duplicate — skipped, reported
+    expect(insertMessage(db, { id: 'msg-2', ...baseMsg })).toBe(true);
 
     const count = (db.prepare('SELECT COUNT(*) AS c FROM messages_in').get() as { c: number }).c;
     expect(count).toBe(2);

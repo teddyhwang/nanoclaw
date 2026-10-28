@@ -26,6 +26,7 @@ import {
   writeOutboundDirect,
   writeSessionContext,
   writeSessionMessage,
+  writeSessionMessageOnce,
 } from './session-manager.js';
 import { inboundDbPath, outboundDbPath } from './mailbox/sqlite/paths.js';
 import { initTestDb, closeDb, runMigrations, createAgentGroup } from './db/index.js';
@@ -259,6 +260,28 @@ describe('writeSessionMessage re-provisions a deleted session folder', () => {
         | undefined;
       expect(row?.id).toBe('after-reset-1');
       expect(JSON.parse(row!.content).text).toBe('still here?');
+    } finally {
+      db.close();
+    }
+  });
+
+  it('writeSessionMessageOnce reports a retried id as not inserted and keeps the first row', async () => {
+    const message = (text: string) => ({
+      id: 'chief-nudge:retry-1',
+      kind: 'chat' as const,
+      timestamp: new Date().toISOString(),
+      content: JSON.stringify({ text }),
+    });
+    await expect(writeSessionMessageOnce(AG, SESS, message('first'))).resolves.toEqual({
+      content: JSON.stringify({ text: 'first' }),
+      inserted: true,
+    });
+    await expect(writeSessionMessageOnce(AG, SESS, message('retry'))).resolves.toMatchObject({ inserted: false });
+    const db = new Database(inboundDbPath(AG, SESS), { readonly: true });
+    try {
+      expect(db.prepare('SELECT content FROM messages_in WHERE id = ?').all('chief-nudge:retry-1')).toEqual([
+        { content: JSON.stringify({ text: 'first' }) },
+      ]);
     } finally {
       db.close();
     }
