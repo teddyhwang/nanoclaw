@@ -280,6 +280,32 @@ describe('legacy layout migration', () => {
     expect(ids(path.join(MAILBOX, 'inbound.db'))).toEqual(['first']);
   });
 
+  it('never carries a container-made schema into the trusted inbound.db', () => {
+    writeLegacyInbound(path.join(SESSION, 'inbound.db'), ['a']);
+    const other = path.join(ROOT, 'data', 'v2-sessions', 'ag-a', 'sess-c');
+    fs.mkdirSync(other, { recursive: true });
+    writeLegacyInbound(path.join(other, 'inbound.db'), ['b']);
+    const crafted = new Database(path.join(other, 'inbound.db'));
+    crafted.exec('ALTER TABLE messages_in ADD COLUMN slow AS (length(hex(zeroblob(1000))))');
+    crafted.exec('CREATE VIEW extra AS SELECT 1');
+    crafted.close();
+
+    expect(upgradeAllSessionLayouts(path.join(ROOT, 'data', 'v2-sessions'))).toEqual({ migrated: 2, failed: 0 });
+    // A plain legacy file keeps its rows; the crafted one starts empty.
+    expect(ids(path.join(MAILBOX, 'inbound.db'))).toEqual(['a']);
+    expect(ids(path.join(other, 'mailbox', 'inbound.db'))).toEqual([]);
+    for (const dir of [SESSION, other]) {
+      const db = new Database(path.join(dir, 'mailbox', 'inbound.db'), { readonly: true });
+      expect(db.prepare("SELECT name FROM sqlite_master WHERE type IN ('view', 'trigger')").all()).toEqual([]);
+      expect(
+        (db.prepare("SELECT name FROM pragma_table_xinfo('messages_in')").all() as Array<{ name: string }>).map(
+          (c) => c.name,
+        ),
+      ).not.toContain('slow');
+      db.close();
+    }
+  });
+
   it('logs a session own migrated file as routine and only a later file as container-made', async () => {
     writeLegacyInbound(path.join(SESSION, 'inbound.db'), ['a']);
     const mailbox = new SqliteAgentMailbox();
