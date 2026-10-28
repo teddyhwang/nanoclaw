@@ -201,6 +201,73 @@ describe('container-authored schema', () => {
     db.close();
   });
 
+  // Rename a plain table to `name` in sqlite_master (writable_schema), the way
+  // a container can plant an object under SQLite's reserved prefix.
+  const rename = (from: string, to: string) => {
+    const raw = new Database(path.join(root, 'outbound.db'));
+    raw.unsafeMode(true);
+    raw.pragma('writable_schema = ON');
+    raw
+      .prepare('UPDATE sqlite_master SET name = ?, tbl_name = ?, sql = replace(sql, ?, ?) WHERE name = ?')
+      .run(to, to, `TABLE ${from}`, `TABLE ${to}`, from);
+    raw.close();
+  };
+
+  it('refuses any sqlite_-named table except sqlite_sequence/stat1/stat4', () => {
+    seed('outbound.db', 'CREATE TABLE evil (a CHECK (length(a) < 10)); CREATE TABLE t (v)');
+    rename('evil', 'sqlite_evil');
+    let db = open('outbound.db');
+    expect(() => db.prepare('SELECT * FROM t').all()).toThrow(/reserved-name table "sqlite_evil"/);
+    db.close();
+    // A reserved-name virtual table is refused too (no prefix exemption).
+    fs.rmSync(path.join(root, 'outbound.db'));
+    seed('outbound.db', 'CREATE VIRTUAL TABLE vt USING fts5(v); CREATE TABLE t (v)');
+    rename('vt', 'sqlite_vt');
+    db = open('outbound.db');
+    expect(() => db.prepare('SELECT * FROM t').all()).toThrow(UnsafeSessionDbError);
+    db.close();
+  });
+
+  it("still checks SQLite's own tables as plain tables", () => {
+    seed(
+      'outbound.db',
+      'CREATE TABLE a (id INTEGER PRIMARY KEY AUTOINCREMENT, v); CREATE INDEX a_v ON a (v); INSERT INTO a (v) VALUES (1); ANALYZE',
+    );
+    const db = open('outbound.db');
+    expect(db.prepare('SELECT v FROM a').all()).toEqual([{ v: 1 }]);
+    db.close();
+    // sqlite_sequence rewritten to carry an expression CHECK is refused.
+    const raw = new Database(path.join(root, 'outbound.db'));
+    raw.unsafeMode(true);
+    raw.pragma('writable_schema = ON');
+    raw
+      .prepare(
+        "UPDATE sqlite_master SET sql = 'CREATE TABLE sqlite_sequence(name CHECK (length(name) < 99),seq)' WHERE name = 'sqlite_sequence'",
+      )
+      .run();
+    raw.close();
+    const again = open('outbound.db');
+    expect(() => again.prepare('SELECT v FROM a').all()).toThrow(/CHECK on table "sqlite_sequence"/);
+    again.close();
+  });
+
+  it('waits only briefly on a container-held lock instead of 5 s', () => {
+    seed('outbound.db', 'CREATE TABLE t (v)');
+    const holder = new Database(path.join(root, 'outbound.db'));
+    holder.exec('BEGIN EXCLUSIVE');
+    try {
+      const db = open('outbound.db');
+      expect(db.pragma('busy_timeout', { simple: true })).toBe(20);
+      const started = Date.now();
+      expect(() => db.prepare('SELECT * FROM t').all()).toThrow(/locked|busy/i);
+      expect(Date.now() - started).toBeLessThan(1000);
+      db.close();
+    } finally {
+      holder.exec('ROLLBACK');
+      holder.close();
+    }
+  });
+
   it('host-owned files are not guarded; assertPlainSchema checks them on demand', () => {
     seed('inbound.db', 'CREATE TABLE t (v); CREATE VIEW w AS SELECT v FROM t');
     const db = open('inbound.db', 'readonly', 'host');

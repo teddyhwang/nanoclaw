@@ -49,6 +49,8 @@ import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typ
 import type { OutboundFile } from './channels/adapter.js';
 import type { PendingApproval, Session } from './types.js';
 import type { OutboundMessage } from './mailbox/index.js';
+import { retryWhileBusy } from './mailbox/sqlite/busy.js';
+import { readUndelivered } from './mailbox/undelivered.js';
 
 const ACTIVE_POLL_MS = 1000;
 const SWEEP_POLL_MS = 60_000;
@@ -252,12 +254,10 @@ export async function dropSuppressedOutbound(sessionId: string): Promise<string[
   if (outboundSuppressors.length === 0) return [];
   const session = await getSession(sessionId);
   if (!session) return [];
-  const rows = await withExistingMailboxSession(session.agent_group_id, session.id, (mailbox) => {
-    const delivered = mailbox.getDeliveredIds();
-    return mailbox
-      .getDueMessages(delivered, { includeNotYetDue: true })
-      .filter((candidate) => !delivered.has(candidate.id));
-  });
+  // getDueMessages is bounded per call: page through (readUndelivered).
+  const rows = await withExistingMailboxSession(session.agent_group_id, session.id, (mailbox) =>
+    readUndelivered(mailbox, mailbox.getDeliveredIds(), { includeNotYetDue: true }),
+  );
   const dropped: string[] = [];
   for (const msg of rows ?? []) {
     const reason = suppressionReason(msg, session);
@@ -436,7 +436,9 @@ async function drainSession(session: Session): Promise<void> {
       const delivered = mailbox.getDeliveredIds();
       return {
         delivered,
-        pending: mailbox.getDueMessages(delivered).filter((candidate) => !delivered.has(candidate.id)),
+        // Paged, so held rows at the head never hide later ones (system
+        // rows such as identity_turn_begin above all): readUndelivered.
+        pending: readUndelivered(mailbox, delivered),
       };
     });
     if (!existing) return;
@@ -503,10 +505,15 @@ async function drainSession(session: Session): Promise<void> {
       }
 
       const platformMsgId = await deliverMessage(await withPlatformReplyTarget(agentGroup.id, session, msg), session);
-      const marked = await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) => {
-        mailbox.markDelivered(msg.id, platformMsgId ?? null);
-        return true;
-      });
+      // The send already happened: a briefly container-locked inbound.db must
+      // not turn into a failed delivery and a duplicate re-send. markDelivered
+      // is idempotent, so retry a busy lock asynchronously (busy.ts).
+      const marked = await retryWhileBusy(() =>
+        withExistingMailboxSession(agentGroup.id, session.id, (mailbox) => {
+          mailbox.markDelivered(msg.id, platformMsgId ?? null);
+          return true;
+        }),
+      );
       if (marked === undefined) throw new Error(`mailbox disappeared before marking ${msg.id} delivered`);
 
       const firstDelivery = delivered.size === 0;
