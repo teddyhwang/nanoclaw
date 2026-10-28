@@ -181,6 +181,10 @@ export { unguarded, type Unguarded } from '../guard/index.js';
 export { inboundDbPath, legacyInboundDbPath, outboundDbPath, sessionMailboxDir } from '../mailbox/sqlite/paths.js';
 export { openInboundReadonlyAt, openOutboundReadonlyAt } from '../mailbox/sqlite/session-files.js';
 export { withMailboxSession, withExistingMailboxSession, writeOutboundDirect } from '../session-manager.js';
+// Session-DB lock waits are short and synchronous; wrap a mailbox session
+// whose action is one all-or-nothing host write in retryWhileBusy so a brief
+// runner lock neither blocks the event loop nor loses the write.
+export { isSqliteBusy, retryWhileBusy } from '../mailbox/sqlite/busy.js';
 export type { MailboxSession, TaskUpdate, TaskSeriesSnapshotRecord } from '../mailbox/types.js';
 // Agent-group-scoped schedule store (the S405 structural fix — task
 // series now live in a host-only schedule.db, not a session inbound.db).

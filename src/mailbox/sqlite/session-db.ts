@@ -518,19 +518,26 @@ export const DUE_OUTBOUND_PAGE = 200;
  * The oldest due rows of messages_out, skipping `excludeIds` (rows already
  * delivered), at most `limit` of them. outbound.db is container-written and
  * unbounded, so both the exclusion and the bound run in SQL: only the page's
- * ids are sorted, and only those rows are then read in full. Callers that
- * need more page by adding the rows they have seen to `excludeIds`.
+ * ids are sorted, and only those rows are then read in full. Queue order is
+ * total: (timestamp, seq, id), with a NULL seq first. Callers that need more
+ * page with `after`: the id of the last row of the previous page (a cursor,
+ * so the exclusion stays the delivered set however many pages are read). An
+ * `after` id that is not in the table yields nothing (rows are never
+ * deleted from messages_out).
  */
 export function getDueOutboundMessages(
   db: Database.Database,
   includeNotYetDue = false,
   excludeIds: ReadonlySet<string> = new Set(),
   limit = DUE_OUTBOUND_PAGE,
-  filter: { ids?: ReadonlySet<string>; destinationless?: boolean } = {},
+  filter: { ids?: ReadonlySet<string>; destinationless?: boolean; after?: string } = {},
 ): OutboundMessage[] {
   if (limit <= 0 || filter.ids?.size === 0) return [];
   const where = [
-    'id NOT IN (SELECT value FROM json_each(@exclude))',
+    excludeIds.size ? 'id NOT IN (SELECT value FROM json_each(@exclude))' : null,
+    filter.after !== undefined
+      ? '(timestamp, COALESCE(seq, -1), id) > (SELECT timestamp, COALESCE(seq, -1), id FROM messages_out WHERE id = @after)'
+      : null,
     includeNotYetDue ? null : "(deliver_after IS NULL OR datetime(deliver_after) <= datetime('now'))",
     filter.ids ? 'id IN (SELECT value FROM json_each(@ids))' : null,
     // Rows delivery never holds per destination (delivery.ts destinationKey).
@@ -541,14 +548,15 @@ export function getDueOutboundMessages(
   const ids = db
     .prepare(
       `SELECT id FROM messages_out
-        WHERE ${where.join(' AND ')}
-        ORDER BY timestamp ASC, seq ASC
+        ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+        ORDER BY timestamp ASC, COALESCE(seq, -1) ASC, id ASC
         LIMIT @limit`,
     )
     .pluck()
     .all({
-      exclude: JSON.stringify([...excludeIds]),
-      ids: JSON.stringify([...(filter.ids ?? [])]),
+      ...(excludeIds.size ? { exclude: JSON.stringify([...excludeIds]) } : {}),
+      ...(filter.after !== undefined ? { after: filter.after } : {}),
+      ...(filter.ids ? { ids: JSON.stringify([...filter.ids]) } : {}),
       limit: Math.floor(limit),
     }) as unknown[];
   if (ids.length === 0) return [];

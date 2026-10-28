@@ -30,6 +30,7 @@ import {
 } from './db/sessions.js';
 import { log } from './log.js';
 import { getAgentMailbox, type InboundMessage, type MailboxSession } from './mailbox/index.js';
+import { retryWhileBusy } from './mailbox/sqlite/busy.js';
 import { enqueueSessionReconcile } from './reconcile-feeds.js';
 import type { Session } from './types.js';
 
@@ -98,6 +99,10 @@ function sessionCreationKey(
   return `route\0${agentGroupId}\0${messagingGroupId ?? ''}\0${sessionMode === 'shared' ? '' : (threadId ?? '')}`;
 }
 
+export const _carryForwardRecentPendingChatRowsForTesting = (
+  ...args: Parameters<typeof carryForwardRecentPendingChatRows>
+): Promise<void> => carryForwardRecentPendingChatRows(...args);
+
 /**
  * Carry recent due triggering chat rows from the latest closed matching
  * session into a newly provisioned mailbox. Reads, target inserts, and source
@@ -125,10 +130,14 @@ async function carryForwardRecentPendingChatRows(
     }
   });
 
-  const marked = await withExistingMailboxSession(agentGroupId, source.id, (mailbox) => {
-    mailbox.markMessagesCompleted(rows.map((row: InboundMessage) => row.id));
-    return true;
-  });
+  // A brief runner lock must not leave the copied rows pending in the old
+  // session too (they would run twice): idempotent, so retry (busy.ts).
+  const marked = await retryWhileBusy(() =>
+    withExistingMailboxSession(agentGroupId, source.id, (mailbox) => {
+      mailbox.markMessagesCompleted(rows.map((row: InboundMessage) => row.id));
+      return true;
+    }),
+  );
   if (!marked) {
     log.warn('Pending chat rows copied but source mailbox vanished before completion', {
       agentGroupId,
@@ -321,13 +330,17 @@ export async function writeSessionRouting(agentGroupId: string, sessionId: strin
     }
   }
 
-  await withMailboxSession(agentGroupId, sessionId, (mailbox) => {
-    mailbox.setRouting({
-      channelType,
-      platformId,
-      threadId: session.thread_id,
-    });
-  });
+  // Runs on every wake: a brief runner lock must not fail the wake or leave
+  // stale routing. One idempotent upsert, so retry (busy.ts).
+  await retryWhileBusy(() =>
+    withMailboxSession(agentGroupId, sessionId, (mailbox) => {
+      mailbox.setRouting({
+        channelType,
+        platformId,
+        threadId: session.thread_id,
+      });
+    }),
+  );
   log.debug('Session routing written', { sessionId, channelType, platformId, threadId: session.thread_id });
 }
 

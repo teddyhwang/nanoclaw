@@ -8,9 +8,11 @@
  * behind one) hide every later row. This pages, oldest first, up to
  * `maxPages`; if that cap is hit it still reads the destinationless rows
  * (system actions such as identity_turn_begin, task_log) beyond it, because
- * delivery never holds those and turns wait on them. Result is in queue
- * order (timestamp, then sequence): every page takes the oldest rows not yet
- * seen, so each later page's rows follow all earlier ones.
+ * delivery never holds those and turns wait on them.
+ *
+ * Pages follow a cursor (the last row read), so every page sends the same
+ * exclusion (the delivered set) and costs the same however deep the backlog.
+ * Result is in queue order: each page holds the oldest rows after the cursor.
  */
 import type { MailboxSession, OutboundMessage } from './types.js';
 
@@ -23,18 +25,19 @@ export function readUndelivered(
   options: { includeNotYetDue?: boolean; maxPages?: number } = {},
 ): OutboundMessage[] {
   const maxPages = options.maxPages ?? UNDELIVERED_MAX_PAGES;
-  const seen = new Set(delivered);
   const out: OutboundMessage[] = [];
+  let after: string | undefined;
   const page = (extra: { destinationless?: boolean }) => {
     const batch = mailbox
-      .getDueMessages(seen, { includeNotYetDue: options.includeNotYetDue, ...extra })
-      .filter((row) => !seen.has(row.id));
-    for (const row of batch) seen.add(row.id);
+      .getDueMessages(delivered, { includeNotYetDue: options.includeNotYetDue, after, ...extra })
+      .filter((row) => !delivered.has(row.id));
+    if (batch.length === 0) return false;
+    after = batch[batch.length - 1]!.id;
     out.push(...batch);
-    return batch.length;
+    return true;
   };
-  for (let pages = 0; pages < maxPages; pages++) if (page({}) === 0) return out;
+  for (let pages = 0; pages < maxPages; pages++) if (!page({})) return out;
   // Cap hit: the rest may still hold rows nothing can block.
-  for (let extra = 0; extra < maxPages; extra++) if (page({ destinationless: true }) === 0) break;
+  for (let extra = 0; extra < maxPages; extra++) if (!page({ destinationless: true })) break;
   return out;
 }

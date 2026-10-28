@@ -196,6 +196,17 @@ export async function reconcileSession(sessionId: string): Promise<void> {
   await reconcileActiveSession(session);
 }
 
+/**
+ * Lock waits: host connections to session DBs wait only briefly in SQLite
+ * (mailbox/sqlite/busy.ts), and the writes here are NOT retried on purpose.
+ * Each is sweep bookkeeping that re-derives its work from the mailbox on the
+ * next pass (enqueued reconciles and the 60 s host sweep): ack sync, system
+ * row GC, the task_series snapshot (schedule.db is the source of truth),
+ * the echo prune, stuck-claim reset (markMessageFailed / retryWithBackoff,
+ * after the claimant was killed) and orphan-claim cleanup. A busy lock
+ * fails one pass, which is logged, and the next pass repeats it from the
+ * same state; nothing a user did is lost.
+ */
 async function reconcileActiveSession(session: Session): Promise<void> {
   const agentGroup = await getAgentGroup(session.agent_group_id);
   if (!agentGroup) return;

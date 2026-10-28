@@ -161,6 +161,10 @@ export interface InboundMailbox {
   hasLiveTaskOccurrence(seriesId: string): boolean;
   materializeTaskOccurrence(occurrence: TaskOccurrenceWrite): Promise<void>;
   replaceTaskSeriesSnapshot(series: readonly TaskSeriesSnapshotRecord[]): void;
+  // cancel/pause/resume/delete/updateTask and clearRecurrence: no host
+  // caller writes a user's task change through these. Task mutations go to
+  // the host-only schedule.db (modules/scheduling/schedule-store.ts), which
+  // no container can lock; the session sees them via replaceTaskSeriesSnapshot.
   cancelTask(taskId?: string): number;
   pauseTask(taskId: string): number;
   resumeTask(taskId: string): number;
@@ -211,10 +215,10 @@ export interface OutboundMailbox {
    * The oldest due rows not in `excludeIds`, at most `limit` (default: the
    * implementation's page size); `includeNotYetDue` also returns rows whose
    * deliver_after is in the future. Bounded because the runner writes this
-   * queue: page by adding seen ids to `excludeIds` (see readUndelivered).
-   * `ids` returns only those rows (limit defaults to their count);
-   * `destinationless` only rows with no per-destination hold (system,
-   * task_log, or no channel/platform).
+   * queue: page with `after`, the id of the previous page's last row, in
+   * queue order (see readUndelivered). `ids` returns only those rows (limit
+   * defaults to their count); `destinationless` only rows with no
+   * per-destination hold (system, task_log, or no channel/platform).
    */
   getDueMessages(
     excludeIds?: ReadonlySet<string>,
@@ -223,6 +227,7 @@ export interface OutboundMailbox {
       limit?: number;
       ids?: ReadonlySet<string>;
       destinationless?: boolean;
+      after?: string;
     },
   ): OutboundMessage[];
   writeDirect(message: DirectOutboundMessage): Promise<void>;

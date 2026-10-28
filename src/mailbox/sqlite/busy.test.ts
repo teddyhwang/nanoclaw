@@ -79,6 +79,36 @@ describe('getDueOutboundMessages', () => {
     db.close();
   });
 
+  it('ids and excludeIds combine: only the requested rows that are not excluded', () => {
+    const db = seed(20);
+    const rows = getDueOutboundMessages(db, true, new Set(['m5', 'm7']), 10, {
+      ids: new Set(['m3', 'm5', 'm7', 'm19']),
+    });
+    expect(rows.map((r) => r.id)).toEqual(['m3', 'm19']);
+    db.close();
+  });
+
+  it('after pages by cursor in total queue order (timestamp, seq with NULL first, id)', () => {
+    const db = seed(6);
+    // m1..m3 share m0's timestamp: m2 has no seq (first), then seq 1 (m3),
+    // 2 (m0), 4 (m1).
+    const t = new Date(1_700_000_000_000).toISOString();
+    db.prepare("UPDATE messages_out SET timestamp = ? WHERE id IN ('m1', 'm2', 'm3')").run(t);
+    db.prepare("UPDATE messages_out SET seq = NULL WHERE id = 'm2'").run();
+    db.prepare("UPDATE messages_out SET seq = 1 WHERE id = 'm3'").run();
+    const order: string[] = [];
+    let after: string | undefined;
+    for (;;) {
+      const page = getDueOutboundMessages(db, true, new Set(), 2, { after }).map((r) => r.id);
+      if (!page.length) break;
+      order.push(...page);
+      after = page.at(-1);
+    }
+    expect(order).toEqual(['m2', 'm3', 'm0', 'm1', 'm4', 'm5']);
+    expect(getDueOutboundMessages(db, true, new Set(), 2, { after: 'gone' })).toEqual([]);
+    db.close();
+  });
+
   it('destinationless returns only rows delivery never holds per destination', () => {
     const db = seed(5);
     db.prepare("UPDATE messages_out SET channel_type = 'discord', platform_id = 'p' WHERE id != 'm2'").run();
@@ -123,6 +153,32 @@ describe('readUndelivered', () => {
     const rows = readUndelivered(mailboxOver(db), new Set());
     expect(rows).toHaveLength(DUE_OUTBOUND_PAGE + 52);
     expect(rows.slice(-2).map((r) => r.id)).toEqual(['reply', 'identity_turn_begin']);
+    db.close();
+  });
+
+  it('pages by cursor: every page sends only the delivered set, whatever the depth', () => {
+    const db = flood(DUE_OUTBOUND_PAGE * 3);
+    const delivered = new Set(['held0', 'held1']);
+    const sent: Array<{ exclude: number; after?: string }> = [];
+    const inner = mailboxOver(db);
+    const rows = readUndelivered(
+      {
+        getDueMessages: (exclude, o) => {
+          sent.push({ exclude: exclude?.size ?? 0, after: o?.after });
+          return inner.getDueMessages(exclude, o);
+        },
+      },
+      delivered,
+    );
+    expect(rows).toHaveLength(DUE_OUTBOUND_PAGE * 3 - 2 + 2);
+    expect(new Set(rows.map((r) => r.id)).size).toBe(rows.length);
+    expect(sent.every((call) => call.exclude === 2)).toBe(true);
+    expect(sent.map((call) => call.after)).toEqual([
+      undefined,
+      `held${DUE_OUTBOUND_PAGE + 1}`,
+      `held${2 * DUE_OUTBOUND_PAGE + 1}`,
+      'identity_turn_begin',
+    ]);
     db.close();
   });
 
