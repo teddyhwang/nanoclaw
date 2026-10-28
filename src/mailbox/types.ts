@@ -209,11 +209,19 @@ export interface OutboundMailbox {
    * The oldest due rows not in `excludeIds`, at most `limit` (default: the
    * implementation's page size); `includeNotYetDue` also returns rows whose
    * deliver_after is in the future. Bounded because the runner writes this
-   * queue: page by adding seen ids to `excludeIds`.
+   * queue: page by adding seen ids to `excludeIds` (see readUndelivered).
+   * `ids` returns only those rows (limit defaults to their count);
+   * `destinationless` only rows with no per-destination hold (system,
+   * task_log, or no channel/platform).
    */
   getDueMessages(
     excludeIds?: ReadonlySet<string>,
-    options?: { includeNotYetDue?: boolean; limit?: number },
+    options?: {
+      includeNotYetDue?: boolean;
+      limit?: number;
+      ids?: ReadonlySet<string>;
+      destinationless?: boolean;
+    },
   ): OutboundMessage[];
   writeDirect(message: DirectOutboundMessage): Promise<void>;
   getOutboundHistory(limit: number): MailboxHistoryMessage[];

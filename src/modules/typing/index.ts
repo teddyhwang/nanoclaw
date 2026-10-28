@@ -25,6 +25,7 @@ import { heartbeatPath, withExistingMailboxSession } from '../../session-manager
 import { getMessagingGroup } from '../../db/messaging-groups.js';
 import { getSessionDeliveryAttempts } from '../../db/coordination.js';
 import { log } from '../../log.js';
+import { readUndelivered } from '../../mailbox/undelivered.js';
 
 const TYPING_REFRESH_MS = 4000;
 /**
@@ -120,8 +121,7 @@ export async function hasPendingUserFacingOutbound(agentGroupId: string, session
     const pending =
       (await withExistingMailboxSession(agentGroupId, sessionId, (mailbox) => {
         const delivered = mailbox.getDeliveredIds();
-        return mailbox
-          .getDueMessages(delivered)
+        return readUndelivered(mailbox, delivered)
           .filter((message) => message.kind !== 'system' && message.channelType !== 'agent')
           .map((message) => message.id);
       })) ?? [];

@@ -12,6 +12,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { isSqliteBusy, retryWhileBusy } from './busy.js';
 import { OUTBOUND_SCHEMA, INBOUND_SCHEMA } from './schema.js';
 import { DUE_OUTBOUND_PAGE, getDueOutboundMessages, insertMessage, openInboundDb } from './session-db.js';
+import { readUndelivered } from '../undelivered.js';
+import type { OutboundMessage } from '../types.js';
 
 let root: string;
 beforeEach(() => {
@@ -65,6 +67,81 @@ describe('getDueOutboundMessages', () => {
     }
     expect(pages.flat()).toEqual(['m0', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7', 'm8', 'm9']);
     expect(getDueOutboundMessages(db, true, new Set(), 2).map((r) => r.id)).toEqual(['m0', 'm1']);
+    db.close();
+  });
+
+  it('ids returns exactly those rows however deep in the queue (stop notice: recent deliveries)', () => {
+    const db = seed(250);
+    const recent = new Set(['m249', 'm248', 'm3']);
+    const rows = getDueOutboundMessages(db, true, new Set(), recent.size, { ids: recent });
+    expect(rows.map((r) => r.id)).toEqual(['m3', 'm248', 'm249']);
+    expect(getDueOutboundMessages(db, true, new Set(), 10, { ids: new Set() })).toEqual([]);
+    db.close();
+  });
+
+  it('destinationless returns only rows delivery never holds per destination', () => {
+    const db = seed(5);
+    db.prepare("UPDATE messages_out SET channel_type = 'discord', platform_id = 'p' WHERE id != 'm2'").run();
+    db.prepare("UPDATE messages_out SET kind = 'system' WHERE id = 'm4'").run();
+    const rows = getDueOutboundMessages(db, false, new Set(), 10, { destinationless: true });
+    expect(rows.map((r) => r.id)).toEqual(['m2', 'm4']);
+    db.close();
+  });
+});
+
+describe('readUndelivered', () => {
+  // A mailbox over a real outbound DB, mapping rows the way the SQLite
+  // mailbox does (timestamp/sequence are what readUndelivered orders by).
+  const mailboxOver = (db: Database.Database) => ({
+    getDueMessages: (
+      exclude?: ReadonlySet<string>,
+      o?: { includeNotYetDue?: boolean; limit?: number; destinationless?: boolean },
+    ) =>
+      getDueOutboundMessages(db, o?.includeNotYetDue === true, exclude, o?.limit, o).map(
+        (r) => ({ ...r, sequence: r.seq, channelType: r.channel_type }) as unknown as OutboundMessage,
+      ),
+  });
+  const flood = (held: number) => {
+    const db = new Database(':memory:');
+    db.exec(OUTBOUND_SCHEMA);
+    const insert = db.prepare(
+      'INSERT INTO messages_out (id, seq, timestamp, kind, channel_type, platform_id, content) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    );
+    const at = (i: number) => new Date(1_700_000_000_000 + i * 1000).toISOString();
+    db.transaction(() => {
+      // A backlog held for an unavailable channel (stays undelivered).
+      for (let i = 0; i < held; i++) insert.run(`held${i}`, i + 1, at(i), 'chat', 'discord', 'down', '{}');
+      // Written later: a reply elsewhere and the runner's turn bind.
+      insert.run('reply', held + 1, at(held), 'chat', 'discord', 'up', '{}');
+      insert.run('identity_turn_begin', held + 2, at(held + 1), 'system', null, null, '{}');
+    })();
+    return db;
+  };
+
+  it('a held backlog over one page never hides later rows', () => {
+    const db = flood(DUE_OUTBOUND_PAGE + 50);
+    const rows = readUndelivered(mailboxOver(db), new Set());
+    expect(rows).toHaveLength(DUE_OUTBOUND_PAGE + 52);
+    expect(rows.slice(-2).map((r) => r.id)).toEqual(['reply', 'identity_turn_begin']);
+    db.close();
+  });
+
+  it('past the page cap, system rows are still read, in queue order', () => {
+    const db = flood(30);
+    const rows = readUndelivered(mailboxOver(db), new Set(['held0']), { maxPages: 1 });
+    // Only one page of 200 would fit everything here, so cap via a tiny page.
+    expect(rows.at(-1)!.id).toBe('identity_turn_begin');
+    const capped = readUndelivered(
+      {
+        getDueMessages: (exclude, o) => mailboxOver(db).getDueMessages(exclude, { ...o, limit: 5 }),
+      },
+      new Set(),
+      { maxPages: 2 },
+    );
+    expect(capped.map((r) => r.id)).toEqual([
+      ...Array.from({ length: 10 }, (_, i) => `held${i}`),
+      'identity_turn_begin',
+    ]);
     db.close();
   });
 });

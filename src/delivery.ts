@@ -50,9 +50,7 @@ import type { OutboundFile } from './channels/adapter.js';
 import type { PendingApproval, Session } from './types.js';
 import type { OutboundMessage } from './mailbox/index.js';
 import { retryWhileBusy } from './mailbox/sqlite/busy.js';
-
-/** Pages (getDueMessages calls) one dropSuppressedOutbound sweep may read. */
-const SUPPRESS_SWEEP_MAX_PAGES = 50;
+import { readUndelivered } from './mailbox/undelivered.js';
 
 const ACTIVE_POLL_MS = 1000;
 const SWEEP_POLL_MS = 60_000;
@@ -256,21 +254,10 @@ export async function dropSuppressedOutbound(sessionId: string): Promise<string[
   if (outboundSuppressors.length === 0) return [];
   const session = await getSession(sessionId);
   if (!session) return [];
-  // getDueMessages is bounded per call: page through the undelivered queue
-  // (each page excludes every row already seen), with a hard page cap.
-  const rows = await withExistingMailboxSession(session.agent_group_id, session.id, (mailbox) => {
-    const seen = new Set(mailbox.getDeliveredIds());
-    const out: OutboundMessage[] = [];
-    for (let page = 0; page < SUPPRESS_SWEEP_MAX_PAGES; page++) {
-      const batch = mailbox
-        .getDueMessages(seen, { includeNotYetDue: true })
-        .filter((candidate) => !seen.has(candidate.id));
-      if (batch.length === 0) break;
-      for (const candidate of batch) seen.add(candidate.id);
-      out.push(...batch);
-    }
-    return out;
-  });
+  // getDueMessages is bounded per call: page through (readUndelivered).
+  const rows = await withExistingMailboxSession(session.agent_group_id, session.id, (mailbox) =>
+    readUndelivered(mailbox, mailbox.getDeliveredIds(), { includeNotYetDue: true }),
+  );
   const dropped: string[] = [];
   for (const msg of rows ?? []) {
     const reason = suppressionReason(msg, session);
@@ -449,7 +436,9 @@ async function drainSession(session: Session): Promise<void> {
       const delivered = mailbox.getDeliveredIds();
       return {
         delivered,
-        pending: mailbox.getDueMessages(delivered).filter((candidate) => !delivered.has(candidate.id)),
+        // Paged, so held rows at the head never hide later ones (system
+        // rows such as identity_turn_begin above all): readUndelivered.
+        pending: readUndelivered(mailbox, delivered),
       };
     });
     if (!existing) return;

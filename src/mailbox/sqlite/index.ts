@@ -460,7 +460,13 @@ export function wrapSqliteOutbound(
       };
     },
     getDueMessages: (excludeIds, options) =>
-      getDueOutboundMessages(readable(), options?.includeNotYetDue === true, excludeIds, options?.limit)
+      getDueOutboundMessages(
+        readable(),
+        options?.includeNotYetDue === true,
+        excludeIds,
+        options?.limit ?? (options?.ids ? Math.max(options.ids.size, 1) : undefined),
+        { ids: options?.ids, destinationless: options?.destinationless },
+      )
         .filter((row) => !excludeIds?.has(String(row.id)))
         .map((row) => {
           try {

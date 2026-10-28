@@ -526,18 +526,31 @@ export function getDueOutboundMessages(
   includeNotYetDue = false,
   excludeIds: ReadonlySet<string> = new Set(),
   limit = DUE_OUTBOUND_PAGE,
+  filter: { ids?: ReadonlySet<string>; destinationless?: boolean } = {},
 ): OutboundMessage[] {
-  if (limit <= 0) return [];
+  if (limit <= 0 || filter.ids?.size === 0) return [];
+  const where = [
+    'id NOT IN (SELECT value FROM json_each(@exclude))',
+    includeNotYetDue ? null : "(deliver_after IS NULL OR datetime(deliver_after) <= datetime('now'))",
+    filter.ids ? 'id IN (SELECT value FROM json_each(@ids))' : null,
+    // Rows delivery never holds per destination (delivery.ts destinationKey).
+    filter.destinationless
+      ? "(kind IN ('system', 'task_log') OR channel_type IS NULL OR channel_type = '' OR platform_id IS NULL OR platform_id = '')"
+      : null,
+  ].filter(Boolean);
   const ids = db
     .prepare(
       `SELECT id FROM messages_out
-        WHERE id NOT IN (SELECT value FROM json_each(?))
-          ${includeNotYetDue ? '' : "AND (deliver_after IS NULL OR datetime(deliver_after) <= datetime('now'))"}
+        WHERE ${where.join(' AND ')}
         ORDER BY timestamp ASC, seq ASC
-        LIMIT ?`,
+        LIMIT @limit`,
     )
     .pluck()
-    .all(JSON.stringify([...excludeIds]), Math.floor(limit)) as unknown[];
+    .all({
+      exclude: JSON.stringify([...excludeIds]),
+      ids: JSON.stringify([...(filter.ids ?? [])]),
+      limit: Math.floor(limit),
+    }) as unknown[];
   if (ids.length === 0) return [];
   const rows = db
     .prepare('SELECT * FROM messages_out WHERE id IN (SELECT value FROM json_each(?))')
