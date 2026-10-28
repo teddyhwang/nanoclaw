@@ -21,9 +21,12 @@ import { DATA_DIR } from '../config.js';
 import { log } from '../log.js';
 import { getDb } from './connection.js';
 
-/** Hard backstop: no owed completion outlives this. */
-export const PENDING_COMPLETION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-/** Closed sessions' records are kept past carry-forward's 24 h lookback. */
+/** Age backstop for records of sessions that are no longer active: kept past
+ * carry-forward's 24 h lookback, then dropped (nothing can run or carry them
+ * any more). An active session's record is NEVER aged out: its debt is
+ * retried every sweep pass, so one that grew old is one whose write has
+ * failed all along, its input still pending; dropping it would let that
+ * input run. The stuck alert covers the active case instead. */
 export const CLOSED_SESSION_RECORD_TTL_MS = 25 * 60 * 60 * 1000;
 
 const memory = new Map<string, Map<string, number>>();
@@ -139,22 +142,19 @@ export async function clearAllPendingCompletions(sessionId: string): Promise<voi
 
 /**
  * Housekeeping (once per host sweep): drop records whose session row is
- * gone, records of closed sessions older than carry-forward's lookback
- * (nothing can run or carry them any more), and anything past the hard age
- * backstop. Returns the number of DB rows removed.
+ * gone, and records of sessions no longer active once older than
+ * CLOSED_SESSION_RECORD_TTL_MS. An active session's record is only ever
+ * cleared by a settle. Returns the number of DB rows removed.
  */
 export async function prunePendingCompletions(nowMs = Date.now()): Promise<number> {
   const db = getDb();
   const closedCutoff = new Date(nowMs - CLOSED_SESSION_RECORD_TTL_MS).toISOString();
-  const maxCutoff = new Date(nowMs - PENDING_COMPLETION_MAX_AGE_MS).toISOString();
   const doomed = await db.all<{ session_id: string; message_id: string }>(
     `SELECT p.session_id, p.message_id FROM pending_inbound_completions p
        LEFT JOIN sessions s ON s.id = p.session_id
       WHERE s.id IS NULL
-         OR (s.status != 'active' AND p.created_at < ?)
-         OR p.created_at < ?`,
+         OR (s.status != 'active' AND p.created_at < ?)`,
     closedCutoff,
-    maxCutoff,
   );
   for (const row of doomed)
     await db.run(
@@ -172,11 +172,8 @@ export async function prunePendingCompletions(nowMs = Date.now()): Promise<numbe
   }
   for (const sessionId of sessionIds) {
     const session = await db.get<{ status: string }>('SELECT status FROM sessions WHERE id = ?', sessionId);
-    const ttl = !session
-      ? -1
-      : session.status !== 'active'
-        ? CLOSED_SESSION_RECORD_TTL_MS
-        : PENDING_COMPLETION_MAX_AGE_MS;
+    if (session?.status === 'active') continue; // never aged out (see above)
+    const ttl = !session ? -1 : CLOSED_SESSION_RECORD_TTL_MS;
     const expired = (at: number) => ttl < 0 || nowMs - at > ttl;
     const mem = memory.get(sessionId);
     const stale = new Set<string>();

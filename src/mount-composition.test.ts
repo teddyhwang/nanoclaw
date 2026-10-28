@@ -249,3 +249,28 @@ describe('protected principal provenance mount exclusion', () => {
     },
   );
 });
+
+describe('owed Stop completions mount exclusion', () => {
+  it.each(['root', 'child', 'symlink'] as const)('rejects %s exposure through the REAL buildMounts', async (kind) => {
+    const protectedRoot = path.join(DATA_DIR, 'owed-completions');
+    fs.mkdirSync(protectedRoot, { recursive: true });
+    const alias = path.join(DATA_DIR, 'owed-mount-test-alias');
+    if (kind === 'symlink') fs.symlinkSync(protectedRoot, alias);
+    const hostPath = kind === 'root' ? protectedRoot : kind === 'child' ? path.join(protectedRoot, 'sess.json') : alias;
+    try {
+      await expect(
+        buildMounts(agentGroup, session, containerConfig, 'claude', {}, undefined, [
+          {
+            hostPath,
+            containerPath: '/forged-owed',
+            readonly: false,
+            mountClass: 'allowlisted-extra',
+            scope: GROUP_ID,
+          },
+        ]),
+      ).rejects.toThrow('owed Stop completions');
+    } finally {
+      if (kind === 'symlink') fs.unlinkSync(alias);
+    }
+  });
+});

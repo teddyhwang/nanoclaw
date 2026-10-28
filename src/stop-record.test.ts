@@ -212,7 +212,7 @@ describe('4. cleanup', () => {
     expect(await getPendingCompletions(session.id)).toEqual([]);
   });
 
-  it('prune drops gone sessions, closed sessions past 25 h and anything past 7 d; keeps live debts', async () => {
+  it('prune drops gone sessions and closed sessions past 25 h (any age); keeps fresh closed debts', async () => {
     const live = await seed();
     await recordPendingCompletions(live.id, ['live-new'], 'user-stop');
     await recordPendingCompletions('sess-gone', ['gone'], 'user-stop');
@@ -233,6 +233,25 @@ describe('4. cleanup', () => {
     await prunePendingCompletions(Date.now() + 26 * 3600_000);
     expect(await getPendingCompletions(live.id)).toEqual([]);
   });
+});
+
+describe("4b. the age backstop never drops an active session's debt", () => {
+  it('an 8-day-old unsettled debt on an active session survives prune and still blocks the spawn', async () => {
+    const session = await seed();
+    await pendingChat(session.id, 'stopped');
+    await getDb().run(
+      "INSERT INTO pending_inbound_completions VALUES (?, 'stopped', 'user-stop', ?)",
+      session.id,
+      new Date(Date.now() - 8 * 24 * 3600_000).toISOString(),
+    );
+    _resetPendingCompletionsMemoryForTesting();
+    expect(await prunePendingCompletions(Date.now() + 30 * 24 * 3600_000)).toBe(0);
+    expect(await getPendingCompletions(session.id)).toEqual(['stopped']);
+    const lock = holdInbound(session.id, 6000);
+    expect(await settlePendingCompletions('ag-1', session.id)).toBe(false);
+    expect(statusOf(session.id, 'stopped')).toBe('pending');
+    await lock;
+  }, 15_000);
 });
 
 describe('5. guarded actions see their originating row id', () => {

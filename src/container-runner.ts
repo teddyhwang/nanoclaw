@@ -1481,18 +1481,26 @@ export async function buildMounts(
     }
   }
 
-  // Exclude protected provenance from session, custom and ancestor mounts.
-  const protectedRoot = path.resolve(DATA_DIR, 'requester-provenance');
-  fs.mkdirSync(protectedRoot, { recursive: true });
-  const realProtected = fs.realpathSync(protectedRoot);
-  for (const mount of mounts) {
-    const host = fs.existsSync(mount.hostPath) ? fs.realpathSync(mount.hostPath) : path.resolve(mount.hostPath);
-    if (
-      host === realProtected ||
-      realProtected.startsWith(host + path.sep) ||
-      host.startsWith(realProtected + path.sep)
-    )
-      throw new Error('Container mount overlaps protected requester provenance');
+  // Exclude host-only state from session, custom and ancestor mounts:
+  // protected requester provenance, and owed Stop completions' fallback
+  // file layer (db/pending-completions.ts), which a container must never be
+  // able to delete.
+  for (const [dir, label] of [
+    ['requester-provenance', 'protected requester provenance'],
+    ['owed-completions', 'owed Stop completions'],
+  ] as const) {
+    const protectedRoot = path.resolve(DATA_DIR, dir);
+    fs.mkdirSync(protectedRoot, { recursive: true });
+    const realProtected = fs.realpathSync(protectedRoot);
+    for (const mount of mounts) {
+      const host = fs.existsSync(mount.hostPath) ? fs.realpathSync(mount.hostPath) : path.resolve(mount.hostPath);
+      if (
+        host === realProtected ||
+        realProtected.startsWith(host + path.sep) ||
+        host.startsWith(realProtected + path.sep)
+      )
+        throw new Error(`Container mount overlaps ${label}`);
+    }
   }
   return mergeVolumeMounts([], mounts);
 }
