@@ -40,6 +40,34 @@ describe('selectInitialBatch', () => {
     expect(selectInitialBatch([user, row('chief-nudge:x', 'chat-sdk')]).logs).toEqual([]);
   });
 
+  it('runs co-arriving triggers from two senders as separate turns (first sender first)', () => {
+    const from = (id: string, senderId: string, trigger: 0 | 1 = 1): MessageInRow =>
+      ({
+        ...row(id, 'chat-sdk', { trigger }),
+        channel_type: 'discord',
+        content: JSON.stringify({ senderId }),
+      }) as MessageInRow;
+    const a1 = from('a1', 'alice');
+    const b1 = from('b1', 'bob');
+    const a2 = from('a2', 'alice');
+    const ambient = from('c0', 'carol', 0);
+    const { batch, logs } = selectInitialBatch([a1, b1, ambient, a2]);
+    // Alice's triggers run; Bob's waits; other people's context rides along.
+    expect(batch.map((m) => m.id)).toEqual(['a1', 'c0', 'a2']);
+    expect(logs.join('\n')).toContain('deferring 1 other-sender trigger row(s)');
+    // Bob's turn next: the remaining rows are single-sender, unchanged.
+    expect(selectInitialBatch([b1, ambient]).logs).toEqual([]);
+    // One sender (or one trigger) never splits.
+    expect(selectInitialBatch([a1, a2, ambient]).logs).toEqual([]);
+  });
+
+  it('counts deferred trigger rows in the operator-note split log', () => {
+    const user = row('u1:ag-1', 'chat-sdk');
+    const note = row('chief-nudge:appr-1', 'chat');
+    const ambient = row('a1', 'chat-sdk', { trigger: 0 });
+    expect(selectInitialBatch([note, user, ambient]).logs.join('\n')).toContain('deferring 2 row(s) (1 trigger=1)');
+  });
+
   it('passes through a chat-only batch unchanged (no isolation triggered)', () => {
     const m = [row('c1', 'chat-sdk'), row('c2', 'chat')];
     const { batch, logs } = selectInitialBatch(m);

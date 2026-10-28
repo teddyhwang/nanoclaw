@@ -317,40 +317,28 @@ export async function writeSessionRouting(agentGroupId: string, sessionId: strin
 
 /**
  * Write a message to a session's inbound mailbox. Host-only.
+ * Resolves to the exact persisted content (see writeSessionMessageOnce).
  */
 export async function writeSessionMessage(
   agentGroupId: string,
   sessionId: string,
-  message: {
-    id: string;
-    kind: InboundMessage['kind'];
-    timestamp: string;
-    platformId?: string | null;
-    channelType?: string | null;
-    threadId?: string | null;
-    content: string;
-    processAfter?: string | null;
-    recurrence?: string | null;
-    /**
-     * true = this message should wake the agent (the default); false = accumulate
-     * as context only, don't wake. Host's countDueMessages gates on this
-     * column; the container still reads all prior messages as context when
-     * a triggering message does arrive.
-     */
-    trigger?: boolean;
-    /**
-     * For agent-to-agent inbound: the source session id that emitted the
-     * outbound message which became this inbound row. Used as the return
-     * path so the target's reply routes back to that exact session.
-     */
-    sourceSessionId?: string | null;
-    /**
-     * true = only deliver on the container's first poll (fresh start).
-     * Dying containers (past first poll) skip these rows.
-     */
-    onWake?: boolean;
-  },
+  message: SessionMessageWrite,
 ): Promise<string> {
+  return (await writeSessionMessageOnce(agentGroupId, sessionId, message)).content;
+}
+
+/**
+ * writeSessionMessage that also reports whether this call created the row.
+ * `inserted: false` means a row with that id was already in the mailbox (a
+ * retry or redelivery; ids are idempotent), so nothing was written and the
+ * existing row may already have been handled. Callers that record per-row
+ * side state (provenance, receipts) must not record it again for a duplicate.
+ */
+export async function writeSessionMessageOnce(
+  agentGroupId: string,
+  sessionId: string,
+  message: SessionMessageWrite,
+): Promise<{ content: string; inserted: boolean }> {
   // Documented reset: operators `rm -rf` a session folder to clear a stuck
   // session. The sessions row survives, so the next message takes the
   // existing-session path and lands here with a missing mailbox — the open
@@ -363,8 +351,9 @@ export async function writeSessionMessage(
   // transcription, and video analysis may be slow and must not hold the key.
   const content = await extractAttachmentFiles(agentGroupId, sessionId, message.id, message.content);
 
+  let inserted = false;
   await withMailboxSession(agentGroupId, sessionId, async (mailbox) => {
-    await mailbox.insertMessage({
+    inserted = await mailbox.insertMessage({
       id: message.id,
       kind: message.kind,
       timestamp: message.timestamp,
@@ -387,8 +376,38 @@ export async function writeSessionMessage(
   // The exact content persisted (attachment `data` replaced by `localPath`).
   // Trusted callers forward THIS to provenance capture so its hash matches the
   // stored row; it is the insertion value, not a mailbox reread.
-  return content;
+  return { content, inserted };
 }
+
+export type SessionMessageWrite = {
+  id: string;
+  kind: InboundMessage['kind'];
+  timestamp: string;
+  platformId?: string | null;
+  channelType?: string | null;
+  threadId?: string | null;
+  content: string;
+  processAfter?: string | null;
+  recurrence?: string | null;
+  /**
+   * true = this message should wake the agent (the default); false = accumulate
+   * as context only, don't wake. Host's countDueMessages gates on this
+   * column; the container still reads all prior messages as context when
+   * a triggering message does arrive.
+   */
+  trigger?: boolean;
+  /**
+   * For agent-to-agent inbound: the source session id that emitted the
+   * outbound message which became this inbound row. Used as the return
+   * path so the target's reply routes back to that exact session.
+   */
+  sourceSessionId?: string | null;
+  /**
+   * true = only deliver on the container's first poll (fresh start).
+   * Dying containers (past first poll) skip these rows.
+   */
+  onWake?: boolean;
+};
 
 /**
  * If message content has attachments with base64 `data`, save them to

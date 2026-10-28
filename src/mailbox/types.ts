@@ -125,7 +125,8 @@ export interface MailboxTimelineMessage {
 export interface InboundMailbox {
   setRouting(routing: SessionRouting): void;
   replaceDestinations(entries: Destination[]): void;
-  insertMessage(message: InboundMessage): Promise<void>;
+  /** Resolves true when this call inserted the row; false when a row with that id already existed (nothing written). */
+  insertMessage(message: InboundMessage): Promise<boolean>;
   countDueMessages(): number;
   getDueTasks(): DueTask[];
   getRecentPendingTriggeringChats(since: string): InboundMessage[];

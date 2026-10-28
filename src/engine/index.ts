@@ -164,9 +164,10 @@ export { unguarded, type Unguarded } from '../guard/index.js';
 // `mailbox/` folder (legacyInboundDbPath: the pre-migration spot, directly in
 // the container-writable session folder); use sessionMailboxDir for the
 // session folder itself. Readers must open these without following a link:
-// openInboundReadonlyAt does that for either layout.
+// openInboundReadonlyAt does that for either layout; openOutboundReadonlyAt
+// for the container-written outbound.db.
 export { inboundDbPath, legacyInboundDbPath, outboundDbPath, sessionMailboxDir } from '../mailbox/sqlite/paths.js';
-export { openInboundReadonlyAt } from '../mailbox/sqlite/session-files.js';
+export { openInboundReadonlyAt, openOutboundReadonlyAt } from '../mailbox/sqlite/session-files.js';
 export { withMailboxSession, withExistingMailboxSession, writeOutboundDirect } from '../session-manager.js';
 export type { MailboxSession, TaskUpdate, TaskSeriesSnapshotRecord } from '../mailbox/types.js';
 // Agent-group-scoped schedule store (the S405 structural fix — task
@@ -272,7 +273,12 @@ export { maybeResizeImage, shouldTranscodeAnimated, maybeTranscodeAnimated } fro
 // The `isBackfill` flag on InboundEvent remains the safety net for the
 // `adapter.onInbound → routeInbound` path where engagement evaluation
 // still runs.
-export { resolveSession, writeSessionMessage, writeSessionRouting } from '../session-manager.js';
+export {
+  resolveSession,
+  writeSessionMessage,
+  writeSessionMessageOnce,
+  writeSessionRouting,
+} from '../session-manager.js';
 
 // Inbound entrypoint for hosts that synthesize events from non-channel
 // sources (e.g. dashboard-driven trigger fires). Constructs an

@@ -26,11 +26,13 @@ import type { MailboxSessionKey } from '../types.js';
 import { createEmptyDbFile, openAnchoredDb } from './anchored-db.js';
 import { INBOUND_DB, MAILBOX_DIR, OUTBOUND_DB, sessionMailboxDir } from './paths.js';
 import { INBOUND_SCHEMA, OUTBOUND_SCHEMA } from './schema.js';
+import { isRegular, layoutOf, type SessionLayout } from './session-readers.js';
+
+export type { SessionLayout };
+export { openInboundReadonlyAt, openOutboundReadonlyAt } from './session-readers.js';
 
 const SQLITE_SIDE_FILES = ['', '-journal', '-wal', '-shm'] as const;
 const MIGRATING = `${INBOUND_DB}.migrating`;
-
-export type SessionLayout = 'current' | 'legacy' | 'absent';
 
 function openSession(key: MailboxSessionKey, create = false): AnchoredDir | null {
   return AnchoredDir.open(sessionMailboxDir(key), [], create);
@@ -40,24 +42,6 @@ function openMailbox(key: MailboxSessionKey): AnchoredDir {
   const mailbox = AnchoredDir.open(sessionMailboxDir(key), [MAILBOX_DIR]);
   if (!mailbox) throw new Error(`session mailbox is missing: ${key.agentGroupId}/${key.sessionId}`);
   return mailbox;
-}
-
-function isRegular(dir: AnchoredDir, name: string): boolean {
-  return dir.lstatExact(name)?.isFile() ?? false;
-}
-
-function layoutOf(session: AnchoredDir): SessionLayout {
-  if (session.lstatExact(MAILBOX_DIR)?.isDirectory()) {
-    const mailbox = session.openDir(MAILBOX_DIR);
-    if (mailbox) {
-      try {
-        if (isRegular(mailbox, INBOUND_DB)) return 'current';
-      } finally {
-        mailbox.close();
-      }
-    }
-  }
-  return session.lstatExact(INBOUND_DB) ? 'legacy' : 'absent';
 }
 
 /** Layout of a session's mailbox files. Reads only. */
@@ -279,29 +263,4 @@ export function destroySessionFiles(key: MailboxSessionKey): void {
   } finally {
     session.close();
   }
-}
-
-/**
- * Read-only handle on a session folder's inbound.db wherever the layout keeps
- * it (mailbox, or the legacy spot before migration), never through a link.
- * Null when there is none.
- */
-export function openInboundReadonlyAt(sessionFolder: string): Database.Database | null {
-  const session = AnchoredDir.open(sessionFolder, []);
-  if (!session) return null;
-  let layout: SessionLayout;
-  try {
-    layout = layoutOf(session);
-  } catch (err) {
-    session.close();
-    throw err;
-  }
-  if (layout === 'absent') {
-    session.close();
-    return null;
-  }
-  if (layout === 'legacy') return openAnchoredDb(session, INBOUND_DB, 'readonly');
-  session.close();
-  const mailbox = AnchoredDir.open(sessionFolder, [MAILBOX_DIR]);
-  return mailbox ? openAnchoredDb(mailbox, INBOUND_DB, 'readonly') : null;
 }

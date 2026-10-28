@@ -300,11 +300,34 @@ export function selectInitialBatch(messages: MessageInRow[]): {
   if (notes.length > 0 && notes.length < batchTriggers.length) {
     const noteFirst = isOperatorNoteRow(batchTriggers[0]);
     const kept = batch.filter((m) => isOperatorNoteRow(m) === noteFirst);
+    const deferred = batch.filter((m) => !kept.includes(m));
     logs.push(
       `Operator note and routed input co-arrived: running the ${noteFirst ? 'operator note(s)' : 'routed input'} first, ` +
-        `deferring ${batch.length - kept.length} row(s) — left pending for their own turn`,
+        `deferring ${deferred.length} row(s) (${deferred.filter((m) => m.trigger === 1).length} trigger=1) ` +
+        `— left pending for their own turn`,
     );
     batch = kept;
+  }
+
+  // 5. Single-requester initial batch (Optimus) — routed chat triggers from
+  //    two different senders co-arrived in one batch made one turn with two
+  //    requesters; the host refuses that (one turn, one principal) and the
+  //    turn ran with no user. Run the first trigger's sender; other senders'
+  //    triggers stay pending for their own turns, exactly like the follow-up
+  //    cross-sender deferral. Accumulate-only (trigger=0) context rides along.
+  //    The host's protected queue accepts the same single-sender claim.
+  const chatTriggers = batch.filter((m) => m.trigger === 1 && isChatRow(m) && !isOperatorNoteRow(m));
+  if (chatTriggers.length > 1) {
+    const firstSender = extractMessageSender(chatTriggers[0]);
+    const others = chatTriggers.filter((m) => extractMessageSender(m) !== firstSender);
+    if (others.length > 0) {
+      batch = batch.filter((m) => !others.includes(m));
+      logs.push(
+        `Triggers from more than one sender co-arrived: running the first sender's ` +
+          `${chatTriggers.length - others.length} trigger row(s), deferring ${others.length} other-sender trigger row(s) ` +
+          `— left pending for their own turn`,
+      );
+    }
   }
 
   return { batch, logs };

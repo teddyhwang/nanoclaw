@@ -21,7 +21,7 @@ import { AnchoredDir } from '../../anchored-dir.js';
 import { openAnchoredDb } from './anchored-db.js';
 import { SqliteAgentMailbox } from './index.js';
 import { log } from '../../log.js';
-import { openInboundReadonlyAt, upgradeAllSessionLayouts } from './session-files.js';
+import { openInboundReadonlyAt, openOutboundReadonlyAt, upgradeAllSessionLayouts } from './session-files.js';
 import { INBOUND_SCHEMA } from './schema.js';
 
 const KEY = { agentGroupId: 'ag-a', sessionId: 'sess-a' };
@@ -49,7 +49,7 @@ function ids(file: string): string[] {
   }
 }
 
-function insert(mailbox: SqliteAgentMailbox, id: string): Promise<void> {
+function insert(mailbox: SqliteAgentMailbox, id: string): Promise<boolean> {
   return mailbox.session(KEY, (m) =>
     m.insertMessage({
       id,
@@ -327,6 +327,36 @@ describe('legacy layout migration', () => {
     fs.rmSync(path.join(SESSION, 'inbound.db'));
     fs.symlinkSync(path.join(OUTSIDE, 'x.db'), path.join(SESSION, 'inbound.db'));
     expect(() => openInboundReadonlyAt(SESSION)).toThrow(/symlink/);
+  });
+
+  it('readers open outbound.db read-only, never through a planted link', () => {
+    expect(openOutboundReadonlyAt(path.join(ROOT, 'missing'))).toBeNull();
+    expect(openOutboundReadonlyAt(SESSION)).toBeNull();
+    const real = new Database(path.join(SESSION, 'outbound.db'));
+    real.exec('CREATE TABLE t (v TEXT)');
+    real.prepare("INSERT INTO t VALUES ('real')").run();
+    real.close();
+    const db = openOutboundReadonlyAt(SESSION)!;
+    expect(db.prepare('SELECT v FROM t').all()).toEqual([{ v: 'real' }]);
+    expect(() => db.prepare("INSERT INTO t VALUES ('w')").run()).toThrow(/readonly/);
+    db.close();
+
+    // A container swaps the name for a link to a host database.
+    const victim = path.join(OUTSIDE, 'victim.db');
+    const host = new Database(victim);
+    host.exec('CREATE TABLE t (v TEXT)');
+    host.close();
+    fs.rmSync(path.join(SESSION, 'outbound.db'));
+    fs.symlinkSync(victim, path.join(SESSION, 'outbound.db'));
+    expect(() => openOutboundReadonlyAt(SESSION)).toThrow(/symlink/);
+    // A linked session folder segment is refused too (only the root follows).
+    fs.rmSync(path.join(SESSION, 'outbound.db'));
+    fs.mkdirSync(path.join(SESSION, 'mailbox'), { recursive: true });
+    fs.renameSync(path.join(SESSION, 'mailbox'), path.join(OUTSIDE, 'moved-mailbox'));
+    fs.symlinkSync(path.join(OUTSIDE, 'moved-mailbox'), path.join(SESSION, 'mailbox'));
+    new Database(path.join(OUTSIDE, 'moved-mailbox', 'inbound.db')).close();
+    expect(() => openInboundReadonlyAt(SESSION)).not.toThrow();
+    expect(openInboundReadonlyAt(SESSION)).toBeNull();
   });
 
   it('destroy() removes mailbox files but not what a planted link points at', async () => {
