@@ -14,7 +14,11 @@ import { getContainerStartedAtMs, isContainerRunning, killContainer } from './co
 import type { Session } from './types.js';
 
 import { getSessionClaim } from './db/coordination.js';
-import { clearPendingCompletions, getPendingCompletions } from './db/pending-completions.js';
+import {
+  clearAllPendingCompletions,
+  clearPendingCompletions,
+  getPendingCompletions,
+} from './db/pending-completions.js';
 import { requestWake } from './request-wake.js';
 
 export const MCP_TOOL_CEILING_MS = 60 * 60 * 1000;
@@ -219,8 +223,11 @@ async function reconcileActiveSession(session: Session): Promise<void> {
   try {
     // Completions a host Stop owes (see db/pending-completions.ts): settled
     // first, so nothing below can wake a runner for those inputs.
+    // A failed read counts as owing (nothing is cleared, the wake below is
+    // refused by spawnContainer's own settle).
     const owed = await getPendingCompletions(session.id);
     let owedSettled = false;
+    owedThisPass.set(session.id, new Set(owed));
     // Phase 1: one existing mailbox action. No external wake while this key is
     // open; recurrence writes and snapshot replacement go through this mailbox.
     const exists = await withExistingMailboxSession(agentGroup.id, session.id, async (mailbox) => {
@@ -248,7 +255,18 @@ async function reconcileActiveSession(session: Session): Promise<void> {
       if (!shouldWake) await maintainSessionMailbox(mailbox, session, agentGroup.id, false, dueCount);
       return true;
     });
-    if (owedSettled) await clearPendingCompletions(session.id, owed);
+    if (owed.length) {
+      if (!exists) {
+        // The mailbox is gone: nothing left to run or complete.
+        await clearAllPendingCompletions(session.id);
+        noteOwedSettled(session.id);
+      } else if (owedSettled) {
+        await clearPendingCompletions(session.id, owed);
+        noteOwedSettled(session.id);
+      } else {
+        noteOwedUnsettled(session, owed.length);
+      }
+    }
     if (!exists || !shouldWake) return;
 
     // Phase 2: the mailbox is closed before plugin events and wakeContainer,
@@ -271,7 +289,47 @@ async function reconcileActiveSession(session: Session): Promise<void> {
     });
   } catch (err) {
     log.error('Session mailbox sweep failed', { agentGroupId: agentGroup.id, sessionId: session.id, err });
+  } finally {
+    owedThisPass.delete(session.id);
   }
+}
+
+/** Owed completions read at the start of the current pass, per session:
+ * the stuck-claim reset never fails, notifies or re-queues these inputs (a
+ * Stop already decided they are done; the settle completes them). */
+const owedThisPass = new Map<string, ReadonlySet<string>>();
+
+/** Consecutive sweep passes a session's owed completions stayed unsettled. */
+export const OWED_STUCK_ALERT_PASSES = 3;
+const owedStuck = new Map<string, { passes: number; since: string; alerted: boolean }>();
+
+function noteOwedUnsettled(session: Session, owedCount: number): void {
+  const state = owedStuck.get(session.id) ?? { passes: 0, since: new Date().toISOString(), alerted: false };
+  state.passes++;
+  owedStuck.set(session.id, state);
+  if (state.alerted || state.passes < OWED_STUCK_ALERT_PASSES) return;
+  state.alerted = true; // once per stuck episode
+  log.error('Owed inbound completions stuck; no runner can start for this session', {
+    sessionId: session.id,
+    passes: state.passes,
+    owedCount,
+    since: state.since,
+  });
+  emitEngineEvent('completions.stuck', {
+    sessionId: session.id,
+    agentGroupId: session.agent_group_id,
+    passes: state.passes,
+    owedCount,
+    since: state.since,
+  });
+}
+
+function noteOwedSettled(sessionId: string): void {
+  owedStuck.delete(sessionId);
+}
+
+export function _resetOwedStuckForTesting(): void {
+  owedStuck.clear();
 }
 
 /** Run one sweep bookkeeping step; a failure is logged and the sweep goes on
@@ -495,8 +553,9 @@ export function _resetStuckProcessingRowsForTesting(
   session: Session,
   reason: string,
   forceFail = false,
+  owed?: ReadonlySet<string>,
 ): void {
-  resetStuckProcessingRows(inbox, outbox, session, reason, forceFail);
+  resetStuckProcessingRows(inbox, outbox, session, reason, forceFail, owed);
 }
 
 function resetStuckProcessingRows(
@@ -505,9 +564,12 @@ function resetStuckProcessingRows(
   session: Session,
   reason: string,
   forceFail = false,
+  owed: ReadonlySet<string> = owedThisPass.get(session.id) ?? new Set(),
 ): void {
   const now = Date.now();
   for (const { messageId } of outbox.getProcessingClaims()) {
+    // Stopped by the user: done, never failed, notified or re-queued.
+    if (owed.has(messageId)) continue;
     const message = inbox.getRecoverableMessage(messageId);
     if (!message) continue;
 

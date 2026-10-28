@@ -30,6 +30,7 @@ import {
 import { getMessagingGroup } from '../../db/messaging-groups.js';
 import { createPendingApproval, deletePendingApproval, getSession } from '../../db/sessions.js';
 import { getDeliveryAdapter } from '../../delivery.js';
+import { DELIVERY_MESSAGE_ID_KEY, holdContext } from '../../delivery-guard.js';
 import { requestWake } from '../../request-wake.js';
 import { log } from '../../log.js';
 import { logId } from '../../log-id.js';
@@ -282,7 +283,11 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
     session_id: session.id,
     request_id: approvalId,
     action,
-    payload: JSON.stringify(payload),
+    // A guarded delivery action's hold remembers its originating row, so the
+    // approved replay runs with the same context (delivery-guard.ts).
+    payload: JSON.stringify(
+      holdContext() ? { ...payload, [DELIVERY_MESSAGE_ID_KEY]: holdContext()!.messageId } : payload,
+    ),
     created_at: new Date().toISOString(),
     channel_type: target.messagingGroup.channel_type,
     platform_id: target.messagingGroup.platform_id,

@@ -31,7 +31,12 @@ import {
 import { log } from './log.js';
 import { getAgentMailbox, type InboundMessage, type MailboxSession } from './mailbox/index.js';
 import { retryWhileBusy } from './mailbox/sqlite/busy.js';
-import { clearPendingCompletions, getPendingCompletions, recordPendingCompletions } from './db/pending-completions.js';
+import {
+  clearAllPendingCompletions,
+  clearPendingCompletions,
+  getPendingCompletions,
+  recordPendingCompletions,
+} from './db/pending-completions.js';
 import { enqueueSessionReconcile } from './reconcile-feeds.js';
 import type { Session } from './types.js';
 
@@ -120,9 +125,13 @@ async function carryForwardRecentPendingChatRows(
   if (!source) return;
 
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-  const rows = await withExistingMailboxSession(agentGroupId, source.id, (mailbox) =>
-    mailbox.getRecentPendingTriggeringChats(since),
-  );
+  // Inputs a Stop already decided are done never move to a new session.
+  const owed = new Set(await getPendingCompletions(source.id));
+  const rows = (
+    await withExistingMailboxSession(agentGroupId, source.id, (mailbox) =>
+      mailbox.getRecentPendingTriggeringChats(since),
+    )
+  )?.filter((row) => !owed.has(row.id));
   if (!rows || rows.length === 0) return;
 
   await withMailboxSession(agentGroupId, targetSessionId, async (mailbox) => {
@@ -292,6 +301,13 @@ export function initSessionFolder(agentGroupId: string, sessionId: string): void
 export async function destroySessionMailbox(agentGroupId: string, sessionId: string): Promise<void> {
   await getAgentMailbox().destroy(mailboxKey(agentGroupId, sessionId));
   fs.rmSync(sessionContextPath(agentGroupId, sessionId), { force: true });
+  // Nothing is left to run or complete: drop any owed Stop completions.
+  try {
+    await clearAllPendingCompletions(sessionId);
+    // eslint-disable-next-line no-catch-all/no-catch-all -- the sweep's prune drops them later; never fail the destroy
+  } catch (err) {
+    log.warn('Could not clear owed completions for a destroyed mailbox', { sessionId, err });
+  }
 }
 
 /**
@@ -337,7 +353,14 @@ export async function completeInboundDurably(
  * fails, in which case no runner may start for the session.
  */
 export async function settlePendingCompletions(agentGroupId: string, sessionId: string): Promise<boolean> {
-  const owed = await getPendingCompletions(sessionId);
+  let owed: string[];
+  try {
+    owed = await getPendingCompletions(sessionId);
+    // eslint-disable-next-line no-catch-all/no-catch-all -- unknown debt: refuse the spawn
+  } catch (err) {
+    log.warn('Could not read owed inbound completions; refusing to start a runner', { sessionId, err });
+    return false;
+  }
   if (owed.length === 0) return true;
   try {
     await retryWhileBusy(() =>

@@ -219,6 +219,12 @@ export interface EngineEventMap {
     reason: 'idle' | 'shutdown' | 'killed' | 'crashed';
   };
   'container.stuck': { sessionId: string; agentGroupId: string };
+  /**
+   * A host Stop's owed inbound completions stayed unsettled for several
+   * sweep passes, so no runner can start for the session (new messages
+   * wait). Emitted once per stuck episode; embedders alert the operator.
+   */
+  'completions.stuck': { sessionId: string; agentGroupId: string; passes: number; owedCount: number; since: string };
   'tool.started': { sessionId: string; agentGroupId: string; tool: string };
   'tool.completed': { sessionId: string; agentGroupId: string; tool: string; ok: boolean };
 }
