@@ -57,7 +57,8 @@ export function openInboundReadonlyAt(sessionFolder: string): Database.Database 
   if (layout === 'legacy') return openAnchoredDb(session, INBOUND_DB, 'readonly');
   session.close();
   const mailbox = AnchoredDir.open(sessionFolder, [MAILBOX_DIR]);
-  return mailbox ? openAnchoredDb(mailbox, INBOUND_DB, 'readonly') : null;
+  // mailbox/ is read-only to the container: its inbound.db schema is the host's.
+  return mailbox ? openAnchoredDb(mailbox, INBOUND_DB, 'readonly', { schema: 'host' }) : null;
 }
 
 /**

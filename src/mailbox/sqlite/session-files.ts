@@ -23,7 +23,7 @@ import Database from 'better-sqlite3';
 import { AnchoredDir } from '../../anchored-dir.js';
 import { log } from '../../log.js';
 import type { MailboxSessionKey } from '../types.js';
-import { createEmptyDbFile, openAnchoredDb } from './anchored-db.js';
+import { assertPlainSchema, createEmptyDbFile, openAnchoredDb } from './anchored-db.js';
 import { INBOUND_DB, MAILBOX_DIR, OUTBOUND_DB, sessionMailboxDir } from './paths.js';
 import { INBOUND_SCHEMA, OUTBOUND_SCHEMA } from './schema.js';
 import { isRegular, layoutOf, type SessionLayout } from './session-readers.js';
@@ -122,9 +122,13 @@ export function migrateSessionLayout(key: MailboxSessionKey): void {
       } finally {
         mailboxForPath.close();
       }
-      const copy = openAnchoredDb(openMailbox(key), MIGRATING, 'readwrite');
+      // The copy is host-owned (inside mailbox/), but VACUUM INTO copied the
+      // legacy file's container-written schema: refuse a view, trigger or
+      // virtual table before it becomes the trusted inbound.db.
+      const copy = openAnchoredDb(openMailbox(key), MIGRATING, 'readwrite', { schema: 'host' });
       let rows = 0;
       try {
+        assertPlainSchema(copy, INBOUND_DB);
         copy.pragma('journal_mode = DELETE');
         // An empty (0-byte) or tableless legacy file has no rows: give the copy
         // the schema so the new inbound.db is complete, and count zero.
@@ -199,7 +203,7 @@ function ensureDb(dir: AnchoredDir, name: string, schema: 'inbound' | 'outbound'
     throw err;
   }
   // openAnchoredDb refuses a non-regular leaf and takes ownership of dir.
-  const db = openAnchoredDb(dir, name, 'readwrite');
+  const db = openAnchoredDb(dir, name, 'readwrite', { schema: schema === 'inbound' ? 'host' : 'container' });
   try {
     db.pragma('journal_mode = DELETE');
     db.exec(schema === 'inbound' ? INBOUND_SCHEMA : OUTBOUND_SCHEMA);
@@ -236,7 +240,7 @@ export function sessionFilesExist(key: MailboxSessionKey): boolean {
 }
 
 export function openSessionInbound(key: MailboxSessionKey): Database.Database {
-  const db = openAnchoredDb(openMailbox(key), INBOUND_DB, 'readwrite');
+  const db = openAnchoredDb(openMailbox(key), INBOUND_DB, 'readwrite', { schema: 'host' });
   db.pragma('journal_mode = DELETE');
   db.pragma('busy_timeout = 5000');
   return db;
