@@ -748,35 +748,47 @@ async function deliverToAgent(
   if (wake) content = stampEngagement(content, agent.engage_mode);
 
   const messageId = messageIdForAgent(event.message.id, agent.agent_group_id);
-  const persistedContent = await writeSessionMessage(session.agent_group_id, session.id, {
-    id: messageId,
-    kind: event.message.kind,
-    timestamp: event.message.timestamp,
-    platformId: deliveryAddr.platformId,
-    channelType: deliveryAddr.channelType,
-    threadId: deliveryAddr.threadId,
-    content,
-    trigger: wake,
-  });
-  emitEngineEvent('inbound.written', {
-    sessionId: session.id,
-    agentGroupId: session.agent_group_id,
-    messageId,
-    trigger: wake,
-  });
-  if (wake)
-    emitEngineEvent('principal.input', {
-      sessionId: session.id,
-      agentGroupId: session.agent_group_id,
-      messageId,
-      kind: 'human',
-      content: persistedContent,
-      channelType: event.channelType,
-      platformId: event.platformId,
-      threadId: event.threadId ?? null,
-      isBotMessage: event.message.isBotMessage,
-      sourceUserId: userId,
-    });
+  // Both events fire from onWritten: the moment the row is durable and
+  // before the write yields, so protected provenance captured from
+  // principal.input is in place before a running runner's claim of this row
+  // can reach the host (see SessionMessageWriteOptions.onWritten).
+  await writeSessionMessage(
+    session.agent_group_id,
+    session.id,
+    {
+      id: messageId,
+      kind: event.message.kind,
+      timestamp: event.message.timestamp,
+      platformId: deliveryAddr.platformId,
+      channelType: deliveryAddr.channelType,
+      threadId: deliveryAddr.threadId,
+      content,
+      trigger: wake,
+    },
+    {
+      onWritten: ({ content: persistedContent }) => {
+        emitEngineEvent('inbound.written', {
+          sessionId: session.id,
+          agentGroupId: session.agent_group_id,
+          messageId,
+          trigger: wake,
+        });
+        if (wake)
+          emitEngineEvent('principal.input', {
+            sessionId: session.id,
+            agentGroupId: session.agent_group_id,
+            messageId,
+            kind: 'human',
+            content: persistedContent,
+            channelType: event.channelType,
+            platformId: event.platformId,
+            threadId: event.threadId ?? null,
+            isBotMessage: event.message.isBotMessage,
+            sourceUserId: userId,
+          });
+      },
+    },
+  );
   if (created) emitEngineEvent('session.created', { session, created });
 
   if (wake && created) {

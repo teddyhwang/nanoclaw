@@ -209,7 +209,6 @@ function tablesOf(db: Database.Database): string[] {
 function copyLegacyRows(key: MailboxSessionKey, copy: Database.Database): number {
   const source = openAnchoredDb(openSession(key)!, INBOUND_DB, 'readwrite');
   try {
-    source.pragma('busy_timeout = 5000');
     const present = new Set(tablesOf(source));
     const move = copy.transaction(() => {
       for (const table of tablesOf(copy)) {
@@ -290,7 +289,7 @@ export function sessionFilesExist(key: MailboxSessionKey): boolean {
 export function openSessionInbound(key: MailboxSessionKey): Database.Database {
   const db = openAnchoredDb(openMailbox(key), INBOUND_DB, 'readwrite', { schema: 'host' });
   db.pragma('journal_mode = DELETE');
-  db.pragma('busy_timeout = 5000');
+  // busy_timeout: openAnchoredDb's short SESSION_DB_BUSY_TIMEOUT_MS (busy.ts).
   return db;
 }
 
@@ -299,7 +298,6 @@ export function openSessionOutbound(key: MailboxSessionKey, mode: 'readonly' | '
   if (!session) throw new Error(`session folder is missing: ${key.agentGroupId}/${key.sessionId}`);
   const db = openAnchoredDb(session, OUTBOUND_DB, mode);
   if (mode === 'readwrite') db.pragma('journal_mode = DELETE');
-  db.pragma('busy_timeout = 5000');
   return db;
 }
 

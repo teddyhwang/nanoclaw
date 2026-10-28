@@ -265,6 +265,66 @@ describe('writeSessionMessage re-provisions a deleted session folder', () => {
     }
   });
 
+  it('onWritten runs once the row is durable, before the write yields to any host callback (S3)', async () => {
+    // A runner's claim reaches the host only via a timer/I/O callback, so
+    // onWritten must run inside the mailbox session, right after the insert,
+    // and not after the write's later awaits (session bookkeeping).
+    const seen: Array<{ inserted: boolean; rowPresent: boolean; settled: boolean }> = [];
+    let settled = false;
+    const id = 'chief-nudge:hook-1';
+    const readRow = () => {
+      const db = new Database(inboundDbPath(AG, SESS), { readonly: true });
+      try {
+        return !!db.prepare('SELECT 1 FROM messages_in WHERE id = ?').get(id);
+      } finally {
+        db.close();
+      }
+    };
+    const write = (text: string) =>
+      writeSessionMessageOnce(
+        AG,
+        SESS,
+        { id, kind: 'chat', timestamp: new Date().toISOString(), content: JSON.stringify({ text }) },
+        {
+          onWritten: ({ inserted }) => {
+            seen.push({ inserted, rowPresent: readRow(), settled });
+          },
+        },
+      ).then((result) => {
+        settled = true;
+        return result;
+      });
+    const result = await write('first');
+    expect(result.inserted).toBe(true);
+    expect(seen).toEqual([{ inserted: true, rowPresent: true, settled: false }]);
+    settled = false;
+    await write('retry');
+    expect(seen).toHaveLength(2);
+    expect(seen[1]).toEqual({ inserted: false, rowPresent: true, settled: false });
+  });
+
+  it('a throwing onWritten does not undo the write and is rethrown after it', async () => {
+    const id = 'chief-nudge:hook-2';
+    await expect(
+      writeSessionMessageOnce(
+        AG,
+        SESS,
+        { id, kind: 'chat', timestamp: new Date().toISOString(), content: '{}' },
+        {
+          onWritten: () => {
+            throw new Error('capture refused');
+          },
+        },
+      ),
+    ).rejects.toThrow('capture refused');
+    const db = new Database(inboundDbPath(AG, SESS), { readonly: true });
+    try {
+      expect(db.prepare('SELECT id FROM messages_in WHERE id = ?').pluck().get(id)).toBe(id);
+    } finally {
+      db.close();
+    }
+  });
+
   it('writeSessionMessageOnce reports a retried id as not inserted and keeps the first row', async () => {
     const message = (text: string) => ({
       id: 'chief-nudge:retry-1',

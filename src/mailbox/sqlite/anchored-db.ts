@@ -53,6 +53,7 @@ import fs from 'fs';
 import { MessageChannel, Worker, type MessagePort } from 'worker_threads';
 
 import type { AnchoredDir } from '../../anchored-dir.js';
+import { SESSION_DB_BUSY_TIMEOUT_MS } from './busy.js';
 
 export class UnsafeSessionDbError extends Error {}
 
@@ -190,6 +191,9 @@ export function withFifoWatchdog<T>(path: string, open: () => T): T {
 const MAX_SCHEMA_ROWS = 200;
 const LITERAL_DEFAULT =
   /^(?:NULL|TRUE|FALSE|CURRENT_(?:TIME|DATE|TIMESTAMP)|[-+]?\d+(?:\.\d+)?(?:e[-+]?\d+)?|'(?:[^']|'')*')$/i;
+// The only sqlite_-prefixed tables SQLite itself creates in a host schema
+// (AUTOINCREMENT and ANALYZE).
+const SQLITE_INTERNAL_TABLES = new Set(['sqlite_sequence', 'sqlite_stat1', 'sqlite_stat4']);
 // The one CHECK the host schemas use (single-row tables).
 const SINGLE_ROW_CHECK = /CHECK\s*\(\s*id\s*=\s*1\s*\)/gi;
 
@@ -215,7 +219,10 @@ function unsafeSchema(prepare: Database.Database['prepare']): string | null {
       continue;
     }
     if (row.type !== 'table') return `its schema has a ${label}`;
-    if (row.name.startsWith('sqlite_')) continue; // sqlite_sequence, sqlite_stat*
+    // SQLite's own tables keep their reserved names and are still checked as
+    // plain tables below; any other sqlite_ name is container-planted.
+    if (row.name.toLowerCase().startsWith('sqlite_') && !SQLITE_INTERNAL_TABLES.has(row.name))
+      return `its schema has a reserved-name ${label}`;
     // SQLite stores ordinary tables as exactly "CREATE TABLE ..."; anything
     // else (a rewritten "CREATE\nVIRTUAL TABLE" included) is refused.
     if (!row.sql || !row.sql.startsWith('CREATE TABLE ')) return `its schema has a non-plain ${label}`;
@@ -233,9 +240,7 @@ function unsafeSchema(prepare: Database.Database['prepare']): string | null {
   }
   const virtual = prepare(
     `SELECT name FROM pragma_table_list WHERE type NOT IN ('table', 'shadow') AND schema = 'main'`,
-  )
-    .all()
-    .find((r) => !(r as { name: string }).name.startsWith('sqlite_')) as { name: string } | undefined;
+  ).all()[0] as { name: string } | undefined;
   if (virtual) return `its schema has a virtual table ${JSON.stringify(virtual.name)}`;
   return null;
 }
@@ -381,7 +386,10 @@ export function openAnchoredDb(
     if (!before) refuse(name, 'it does not exist');
     const file = dir.pathOf(name);
     if (container) watch = watchFifos([file, ...SIDE_FILES.map((suffix) => dir.pathOf(name + suffix))]);
-    const open = () => new Database(file, { readonly: mode === 'readonly', fileMustExist: true });
+    // A container can hold this file's lock indefinitely: wait only briefly
+    // (synchronously) in SQLite. See busy.ts.
+    const open = () =>
+      new Database(file, { readonly: mode === 'readonly', fileMustExist: true, timeout: SESSION_DB_BUSY_TIMEOUT_MS });
     db = watch ? watch.arm(open) : open();
     // database_list reads no page: it reports the path SQLite resolved.
     const main = (db.prepare('PRAGMA database_list').all() as Array<{ name: string; file: string }>).find(

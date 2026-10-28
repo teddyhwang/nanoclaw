@@ -323,8 +323,25 @@ export async function writeSessionMessage(
   agentGroupId: string,
   sessionId: string,
   message: SessionMessageWrite,
+  options?: SessionMessageWriteOptions,
 ): Promise<string> {
-  return (await writeSessionMessageOnce(agentGroupId, sessionId, message)).content;
+  return (await writeSessionMessageOnce(agentGroupId, sessionId, message, options)).content;
+}
+
+export interface SessionMessageWriteOptions {
+  /**
+   * Runs synchronously the moment the row is durable, inside the mailbox
+   * session, before this write yields to any timer or I/O callback. A
+   * running runner can see the row from then on, but its claim of the row
+   * reaches the host only through a host callback, which cannot run before
+   * this hook returns. Record per-row host state the claim depends on
+   * (requester provenance) here, never after the write resolves: the write's
+   * own later awaits are a window in which the claim can already be handled.
+   * Must stay synchronous and must not open a mailbox session for this
+   * session. Called once, for a duplicate too (`inserted: false`). A throw is
+   * rethrown after the write has finished its own bookkeeping.
+   */
+  onWritten?: (result: { content: string; inserted: boolean }) => void;
 }
 
 /**
@@ -338,6 +355,7 @@ export async function writeSessionMessageOnce(
   agentGroupId: string,
   sessionId: string,
   message: SessionMessageWrite,
+  options: SessionMessageWriteOptions = {},
 ): Promise<{ content: string; inserted: boolean }> {
   // Documented reset: operators `rm -rf` a session folder to clear a stuck
   // session. The sessions row survives, so the next message takes the
@@ -352,6 +370,7 @@ export async function writeSessionMessageOnce(
   const content = await extractAttachmentFiles(agentGroupId, sessionId, message.id, message.content);
 
   let inserted = false;
+  let hookError: { err: unknown } | undefined;
   await withMailboxSession(agentGroupId, sessionId, async (mailbox) => {
     inserted = await mailbox.insertMessage({
       id: message.id,
@@ -367,12 +386,21 @@ export async function writeSessionMessageOnce(
       sourceSessionId: message.sourceSessionId ?? null,
       onWake: message.onWake ?? false,
     });
+    // No macrotask has run since the insert committed (only microtasks).
+    if (options.onWritten) {
+      try {
+        options.onWritten({ content, inserted });
+      } catch (err) {
+        hookError = { err };
+      }
+    }
   });
   await updateSession(sessionId, { last_active: new Date().toISOString() });
   // Ask for a prompt reconcile now that the message is durable: a wake that
   // fails transiently is retried within the queue's cadence instead of
   // waiting for the next resync tick. No-op when the sweep isn't running.
   enqueueSessionReconcile(sessionId);
+  if (hookError) throw hookError.err;
   // The exact content persisted (attachment `data` replaced by `localPath`).
   // Trusted callers forward THIS to provenance capture so its hash matches the
   // stored row; it is the insertion value, not a mailbox reread.

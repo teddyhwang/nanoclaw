@@ -4,6 +4,7 @@ import path from 'path';
 import { DATA_DIR } from '../../config.js';
 import { log } from '../../log.js';
 import { CONTAINER_MAILBOX_PATH, sessionReadonlyMailboxDir, sessionMailboxPath } from './paths.js';
+import { retryWhileBusy } from './busy.js';
 export { inboundDbPath, legacyInboundDbPath, outboundDbPath, sessionMailboxDir, sessionMailboxPath } from './paths.js';
 import {
   destroySessionFiles,
@@ -224,7 +225,9 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
           };
         }),
       ),
-    insertMessage: async (message) => insertMessage(db, message, nextSequence()),
+    // Async writes retry a container-held lock without blocking the event
+    // loop (busy.ts); each attempt commits fully or not at all.
+    insertMessage: (message) => retryWhileBusy(() => insertMessage(db, message, nextSequence())),
     countDueMessages: () => countDueMessages(db),
     getDueTasks: () => getDueTaskRows(db).map((row) => ({ id: row.id, seriesId: row.series_id, content: row.content })),
     getRecentPendingTriggeringChats: (since) =>
@@ -295,17 +298,18 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
     getInboundSourceSessionId: (messageId) => getInboundSourceSessionId(db, messageId),
     isSyntheticInboundMessage: (messageId) => isSyntheticInboundMessage(db, messageId),
     getMostRecentPeerSourceSessionId: (peerAgentGroupId) => getMostRecentPeerSourceSessionId(db, peerAgentGroupId),
-    insertTask: async (task) => insertTaskRow(db, task, nextSequence()),
+    insertTask: (task) => retryWhileBusy(() => insertTaskRow(db, task, nextSequence())),
     hasLiveTaskOccurrence: (seriesId) => hasLiveTaskOccurrence(db, seriesId),
-    materializeTaskOccurrence: async (occurrence) => materializeTaskOccurrence(db, occurrence),
+    materializeTaskOccurrence: (occurrence) => retryWhileBusy(() => materializeTaskOccurrence(db, occurrence)),
     replaceTaskSeriesSnapshot: (series) => replaceTaskSeriesSnapshot(db, series),
-    armNextTask: async (originalId, task) => {
-      const sequence = nextSequence();
-      db.transaction(() => {
-        insertTaskRow(db, task, sequence);
-        clearRecurrence(db, originalId);
-      })();
-    },
+    armNextTask: (originalId, task) =>
+      retryWhileBusy(() => {
+        const sequence = nextSequence();
+        db.transaction(() => {
+          insertTaskRow(db, task, sequence);
+          clearRecurrence(db, originalId);
+        })();
+      }),
     cancelTask: (taskId) => (taskId === undefined ? cancelAllTasks(db) : cancelTask(db, taskId)),
     pauseTask: (taskId) => pauseTask(db, taskId),
     resumeTask: (taskId) => resumeTask(db, taskId),
@@ -456,7 +460,7 @@ export function wrapSqliteOutbound(
       };
     },
     getDueMessages: (excludeIds, options) =>
-      getDueOutboundMessages(readable(), options?.includeNotYetDue === true)
+      getDueOutboundMessages(readable(), options?.includeNotYetDue === true, excludeIds, options?.limit)
         .filter((row) => !excludeIds?.has(String(row.id)))
         .map((row) => {
           try {
@@ -497,16 +501,18 @@ export function wrapSqliteOutbound(
         }),
     writeDirect: async (message) => {
       const writer = writable();
-      const sequence = nextSequence();
-      const record = createDirectOutboundRecord(message, sequence, new Date().toISOString());
-      writer
-        .prepare(
-          `INSERT OR IGNORE INTO messages_out
-             (id, seq, in_reply_to, timestamp, deliver_after, recurrence, kind, platform_id, channel_type, thread_id, content)
-           VALUES
-             (@id, @sequence, @inReplyTo, @timestamp, @deliverAfter, @recurrence, @kind, @platformId, @channelType, @threadId, @content)`,
-        )
-        .run(record);
+      await retryWhileBusy(() => {
+        const sequence = nextSequence();
+        const record = createDirectOutboundRecord(message, sequence, new Date().toISOString());
+        writer
+          .prepare(
+            `INSERT OR IGNORE INTO messages_out
+               (id, seq, in_reply_to, timestamp, deliver_after, recurrence, kind, platform_id, channel_type, thread_id, content)
+             VALUES
+               (@id, @sequence, @inReplyTo, @timestamp, @deliverAfter, @recurrence, @kind, @platformId, @channelType, @threadId, @content)`,
+          )
+          .run(record);
+      });
     },
     getOutboundHistory: (limit) =>
       (

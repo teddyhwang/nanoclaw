@@ -9,6 +9,7 @@ import Database from 'better-sqlite3';
 
 import { createInboundRecord } from '../model.js';
 import type { InboundWrite } from '../model.js';
+import { SESSION_DB_BUSY_TIMEOUT_MS } from './busy.js';
 import { INBOUND_SCHEMA, OUTBOUND_SCHEMA } from './schema.js';
 
 /** Apply the inbound or outbound schema to a DB file. Idempotent. */
@@ -23,14 +24,14 @@ export function ensureSchema(dbPath: string, schema: 'inbound' | 'outbound'): vo
 export function openInboundDb(dbPath: string): Database.Database {
   const db = new Database(dbPath);
   db.pragma('journal_mode = DELETE');
-  db.pragma('busy_timeout = 5000');
+  db.pragma(`busy_timeout = ${SESSION_DB_BUSY_TIMEOUT_MS}`);
   return db;
 }
 
 /** Open the outbound DB for a session (host reads only). */
 export function openOutboundDb(dbPath: string): Database.Database {
   const db = new Database(dbPath, { readonly: true });
-  db.pragma('busy_timeout = 5000');
+  db.pragma(`busy_timeout = ${SESSION_DB_BUSY_TIMEOUT_MS}`);
   return db;
 }
 
@@ -38,7 +39,7 @@ export function openOutboundDb(dbPath: string): Database.Database {
 export function openOutboundDbRw(dbPath: string): Database.Database {
   const db = new Database(dbPath);
   db.pragma('journal_mode = DELETE');
-  db.pragma('busy_timeout = 5000');
+  db.pragma(`busy_timeout = ${SESSION_DB_BUSY_TIMEOUT_MS}`);
   return db;
 }
 
@@ -510,16 +511,39 @@ export interface OutboundMessage {
   content: string;
 }
 
-export function getDueOutboundMessages(db: Database.Database, includeNotYetDue = false): OutboundMessage[] {
-  return db
+/** Undelivered outbound rows read per call (see getDueOutboundMessages). */
+export const DUE_OUTBOUND_PAGE = 200;
+
+/**
+ * The oldest due rows of messages_out, skipping `excludeIds` (rows already
+ * delivered), at most `limit` of them. outbound.db is container-written and
+ * unbounded, so both the exclusion and the bound run in SQL: only the page's
+ * ids are sorted, and only those rows are then read in full. Callers that
+ * need more page by adding the rows they have seen to `excludeIds`.
+ */
+export function getDueOutboundMessages(
+  db: Database.Database,
+  includeNotYetDue = false,
+  excludeIds: ReadonlySet<string> = new Set(),
+  limit = DUE_OUTBOUND_PAGE,
+): OutboundMessage[] {
+  if (limit <= 0) return [];
+  const ids = db
     .prepare(
-      includeNotYetDue
-        ? 'SELECT * FROM messages_out ORDER BY timestamp ASC'
-        : `SELECT * FROM messages_out
-       WHERE (deliver_after IS NULL OR datetime(deliver_after) <= datetime('now'))
-       ORDER BY timestamp ASC`,
+      `SELECT id FROM messages_out
+        WHERE id NOT IN (SELECT value FROM json_each(?))
+          ${includeNotYetDue ? '' : "AND (deliver_after IS NULL OR datetime(deliver_after) <= datetime('now'))"}
+        ORDER BY timestamp ASC, seq ASC
+        LIMIT ?`,
     )
-    .all() as OutboundMessage[];
+    .pluck()
+    .all(JSON.stringify([...excludeIds]), Math.floor(limit)) as unknown[];
+  if (ids.length === 0) return [];
+  const rows = db
+    .prepare('SELECT * FROM messages_out WHERE id IN (SELECT value FROM json_each(?))')
+    .all(JSON.stringify(ids)) as OutboundMessage[];
+  const order = new Map(ids.map((id, index) => [id, index]));
+  return rows.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
 }
 
 // ---------------------------------------------------------------------------
