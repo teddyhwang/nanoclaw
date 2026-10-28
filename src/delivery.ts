@@ -595,10 +595,14 @@ async function dropSuppressed(
   reason: string,
 ): Promise<void> {
   try {
-    const marked = await withExistingMailboxSession(agentGroupId, session.id, (mailbox) => {
-      mailbox.markDeliveryFailed(msg.id);
-      return true;
-    });
+    // A suppressed row must not stay queued over a brief runner lock (a
+    // later drain could send what Stop withheld): idempotent, retry (busy.ts).
+    const marked = await retryWhileBusy(() =>
+      withExistingMailboxSession(agentGroupId, session.id, (mailbox) => {
+        mailbox.markDeliveryFailed(msg.id);
+        return true;
+      }),
+    );
     if (marked === undefined) throw new Error(`mailbox disappeared before dropping ${msg.id}`);
     await clearAttemptRow(msg.id);
     log.info('Outbound suppressed — not delivered', {
@@ -680,10 +684,15 @@ async function failPermanently(
   err: unknown,
 ): Promise<void> {
   try {
-    const marked = await withExistingMailboxSession(agentGroupId, session.id, (mailbox) => {
-      mailbox.markDeliveryFailed(msg.id);
-      return true;
-    });
+    // Terminal: a brief runner lock must not re-queue a row that already
+    // used its attempts (and skip the agent's failure report). Idempotent,
+    // so retry (busy.ts).
+    const marked = await retryWhileBusy(() =>
+      withExistingMailboxSession(agentGroupId, session.id, (mailbox) => {
+        mailbox.markDeliveryFailed(msg.id);
+        return true;
+      }),
+    );
     if (marked === undefined) {
       throw new Error(`mailbox disappeared before marking ${msg.id} failed`, { cause: err });
     }

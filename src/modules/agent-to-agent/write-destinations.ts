@@ -11,6 +11,7 @@ import { getAgentGroup } from '../../db/agent-groups.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
 import type { Destination } from '../../mailbox/index.js';
 import { log } from '../../log.js';
+import { retryWhileBusy } from '../../mailbox/sqlite/busy.js';
 import { withMailboxSession } from '../../session-manager.js';
 import { getDestinations } from './db/agent-destinations.js';
 
@@ -44,8 +45,12 @@ export async function writeDestinations(agentGroupId: string, sessionId: string)
     }
   }
 
-  await withMailboxSession(agentGroupId, sessionId, (db) => {
-    db.replaceDestinations(resolved);
-  });
+  // Runs on every wake: a brief runner lock must not fail the wake or leave
+  // a stale destination map. One replace transaction, so retry (busy.ts).
+  await retryWhileBusy(() =>
+    withMailboxSession(agentGroupId, sessionId, (db) => {
+      db.replaceDestinations(resolved);
+    }),
+  );
   log.debug('Destination map written', { sessionId, count: resolved.length });
 }
