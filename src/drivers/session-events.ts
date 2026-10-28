@@ -32,6 +32,7 @@ import type {
   SessionSnapshot,
   SessionSpec,
   SessionStatus,
+  SessionStopOptions,
   SessionWatch,
 } from './types.js';
 
@@ -218,9 +219,9 @@ class HubHandle implements SupervisedHandle {
   execSpec(command: string[]): SessionExecSpec {
     return this.inner.execSpec(command);
   }
-  stop(reason: string): Promise<void> {
+  stop(reason: string, options?: SessionStopOptions): Promise<void> {
     this.hub.markStopIntent(this.inner.key);
-    return this.inner.stop(reason);
+    return this.inner.stop(reason, options);
   }
   onTerminal(cb: (failure?: SessionFailure) => void): void {
     this.hub.arm(this.inner.key, cb);

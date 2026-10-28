@@ -148,8 +148,13 @@ export { getDeliveryAdapter, type ChannelDeliveryAdapter } from '../delivery.js'
 // (suppressor), wait out an in-flight send and drain once (settle), and end
 // the session's runtime (killContainer: graceful stop, then SIGKILL after the
 // stop grace).
-export { registerOutboundSuppressor, settleSessionDelivery, type OutboundSuppressor } from '../delivery.js';
-export { killContainer, isContainerRunning } from '../container-runner.js';
+export {
+  registerOutboundSuppressor,
+  settleSessionDelivery,
+  dropSuppressedOutbound,
+  type OutboundSuppressor,
+} from '../delivery.js';
+export { killContainer, isContainerRunning, type KillContainerOptions } from '../container-runner.js';
 export {
   ChannelUnavailableError,
   isChannelUnavailableError,

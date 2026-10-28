@@ -839,8 +839,25 @@ function containerStopEventReason(
   return stopReason ? 'killed' : 'idle';
 }
 
+export interface KillContainerOptions {
+  /**
+   * Abort the work in progress instead of draining it (a user asked the
+   * agent to stop): the session's gateway lease is released immediately, the
+   * runner gets SIGINT (it aborts its active query and leaves unanswered
+   * input for the host), and the runtime is killed after `graceSeconds`.
+   */
+  interrupt?: boolean;
+  /** Grace before SIGKILL for this stop (default: the spec's 12 s; 1 s for interrupt). */
+  graceSeconds?: number;
+}
+
 /** Kill a container for a session. */
-export function killContainer(sessionId: string, reason: string, onExit?: () => void): void {
+export function killContainer(
+  sessionId: string,
+  reason: string,
+  onExit?: () => void,
+  options?: KillContainerOptions,
+): void {
   const entry = activeContainers.get(sessionId);
   if (!entry) return;
 
@@ -849,8 +866,25 @@ export function killContainer(sessionId: string, reason: string, onExit?: () => 
   }
 
   entry.stopReason = reason;
-  log.info('Killing container', { sessionId, reason, containerName: entry.containerName });
-  void entry.handle.stop(reason).then(
+  log.info('Killing container', {
+    sessionId,
+    reason,
+    containerName: entry.containerName,
+    interrupt: options?.interrupt === true,
+  });
+  if (options?.interrupt) {
+    // Revoke gateway egress now rather than at exit. Idempotent with the
+    // release in finishAndResolve.
+    void releaseGatewaySession(entry.gateway, { kind: 'session-ended', reason }).catch((err: unknown) =>
+      log.error('Gateway session release failed', { sessionId, reason, err }),
+    );
+  }
+  const stopOptions = options?.interrupt
+    ? { interrupt: true, graceSeconds: options.graceSeconds ?? 1 }
+    : options?.graceSeconds !== undefined
+      ? { graceSeconds: options.graceSeconds }
+      : undefined;
+  void (stopOptions ? entry.handle.stop(reason, stopOptions) : entry.handle.stop(reason)).then(
     () => {
       // A handle whose supervision channel is gone (an adopted handle whose
       // attach process belonged to the previous host) would otherwise never

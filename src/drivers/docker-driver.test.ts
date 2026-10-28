@@ -233,6 +233,14 @@ describe('spec realization', () => {
     expect(auxiliaryStop.seq).toBeLessThan(networkRemove.seq);
   });
 
+  it('an interrupt stop delivers SIGINT with the requested grace', async () => {
+    const handle = await driver().prepare(fixtureSpecWithAux());
+    await handle.start();
+    await handle.stop('user-stop', { interrupt: true, graceSeconds: 1 });
+    expect(cli.joined()).toContain('stop -s SIGINT -t 1 ncl-spike-s1');
+    expect(cli.joined()).not.toContain('stop -t 1 ncl-spike-s1');
+  });
+
   it('lets Linux auxiliary gateways reach explicitly configured host services', () => {
     expect(auxiliaryNetworkArgs('linux')).toEqual([
       '--network',

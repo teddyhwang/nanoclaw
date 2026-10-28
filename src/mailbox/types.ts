@@ -147,6 +147,8 @@ export interface InboundMailbox {
   getMessageForRetry(messageId: string, status: 'pending' | 'processing'): MessageRetry | undefined;
   applyProcessingAcks(acks: ProcessingAck[]): void;
   getDeliveredIds(): Set<string>;
+  /** Outbound ids actually delivered (status 'delivered') at or after `since` (ISO). */
+  getDeliveredSince(since: string): Array<{ messageOutId: string; deliveredAt: string }>;
   markDelivered(messageOutId: string, platformMessageId: string | null): void;
   markDeliveryFailed(messageOutId: string): void;
   getInboundSourceSessionId(messageId: string): string | null;
@@ -200,8 +202,11 @@ export interface OutboundMailbox {
   getTerminalProcessingAcks(): ProcessingAck[];
   getProcessingClaims(): ProcessingClaim[];
   deleteOrphanProcessingClaims(): number;
+  /** Delete only these ids' `processing` claims (the runtime that held them is gone). */
+  deleteProcessingClaims(messageIds: readonly string[]): number;
   getContainerState(): ContainerState | null;
-  getDueMessages(excludeIds?: ReadonlySet<string>): OutboundMessage[];
+  /** Due rows; `includeNotYetDue` also returns rows whose deliver_after is in the future. */
+  getDueMessages(excludeIds?: ReadonlySet<string>, options?: { includeNotYetDue?: boolean }): OutboundMessage[];
   writeDirect(message: DirectOutboundMessage): Promise<void>;
   getOutboundHistory(limit: number): MailboxHistoryMessage[];
   getTopLevelOutbound(limit: number): MailboxTimelineMessage[];

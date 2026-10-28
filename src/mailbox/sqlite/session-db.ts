@@ -454,6 +454,16 @@ export function deleteOrphanProcessingClaims(outDb: Database.Database): number {
   return outDb.prepare("DELETE FROM processing_ack WHERE status = 'processing'").run().changes;
 }
 
+export function deleteProcessingClaims(outDb: Database.Database, messageIds: readonly string[]): number {
+  if (messageIds.length === 0) return 0;
+  const remove = outDb.prepare("DELETE FROM processing_ack WHERE message_id = ? AND status = 'processing'");
+  let changes = 0;
+  outDb.transaction(() => {
+    for (const id of messageIds) changes += remove.run(id).changes;
+  })();
+  return changes;
+}
+
 export interface ContainerState {
   current_tool: string | null;
   tool_declared_timeout_ms: number | null;
@@ -500,10 +510,12 @@ export interface OutboundMessage {
   content: string;
 }
 
-export function getDueOutboundMessages(db: Database.Database): OutboundMessage[] {
+export function getDueOutboundMessages(db: Database.Database, includeNotYetDue = false): OutboundMessage[] {
   return db
     .prepare(
-      `SELECT * FROM messages_out
+      includeNotYetDue
+        ? 'SELECT * FROM messages_out ORDER BY timestamp ASC'
+        : `SELECT * FROM messages_out
        WHERE (deliver_after IS NULL OR datetime(deliver_after) <= datetime('now'))
        ORDER BY timestamp ASC`,
     )
@@ -513,6 +525,27 @@ export function getDueOutboundMessages(db: Database.Database): OutboundMessage[]
 // ---------------------------------------------------------------------------
 // delivered
 // ---------------------------------------------------------------------------
+
+export function getDeliveredSince(
+  db: Database.Database,
+  since: string,
+): Array<{ messageOutId: string; deliveredAt: string }> {
+  const sinceMs = Date.parse(since);
+  return (
+    db.prepare("SELECT message_out_id, delivered_at FROM delivered WHERE status = 'delivered'").all() as Array<{
+      message_out_id: string;
+      delivered_at: string;
+    }>
+  )
+    .filter((row) => {
+      // Older rows carry SQLite's zone-less UTC `datetime('now')` form.
+      const at = /[zZ]|[+-]\d\d:?\d\d$/.test(row.delivered_at)
+        ? row.delivered_at
+        : `${row.delivered_at.replace(' ', 'T')}Z`;
+      return Date.parse(at) >= sinceMs;
+    })
+    .map((row) => ({ messageOutId: row.message_out_id, deliveredAt: row.delivered_at }));
+}
 
 export function getDeliveredIds(db: Database.Database): Set<string> {
   return new Set(

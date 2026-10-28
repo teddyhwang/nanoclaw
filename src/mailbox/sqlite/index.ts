@@ -18,6 +18,8 @@ import {
 import {
   countDueMessages,
   deleteOrphanProcessingClaims,
+  deleteProcessingClaims,
+  getDeliveredSince,
   getContainerState,
   gcStaleSystemRows,
   getDeliveredIds,
@@ -287,6 +289,7 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
     },
     applyProcessingAcks: (acks) => applyProcessingAcks(db, acks),
     getDeliveredIds: () => getDeliveredIds(db),
+    getDeliveredSince: (since) => getDeliveredSince(db, since),
     markDelivered: (messageOutId, platformMessageId) => markDelivered(db, messageOutId, platformMessageId),
     markDeliveryFailed: (messageOutId) => markDeliveryFailed(db, messageOutId),
     getInboundSourceSessionId: (messageId) => getInboundSourceSessionId(db, messageId),
@@ -436,6 +439,7 @@ export function wrapSqliteOutbound(
         return { messageId: record.messageId, statusChanged: record.statusChanged };
       }),
     deleteOrphanProcessingClaims: () => deleteOrphanProcessingClaims(writable()),
+    deleteProcessingClaims: (messageIds) => deleteProcessingClaims(writable(), messageIds),
     getContainerState: () => {
       const row = getContainerState(readable());
       if (!row) return null;
@@ -451,8 +455,8 @@ export function wrapSqliteOutbound(
         toolStartedAt: record.toolStartedAt,
       };
     },
-    getDueMessages: (excludeIds) =>
-      getDueOutboundMessages(readable())
+    getDueMessages: (excludeIds, options) =>
+      getDueOutboundMessages(readable(), options?.includeNotYetDue === true)
         .filter((row) => !excludeIds?.has(String(row.id)))
         .map((row) => {
           try {

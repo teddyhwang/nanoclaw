@@ -433,7 +433,8 @@ function generateId(): string {
 // being `turn/interrupt`ed; for claude it closes the SDK input iterator the
 // same way. The loop then exits at its next top-of-loop check.
 let shuttingDown = false;
-let activeQueryForShutdown: { end(): void } | null = null;
+let activeQueryForShutdown: { end(): void; abort(): void } | null = null;
+let interruptRequested = false;
 
 export function isShuttingDown(): boolean {
   return shuttingDown;
@@ -456,9 +457,33 @@ export function requestGracefulShutdown(): void {
   }
 }
 
+export function isInterruptRequested(): boolean {
+  return interruptRequested;
+}
+
+/**
+ * Host interrupt (SIGINT; a user asked the agent to stop): abort the active
+ * query instead of draining it, start no new turn, and leave every input
+ * without its own result unacknowledged so the host decides its fate (it
+ * completes the stopped request and lets everything else retry). Idempotent;
+ * upgrades a graceful shutdown already in progress.
+ */
+export function requestInterruptShutdown(): void {
+  if (interruptRequested) return;
+  interruptRequested = true;
+  shuttingDown = true;
+  log('SIGINT — host interrupt requested; aborting the active query');
+  try {
+    activeQueryForShutdown?.abort();
+  } catch (err) {
+    log(`interrupt: query.abort() failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 /** Test-only: reset the module shutdown latch between cases. */
 export function _resetShutdownStateForTests(): void {
   shuttingDown = false;
+  interruptRequested = false;
   activeQueryForShutdown = null;
 }
 
@@ -939,7 +964,8 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       // SIGKILLed with the turn still open. If shutdown was requested in the
       // window between the loop-top check and here, end immediately.
       activeQueryForShutdown = query;
-      if (shuttingDown) query.end();
+      if (interruptRequested) query.abort();
+      else if (shuttingDown) query.end();
 
       // Process the query while concurrently polling for new messages
       const skippedSet = new Set(skipped.map((s) => s.id));
@@ -1108,6 +1134,11 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
           `Leaving ${processingIds.length} message(s) pending and exiting container for host retry ` +
             `(retryable provider failure)`,
         );
+        return;
+      } else if (interruptRequested) {
+        // Host interrupt: inputs that got their own result were acked as they
+        // finished; everything else stays unacknowledged for the host.
+        log(`Interrupted by host — leaving ${processingIds.length} message(s) unacknowledged and exiting`);
         return;
       } else if (shuttingDown && !sawResult) {
         // SIGTERM ended the query before it produced any result — the turn was
@@ -1626,7 +1657,8 @@ export async function processQuery(
   }, QUERY_KEEPALIVE_MS);
   let mailboxFailureStreak = 0;
   const pollHandle = setInterval(() => {
-    if (done || pollInFlight || endedForCommand) return;
+    // A host interrupt claims nothing more: new input waits for the next runtime.
+    if (done || pollInFlight || endedForCommand || interruptRequested) return;
     pollInFlight = true;
 
     void (async () => {

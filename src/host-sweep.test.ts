@@ -356,6 +356,23 @@ describe('deleteOrphanProcessingClaims', () => {
   });
 });
 
+describe('deleteProcessingClaims (per id)', () => {
+  it('removes only the named processing claims', () => {
+    const { outDb } = makeSessionDbs();
+    const ts = new Date().toISOString();
+    outDb.prepare("INSERT INTO processing_ack VALUES ('m-stop', 'processing', ?)").run(ts);
+    outDb.prepare("INSERT INTO processing_ack VALUES ('m-other', 'processing', ?)").run(ts);
+    outDb.prepare("INSERT INTO processing_ack VALUES ('m-done', 'completed', ?)").run(ts);
+
+    expect(outDb.deleteProcessingClaims(['m-stop', 'm-done', 'missing'])).toBe(1);
+    expect(outDb.deleteProcessingClaims([])).toBe(0);
+    expect(outDb.prepare('SELECT message_id, status FROM processing_ack ORDER BY message_id').all()).toEqual([
+      { message_id: 'm-done', status: 'completed' },
+      { message_id: 'm-other', status: 'processing' },
+    ]);
+  });
+});
+
 describe('resetStuckProcessingRows — orphan claim cleanup', () => {
   it('deletes orphan processing_ack rows so next sweep tick does not see them', () => {
     const { inDb, outDb } = makeSessionDbs();

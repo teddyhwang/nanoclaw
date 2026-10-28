@@ -242,6 +242,32 @@ export async function settleSessionDelivery(sessionId: string): Promise<void> {
   if (raced) await raced.catch(() => undefined);
 }
 
+/**
+ * Run the suppressors over every undelivered row of a session, including
+ * rows whose deliver_after is still in the future (the normal drain never
+ * sees those until they come due). Suppressed rows are dropped exactly as in
+ * a drain; nothing is ever sent from here. Returns the dropped ids.
+ */
+export async function dropSuppressedOutbound(sessionId: string): Promise<string[]> {
+  if (outboundSuppressors.length === 0) return [];
+  const session = await getSession(sessionId);
+  if (!session) return [];
+  const rows = await withExistingMailboxSession(session.agent_group_id, session.id, (mailbox) => {
+    const delivered = mailbox.getDeliveredIds();
+    return mailbox
+      .getDueMessages(delivered, { includeNotYetDue: true })
+      .filter((candidate) => !delivered.has(candidate.id));
+  });
+  const dropped: string[] = [];
+  for (const msg of rows ?? []) {
+    const reason = suppressionReason(msg, session);
+    if (!reason) continue;
+    await dropSuppressed(session.agent_group_id, session, msg, reason);
+    dropped.push(msg.id);
+  }
+  return dropped;
+}
+
 export interface ChannelDeliveryAdapter {
   deliver(
     channelType: string,

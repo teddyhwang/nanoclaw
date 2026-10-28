@@ -15,7 +15,12 @@ import { computeRotationDate, evaluateRotation } from './session-rotation.js';
 import { TIMEZONE } from './timezone.js';
 import { MockProvider } from './providers/mock.js';
 import type { ProviderExchange } from './providers/types.js';
-import { runPollLoop, requestGracefulShutdown, _resetShutdownStateForTests } from './poll-loop.js';
+import {
+  runPollLoop,
+  requestGracefulShutdown,
+  requestInterruptShutdown,
+  _resetShutdownStateForTests,
+} from './poll-loop.js';
 
 const MOCK_PROVIDER_CONTRACT = {
   textDelivery: 'mid-turn-complete',
@@ -1091,6 +1096,60 @@ describe('poll loop integration', () => {
       | { status: string }
       | undefined;
     expect(ack?.status).not.toBe('completed');
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+
+  it('SIGINT (host interrupt) aborts the active query, claims nothing more, leaves input unacked and exits', async () => {
+    insertMessage(
+      'm-stop',
+      { sender: 'Alice', text: '@bot plan the trip' },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
+    const provider = new MockProvider({}, undefined, { blockUntilEndNoResult: true });
+    const calls: string[] = [];
+    const query = provider.query.bind(provider);
+    provider.query = (input) => {
+      const q = query(input);
+      return {
+        ...q,
+        end: () => {
+          calls.push('end');
+          q.end();
+        },
+        abort: () => {
+          calls.push('abort');
+          q.abort();
+        },
+      };
+    };
+    const loopPromise = runPollLoop({ provider, providerName: 'mock', cwd: '/tmp' });
+    await waitFor(() => {
+      const ack = getOutboundDb().prepare("SELECT status FROM processing_ack WHERE message_id = 'm-stop'").get() as
+        | { status: string }
+        | undefined;
+      return ack?.status === 'processing';
+    }, 2000);
+
+    requestInterruptShutdown();
+    // Arrives after the interrupt: must not be claimed by this runtime.
+    insertMessage(
+      'm-after',
+      { sender: 'Bob', text: '@bot also golf' },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
+    await Promise.race([
+      loopPromise,
+      new Promise<void>((_, reject) => setTimeout(() => reject(new Error('loop did not exit on interrupt')), 2000)),
+    ]);
+
+    expect(calls[0]).toBe('abort');
+    const acks = getOutboundDb()
+      .prepare('SELECT message_id, status FROM processing_ack ORDER BY message_id')
+      .all() as Array<{
+      message_id: string;
+      status: string;
+    }>;
+    expect(acks).toEqual([{ message_id: 'm-stop', status: 'processing' }]);
     expect(getUndeliveredMessages()).toHaveLength(0);
   });
 });

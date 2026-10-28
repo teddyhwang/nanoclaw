@@ -31,8 +31,10 @@ const TEST_DIR = '/tmp/nanoclaw-test-delivery-suppress';
 import { initTestDb, closeDb, runMigrations, createAgentGroup, createMessagingGroup } from './db/index.js';
 import { inboundDbPath, outboundDbPath } from './mailbox/sqlite/paths.js';
 import { resolveSession } from './session-manager.js';
+import { withExistingMailboxSession } from './session-manager.js';
 import {
   deliverSessionMessages,
+  dropSuppressedOutbound,
   registerOutboundSuppressor,
   setDeliveryAdapter,
   settleSessionDelivery,
@@ -65,13 +67,13 @@ async function seedSession(): Promise<Session> {
 }
 
 let seq = 0;
-function insertOutbound(sessionId: string, msgId: string, text: string): void {
+function insertOutbound(sessionId: string, msgId: string, text: string, deliverAfter: string | null = null): void {
   const db = new Database(outboundDbPath('ag-1', sessionId));
   seq += 1;
   db.prepare(
-    `INSERT INTO messages_out (id, seq, timestamp, kind, platform_id, channel_type, thread_id, content)
-     VALUES (?, ?, datetime('now', ?), 'chat', 'chan-1', 'discord', NULL, ?)`,
-  ).run(msgId, seq, `+${seq} seconds`, JSON.stringify({ text }));
+    `INSERT INTO messages_out (id, seq, timestamp, deliver_after, kind, platform_id, channel_type, thread_id, content)
+     VALUES (?, ?, datetime('now', ?), ?, 'chat', 'chan-1', 'discord', NULL, ?)`,
+  ).run(msgId, seq, `+${seq} seconds`, deliverAfter, JSON.stringify({ text }));
   db.close();
 }
 
@@ -151,6 +153,44 @@ describe('outbound suppressor', () => {
     );
     await deliverSessionMessages(session);
     expect(sent).toEqual(['hello']);
+  });
+});
+
+describe('dropSuppressedOutbound', () => {
+  it('drops suppressed rows whose deliver_after is still in the future; never sends anything', async () => {
+    const session = await seedSession();
+    const sent: string[] = [];
+    setDeliveryAdapter({
+      async deliver(_c, _p, _t, _k, content) {
+        sent.push((JSON.parse(content) as { text: string }).text);
+        return 'x';
+      },
+    });
+    insertOutbound(session.id, 'out-later', 'scheduled reply', '2099-01-01 00:00:00');
+    insertOutbound(session.id, 'out-keep-later', 'other scheduled', '2099-01-01 00:00:00');
+    unregister.push(registerOutboundSuppressor((msg) => (msg.id === 'out-later' ? 'user-stop' : null)));
+
+    expect(await dropSuppressedOutbound(session.id)).toEqual(['out-later']);
+    expect(sent).toEqual([]);
+    expect(deliveredStatus(session.id, 'out-later')).toBe('failed');
+    expect(deliveredStatus(session.id, 'out-keep-later')).toBeUndefined();
+  });
+});
+
+describe('mailbox reads for a stop', () => {
+  it('getDeliveredSince returns only rows actually delivered at or after the instant', async () => {
+    const session = await seedSession();
+    setDeliveryAdapter({ deliver: async () => 'p' });
+    insertOutbound(session.id, 'out-1', 'one');
+    await deliverSessionMessages(session);
+    const after = new Date(Date.now() + 5).toISOString();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    insertOutbound(session.id, 'out-2', 'two');
+    insertOutbound(session.id, 'out-3', 'three');
+    unregister.push(registerOutboundSuppressor((msg) => (msg.id === 'out-3' ? 'user-stop' : null)));
+    await deliverSessionMessages(session);
+    const rows = await withExistingMailboxSession('ag-1', session.id, (mailbox) => mailbox.getDeliveredSince(after));
+    expect(rows?.map((r) => r.messageOutId)).toEqual(['out-2']);
   });
 });
 

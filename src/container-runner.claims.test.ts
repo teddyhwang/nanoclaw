@@ -123,6 +123,45 @@ describe('session claim lifecycle', () => {
     await vi.waitFor(() => expect(release).toHaveBeenCalledWith({ kind: 'session-ended', reason: 'test-stop' }));
   });
 
+  it('an interrupt stop releases the gateway lease before the runtime stops and passes SIGINT intent with a 1 s grace', async () => {
+    const handle = fakeHandle('sess-1', 'container-a');
+    const terminal = handle.stop.bind(handle);
+    let finishStop: (() => void) | undefined;
+    // The first (interrupt) stop is held open; finalization's own teardown
+    // stop resolves at once.
+    const stop = vi.fn((_reason: string, _options?: unknown) =>
+      finishStop
+        ? Promise.resolve()
+        : new Promise<void>((resolve) => {
+            finishStop = () => void terminal('x').then(resolve);
+          }),
+    );
+    handle.stop = stop as unknown as typeof handle.stop;
+    snapshots.push({ handle, phase: 'running' } as SupervisedSnapshot);
+    await adoptRunningSessions();
+    const exited = vi.fn();
+
+    killContainer('sess-1', 'user-stop', exited, { interrupt: true });
+
+    expect(stop).toHaveBeenCalledWith('user-stop', { interrupt: true, graceSeconds: 1 });
+    await vi.waitFor(() => expect(release).toHaveBeenCalledWith({ kind: 'session-ended', reason: 'user-stop' }));
+    expect(isContainerRunning('sess-1')).toBe(true);
+    expect(exited).not.toHaveBeenCalled();
+
+    finishStop!();
+    await vi.waitFor(() => expect(exited).toHaveBeenCalledOnce());
+    expect(release).toHaveBeenCalledOnce(); // idempotent with the exit release
+  });
+
+  it('a plain stop keeps the default call shape', async () => {
+    const handle = fakeHandle('sess-1', 'container-a');
+    const stop = vi.spyOn(handle, 'stop');
+    snapshots.push({ handle, phase: 'running' } as SupervisedSnapshot);
+    await adoptRunningSessions();
+    killContainer('sess-1', 'test-stop');
+    expect(stop).toHaveBeenCalledWith('test-stop');
+  });
+
   it('a re-adopted session bumps the incarnation via CAS', async () => {
     snapshots.push({ handle: fakeHandle('sess-1', 'container-a'), phase: 'running' } as SupervisedSnapshot);
     await adoptRunningSessions();

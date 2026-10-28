@@ -46,6 +46,7 @@ import {
   type SessionSnapshot,
   type SessionSpec,
   type SessionStatus,
+  type SessionStopOptions,
   type SessionWatch,
 } from './types.js';
 
@@ -596,12 +597,20 @@ class DockerHandle implements SessionHandle {
    * implementation behavior (it happens to serialize workspace single-writer
    * during termination), not a contract guarantee — see `SessionHandle.stop`.
    */
-  async stop(reason: string): Promise<void> {
+  async stop(reason: string, options?: SessionStopOptions): Promise<void> {
     this.#stopping = true;
-    log.info('Stopping session container', { containerName: this.name, reason });
-    const grace = String(this.pendingSpec?.stopGraceSeconds ?? ADOPTED_STOP_GRACE_SECONDS);
+    log.info('Stopping session container', {
+      containerName: this.name,
+      reason,
+      interrupt: options?.interrupt === true,
+    });
+    const grace = String(options?.graceSeconds ?? this.pendingSpec?.stopGraceSeconds ?? ADOPTED_STOP_GRACE_SECONDS);
     try {
-      this.cli.run(['stop', '-t', grace, this.name]);
+      // Interrupt: SIGINT makes the runner abort its active query (not drain
+      // it); SIGKILL follows after the grace either way.
+      this.cli.run(
+        options?.interrupt ? ['stop', '-s', 'SIGINT', '-t', grace, this.name] : ['stop', '-t', grace, this.name],
+      );
     } catch {
       // Already gone, or the daemon refused: fall back to killing the attach
       // process so supervision never hangs waiting for an exit that cannot come.

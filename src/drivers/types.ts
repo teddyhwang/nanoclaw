@@ -168,6 +168,12 @@ export interface SessionSpec {
   stopGraceSeconds: number;
 }
 
+export interface SessionStopOptions {
+  interrupt?: boolean;
+  /** Grace before SIGKILL for this stop; overrides the spec's stopGraceSeconds. */
+  graceSeconds?: number;
+}
+
 export type SessionFailure =
   | { kind: 'spec-invalid'; retryable: false; detail: string }
   | { kind: 'denied-by-policy'; retryable: false; detail: string }
@@ -258,8 +264,13 @@ export interface SessionHandle {
    * implementation behavior (it happens to serialize workspace single-writer
    * during termination), NOT a contract guarantee — callers must not rely on
    * blocking-until-gone.
+   *
+   * `options.interrupt` asks the runtime to abort the work in progress rather
+   * than drain it: the realization delivers SIGINT (the runner aborts its
+   * active query) and kills after `graceSeconds`. Drivers without an
+   * interrupt signal treat it as a stop with that grace.
    */
-  stop(reason: string): Promise<void>;
+  stop(reason: string, options?: SessionStopOptions): Promise<void>;
   /**
    * The argv for attaching `command` interactively to this session. Pure
    * description — see `SessionExecSpec`. Valid only while the session is live;

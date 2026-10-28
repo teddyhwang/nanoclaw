@@ -48,7 +48,7 @@ import type { AgentProvider, McpServerConfig, ProviderOptions } from './provider
 import { resolveUsageLimitFallback, UsageLimitFallbackProvider } from './providers/usage-limit-fallback.js';
 import { emitProviderAuthFailureAlert } from './provider-auth-failure.js';
 import { loadConfiguredProvider } from './engine/provider-plugins.js';
-import { runPollLoop, requestGracefulShutdown } from './poll-loop.js';
+import { runPollLoop, requestGracefulShutdown, requestInterruptShutdown } from './poll-loop.js';
 import { registerProviderMemorySessionHook } from './provider-contracts/realize.js';
 
 function log(msg: string): void {
@@ -69,6 +69,12 @@ const CWD = '/workspace/agent';
 process.on('SIGTERM', () => {
   log('SIGTERM received — requesting graceful shutdown');
   requestGracefulShutdown();
+});
+// Host interrupt (`docker stop -s SIGINT`): a user stopped the turn. Abort,
+// don't drain; the host kills the runtime after a short grace regardless.
+process.on('SIGINT', () => {
+  log('SIGINT received — host interrupt');
+  requestInterruptShutdown();
 });
 
 async function main(): Promise<void> {
