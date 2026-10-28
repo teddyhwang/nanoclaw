@@ -261,12 +261,14 @@ describe('sweep steps are independent', () => {
     out.prepare("INSERT INTO processing_ack VALUES ('older', 'completed', datetime('now'))").run();
     out.close();
     vi.mocked(wakeContainer).mockClear();
-    const lock = holdInbound(session.id, 300);
+    // Long enough that a loaded host's whole sweep pass (several fast-failing
+    // busy steps) still finishes inside it: the sync really meets the lock.
+    const lock = holdInbound(session.id, 3000);
     await reconcileSession(session.id);
-    expect(lock.held()).toBe(true); // the sync really met the lock
+    expect(lock.held()).toBe(true);
     expect(wakeContainer).toHaveBeenCalledTimes(1);
     await lock.released;
-  });
+  }, 15_000);
 });
 
 describe('owed completions (a Stop whose completion cannot land)', () => {
