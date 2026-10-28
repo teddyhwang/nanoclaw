@@ -148,6 +148,17 @@ export function startHostSweep(): void {
           log.error('Orphaned container sweep failed', { err });
         }
       },
+      // Drop owed Stop completions nothing can run any more (session gone or
+      // long closed) and anything past the age backstop.
+      'singleton:owed-completions-prune': async () => {
+        try {
+          const { prunePendingCompletions } = await import('./db/pending-completions.js');
+          const pruned = await prunePendingCompletions();
+          if (pruned > 0) log.info('Pruned stale owed completions', { pruned });
+        } catch (err) {
+          log.error('Owed completions prune failed', { err });
+        }
+      },
       // Finalize any "Reject with reason…" holds whose reply window elapsed
       // (admin ghosted, or the host restarted mid-capture). Central-DB scan,
       // once per tick — not per session.
@@ -229,6 +240,7 @@ async function sweep(generation: number): Promise<void> {
   }
   tickQueue.add('singleton:approvals-scan');
   tickQueue.add('singleton:orphan-containers');
+  tickQueue.add('singleton:owed-completions-prune');
 
   // The tick ends — and the next one is armed — only after everything this
   // tick enqueued has run. Delayed backoff retries don't hold the tick open.

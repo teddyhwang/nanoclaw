@@ -17,6 +17,7 @@ const noopSingletons: Record<SingletonKey, () => Promise<void>> = {
   'singleton:egress-reheal': async () => {},
   'singleton:approvals-scan': async () => {},
   'singleton:orphan-containers': async () => {},
+  'singleton:owed-completions-prune': async () => {},
 };
 
 beforeEach(() => {
@@ -186,6 +187,7 @@ describe('reconcile queue', () => {
           calls.push('approvals');
         },
         'singleton:orphan-containers': async () => {},
+        'singleton:owed-completions-prune': async () => {},
       },
     });
 

@@ -28,7 +28,9 @@ import { createAgent, requestCreateAgentHold, validateCreateAgent } from './crea
 import { agentsCreate } from './guard.js';
 import { applyA2aMessageGate } from './message-gate.js';
 
-registerDeliveryAction('create_agent', createAgent, {
+// The wrapper keeps createAgent's own third parameter (options) out of the
+// delivery context slot.
+registerDeliveryAction('create_agent', (content, session) => createAgent(content, session), {
   guardAction: agentsCreate,
   precheck: validateCreateAgent,
   requestHold: requestCreateAgentHold,

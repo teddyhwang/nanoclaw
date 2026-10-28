@@ -31,6 +31,7 @@ export const SINGLETON_KEYS = [
   'singleton:egress-reheal',
   'singleton:approvals-scan',
   'singleton:orphan-containers',
+  'singleton:owed-completions-prune',
 ] as const;
 export type SingletonKey = (typeof SINGLETON_KEYS)[number];
 

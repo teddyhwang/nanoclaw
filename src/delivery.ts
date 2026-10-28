@@ -37,7 +37,12 @@ import {
   type DeliveryAttemptRow,
 } from './db/coordination.js';
 import { isChannelUnavailableError } from './channels/channel-unavailable.js';
-import { runGuarded, type DeliveryGuardSpec, type GuardedDeliveryHandler } from './delivery-guard.js';
+import {
+  runGuarded,
+  splitReplayPayload,
+  type DeliveryGuardSpec,
+  type GuardedDeliveryHandler,
+} from './delivery-guard.js';
 import { emitEngineEvent } from './engine/events.js';
 import { isUnguarded, type Unguarded } from './guard/index.js';
 import { mapConcurrent } from './concurrency.js';
@@ -1150,7 +1155,8 @@ export function reenterGuardedDeliveryAction(action: string) {
       log.warn('Approved replay for an action that is not guard-wrapped — dropping', { action });
       return;
     }
-    await runGuarded(action, entry.guard, entry.handler, ctx.payload, ctx.session, ctx.approval);
+    const { content, context } = splitReplayPayload(ctx.payload);
+    await runGuarded(action, entry.guard, entry.handler, content, ctx.session, ctx.approval, context);
   };
 }
 
@@ -1163,7 +1169,7 @@ export function getDeliveryAction(action: string): DeliveryActionHandler | undef
   const entry = getDeliveryActions().get(action);
   if (!entry) return undefined;
   if (isUnguardedEntry(entry)) return entry.handler;
-  return (content, session) => runGuarded(action, entry.guard, entry.handler, content, session, null);
+  return (content, session, context) => runGuarded(action, entry.guard, entry.handler, content, session, null, context);
 }
 
 /**
