@@ -12,10 +12,18 @@ import { getMessagingGroup } from '../../db/messaging-groups.js';
 import type { Destination } from '../../mailbox/index.js';
 import { log } from '../../log.js';
 import { retryWhileBusy } from '../../mailbox/sqlite/busy.js';
-import { withMailboxSession } from '../../session-manager.js';
+import { serializeSessionProjection, withMailboxSession } from '../../session-manager.js';
 import { getDestinations } from './db/agent-destinations.js';
 
-export async function writeDestinations(agentGroupId: string, sessionId: string): Promise<void> {
+/** Serialized per session (serializeSessionProjection): a slow retried write
+ * never lands after a newer projection. */
+export function writeDestinations(agentGroupId: string, sessionId: string): Promise<void> {
+  return serializeSessionProjection(`destinations:${agentGroupId}:${sessionId}`, () =>
+    writeDestinationsNow(agentGroupId, sessionId),
+  );
+}
+
+async function writeDestinationsNow(agentGroupId: string, sessionId: string): Promise<void> {
   const rows = await getDestinations(agentGroupId);
   const resolved: Destination[] = [];
 
