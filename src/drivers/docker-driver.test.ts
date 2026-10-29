@@ -580,6 +580,19 @@ describe('idempotency and adoption', () => {
     ]);
   });
 
+  it('reports each listed container creation time so adoption keeps its real clock', async () => {
+    cli.responses = [
+      {
+        match: /^ps -a/,
+        output: 'ncl-spike-s1|running|g1|s1|2026-10-29 04:10:12 -0400 EDT\nncl-spike-s2|running|g2|s2|garbage\n',
+      },
+    ];
+    const snapshots = await driver().listSessions('spike');
+    expect(cli.callMatching(/^ps -a/)!.args.join(' ')).toContain('{{.CreatedAt}}');
+    expect(snapshots[0].startedAtMs).toBe(Date.parse('2026-10-29T08:10:12Z'));
+    expect(snapshots[1]).not.toHaveProperty('startedAtMs');
+  });
+
   it('uses the 12-second checkpoint grace for adopted handles', async () => {
     cli.responses = [{ match: /^ps -a/, output: 'ncl-spike-s1|running|g1|s1\n' }];
     const [snapshot] = await driver().listSessions('spike');

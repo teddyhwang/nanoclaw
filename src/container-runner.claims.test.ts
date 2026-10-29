@@ -20,6 +20,8 @@ vi.mock('./drivers/index.js', () => ({
 import {
   abortGatewaySessionObservers,
   adoptRunningSessions,
+  getContainerActivityFloorMs,
+  getContainerStartedAtMs,
   _setFinishFenceScheduleForTesting,
   isContainerRunning,
   killContainer,
@@ -102,6 +104,26 @@ afterEach(async () => {
 });
 
 describe('session claim lifecycle', () => {
+  it('an adopted runtime keeps the container start as its activity clock, not the adoption', async () => {
+    const createdAt = Date.now() - 60 * 60 * 1000;
+    snapshots.push({
+      handle: fakeHandle('sess-1', 'container-a'),
+      phase: 'running',
+      startedAtMs: createdAt,
+    } as SupervisedSnapshot);
+    await adoptRunningSessions();
+    expect(getContainerStartedAtMs('sess-1')).toBe(createdAt);
+    expect(getContainerActivityFloorMs('sess-1')).toBe(createdAt);
+  });
+
+  it('an adopted runtime without a reported start falls back to the adoption time', async () => {
+    const before = Date.now();
+    snapshots.push({ handle: fakeHandle('sess-1', 'container-a'), phase: 'running' } as SupervisedSnapshot);
+    await adoptRunningSessions();
+    expect(getContainerStartedAtMs('sess-1')).toBeGreaterThanOrEqual(before);
+    expect(getContainerActivityFloorMs('sess-1')).toBe(getContainerStartedAtMs('sess-1'));
+  });
+
   it('adoption shadow-claims the session and finalization releases it', async () => {
     snapshots.push({ handle: fakeHandle('sess-1', 'container-a'), phase: 'running' } as SupervisedSnapshot);
     const { adopted } = await adoptRunningSessions();

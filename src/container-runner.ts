@@ -121,13 +121,14 @@ interface ActiveSessionRuntime {
   gateway: GatewaySessionControl;
   containerName: string;
   /**
-   * When this host started tracking the runtime. Backs the sweep's ceiling
-   * check when no heartbeat file exists yet (see `host-sweep.ts`): a container
-   * that finishes its turn without ever reaching an SDK event never writes one,
-   * and without this it would sit alive-but-idle forever, immune to the check.
-   * An adopted runtime records the adoption, which is the honest answer — this
-   * host has no spawn time for a container a previous host started, and leaving
-   * it unset would exempt every adopted session from the ceiling.
+   * When the runtime started. Backs the sweep's ceiling check when no
+   * heartbeat file exists yet (see `host-sweep.ts`): a container that finishes
+   * its turn without ever reaching an SDK event never writes one, and without
+   * this it would sit alive-but-idle forever, immune to the check. An adopted
+   * runtime records the container's own creation time when the driver reports
+   * it (else the adoption): stamping every adoption "now" reset the idle and
+   * ceiling clocks on each host restart, so an idle container survived a run
+   * of restarts indefinitely (2026-10-29).
    */
   startedAtMs: number;
   /** True when this runtime was adopted at startup rather than spawned here. */
@@ -247,6 +248,18 @@ export function isContainerRunning(sessionId: string): boolean {
 
 export function getContainerStartedAtMs(sessionId: string): number | undefined {
   return activeContainers.get(sessionId)?.startedAtMs;
+}
+
+/**
+ * Earliest heartbeat that belongs to this session's current container, when
+ * the host knows it better than the session claim does. An adopted container
+ * is the same container that wrote the heartbeat before the host restarted,
+ * so its claim time (the adoption) must not discard that heartbeat; its own
+ * start is the floor. Undefined for spawned runtimes: their claim time is.
+ */
+export function getContainerActivityFloorMs(sessionId: string): number | undefined {
+  const runtime = activeContainers.get(sessionId);
+  return runtime?.adopted ? runtime.startedAtMs : undefined;
 }
 
 /** Stop host-local observation without revoking resources that may survive restart. */
@@ -1035,7 +1048,7 @@ export async function adoptRunningSessions(): Promise<{ adopted: number; stopped
 
   let adopted = 0;
   let stopped = 0;
-  for (const { handle, phase } of snapshots) {
+  for (const { handle, phase, startedAtMs } of snapshots) {
     const session = handle.key.sessionId ? await getSession(handle.key.sessionId) : undefined;
     const agentGroup = session ? await getAgentGroup(session.agent_group_id) : undefined;
     // The snapshot's phase is the listing's own truth: a corpse arrives as
@@ -1109,6 +1122,9 @@ export async function adoptRunningSessions(): Promise<{ adopted: number; stopped
       continue;
     }
     const runtime = registerRuntime(session.id, handle, gatewaySession, handle.name, true);
+    if (startedAtMs !== undefined && Number.isFinite(startedAtMs) && startedAtMs <= runtime.startedAtMs) {
+      runtime.startedAtMs = startedAtMs;
+    }
     runtime.claimIncarnation = claimIncarnation;
     runtime.stopReason = undefined;
     handle.onTerminal((failure) => {

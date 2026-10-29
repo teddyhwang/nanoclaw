@@ -223,7 +223,7 @@ export class DockerSessionDriver implements SessionDriver {
         '--filter',
         `label=${LABELS.role}=agent`,
         '--format',
-        `{{.Names}}|{{.State}}|{{.Label "${LABELS.group}"}}|{{.Label "${LABELS.session}"}}`,
+        `{{.Names}}|{{.State}}|{{.Label "${LABELS.group}"}}|{{.Label "${LABELS.session}"}}|{{.CreatedAt}}`,
       ]);
     } catch (error) {
       throw normalizeDockerError(error);
@@ -233,11 +233,13 @@ export class DockerSessionDriver implements SessionDriver {
       .split('\n')
       .filter(Boolean)
       .map((line) => {
-        const [name, state, agentGroupId, sessionId] = line.split('|');
+        const [name, state, agentGroupId, sessionId, createdAt] = line.split('|');
         const key: SessionKey = { installSlug, agentGroupId, sessionId };
         const auxiliaries = auxiliaryContainerNames(this.#cli, key);
         this.#remember(key);
+        const startedAtMs = parseDockerCreatedAt(createdAt);
         return {
+          ...(startedAtMs !== undefined ? { startedAtMs } : {}),
           handle: new DockerHandle(
             key,
             name,
@@ -696,6 +698,17 @@ function keyId(key: SessionKey): string {
  * adoption-adjacent incarnation, NOT a corpse; treating it as terminal would
  * have adoption tear down freshly-prepared sessions.
  */
+/**
+ * `docker ps` `{{.CreatedAt}}` (`2026-10-29 04:10:12 -0400 EDT`) → epoch ms.
+ * Undefined when absent or unparseable; callers fall back to their own clock.
+ */
+export function parseDockerCreatedAt(value: string | undefined): number | undefined {
+  const match = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})(?:\.\d+)? ([+-]\d{2})(\d{2})\b/.exec(value?.trim() ?? '');
+  if (!match) return undefined;
+  const ms = Date.parse(`${match[1]}T${match[2]}${match[3]}:${match[4]}`);
+  return Number.isNaN(ms) ? undefined : ms;
+}
+
 export function dockerStatePhase(state: string): SessionPhase {
   if (state === 'running' || state === 'paused' || state === 'restarting') return 'running';
   if (state === 'created') return 'starting';
