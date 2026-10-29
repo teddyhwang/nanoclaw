@@ -111,6 +111,7 @@ export type {
   VerbatimDelivery,
   ChannelRegistration,
   ChannelSetup,
+  ChannelReconnectInfo,
   InboundMessage,
   InboundEvent,
   OutboundMessage,

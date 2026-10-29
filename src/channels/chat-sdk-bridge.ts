@@ -929,6 +929,87 @@ export function recoveryPageBudget(limit: number): {
 }
 
 /**
+ * Platform-confirmed "this bot was addressed" for a message fetched over
+ * REST by recovery. Discord's REST parser never sets `isMention` (only the
+ * Gateway path does), so a recovered @mention used to land as silent
+ * context (AI Friends, 2026-10-28). Mirrors the live Gateway semantics:
+ * an explicit mention of this bot's user id, or a DM from a human (live
+ * DMs dispatch through onDirectMessage with isMention=true). Messages by
+ * this or any other bot are never mentions. Without `botUserId` (platforms
+ * whose SDK flag is already authoritative) only the SDK flag counts, so
+ * non-Discord recovery keeps its old behaviour.
+ */
+export function fetchedMessageIsMention(
+  message: Pick<ChatMessage, 'isMention' | 'author' | 'raw'>,
+  opts: { botUserId?: string; isDM: boolean },
+): boolean {
+  if (message.isMention === true) return true;
+  if (!opts.botUserId) return false;
+  const author = message.author as { isBot?: boolean | 'unknown'; isMe?: boolean } | undefined;
+  if (author?.isMe === true || author?.isBot === true) return false;
+  if (opts.isDM) return true;
+  const mentions = (message.raw as { mentions?: Array<{ id?: string } | null> } | undefined)?.mentions;
+  return Array.isArray(mentions) && mentions.some((m) => m?.id === opts.botUserId);
+}
+
+/**
+ * Bounded FIFO set of platform message ids this bridge already forwarded
+ * (live or recovered). Recovery skips ids in it, so a reconnect pass — or
+ * several back to back — never re-routes a message the router already saw
+ * in this process, even when the host's own dedupe lags.
+ */
+export function createRecentIdSet(capacity: number): { has(id: string): boolean; add(id: string): void } {
+  const ids = new Set<string>();
+  return {
+    has: (id) => ids.has(id),
+    add(id) {
+      if (ids.has(id)) return;
+      ids.add(id);
+      if (ids.size > capacity) ids.delete(ids.values().next().value as string);
+    },
+  };
+}
+
+export const RECENT_INBOUND_ID_CAPACITY = 10_000;
+
+/**
+ * Detects Gateway reconnects that can lose events. Discord's READY starts a
+ * fresh session (events sent while disconnected are never redelivered);
+ * RESUMED replays them, so it closes a gap without recovery. The first
+ * READY of a bridge is the initial connect, which host startup recovery
+ * covers. The gap starts at the first listener end since the last session
+ * (the reschedule loop) or, for a re-identify inside one listener run, at
+ * the last forwarded event. Pure over an injected clock — unit-tested.
+ */
+export function createGatewayReconnectTracker(opts: {
+  now?: () => number;
+  onReconnect: (gap: { disconnectedAtMs: number; reconnectedAtMs: number }) => void;
+}): { onEvent(type: string): void; onListenerEnded(): void } {
+  const now = opts.now ?? Date.now;
+  let sawReady = false;
+  let lastEventAtMs: number | null = null;
+  let disconnectedAtMs: number | null = null;
+  return {
+    onListenerEnded() {
+      if (disconnectedAtMs === null) disconnectedAtMs = now();
+    },
+    onEvent(type) {
+      const t = now();
+      if (type === 'GATEWAY_READY') {
+        if (sawReady) {
+          opts.onReconnect({ disconnectedAtMs: disconnectedAtMs ?? lastEventAtMs ?? t, reconnectedAtMs: t });
+        }
+        sawReady = true;
+        disconnectedAtMs = null;
+      } else if (type === 'GATEWAY_RESUMED') {
+        disconnectedAtMs = null;
+      }
+      lastEventAtMs = t;
+    },
+  };
+}
+
+/**
  * True when a chat-sdk message was authored by the bot itself.
  *
  * Chat-sdk re-ingests every message in a channel — including the bot's
@@ -1125,6 +1206,15 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
   let setupConfig: ChannelSetup;
   let gatewayAbort: AbortController | null = null;
   let pollVoteDebouncer: PollVoteDebouncer | null = null;
+  // Every message id forwarded to onInbound (live or recovered); recovery
+  // skips these so reconnect replays are exactly-once per process.
+  const forwardedIds = createRecentIdSet(RECENT_INBOUND_ID_CAPACITY);
+
+  /** Hand a chat message to the host; remember its id once accepted. */
+  async function forwardMessage(channelId: string, threadId: string | null, inbound: InboundMessage): Promise<void> {
+    await setupConfig.onInbound(channelId, threadId, inbound);
+    forwardedIds.add(inbound.id);
+  }
 
   async function messageToInbound(
     message: ChatMessage,
@@ -1407,18 +1497,14 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       chat.onSubscribedMessage(async (thread, message) => {
         if (await maybeHandleChatMigration(message, thread.id)) return;
         const channelId = adapter.channelIdFromThreadId(thread.id);
-        await setupConfig.onInbound(
-          channelId,
-          thread.id,
-          await messageToInbound(message, message.isMention === true, true),
-        );
+        await forwardMessage(channelId, thread.id, await messageToInbound(message, message.isMention === true, true));
       });
 
       // @mention in an unsubscribed thread — SDK-confirmed bot mention.
       chat.onNewMention(async (thread, message) => {
         if (await maybeHandleChatMigration(message, thread.id)) return;
         const channelId = adapter.channelIdFromThreadId(thread.id);
-        await setupConfig.onInbound(channelId, thread.id, await messageToInbound(message, true, true));
+        await forwardMessage(channelId, thread.id, await messageToInbound(message, true, true));
       });
 
       // DMs — by definition addressed to the bot. Thread id flows through
@@ -1447,7 +1533,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           (message.author as any)?.userId,
         );
         const dmThreadId = normalizeDmThreadId(thread.id, message.id);
-        await setupConfig.onInbound(channelId, dmThreadId, inbound);
+        await forwardMessage(channelId, dmThreadId, inbound);
       });
 
       // Plain messages in unsubscribed threads.
@@ -1463,7 +1549,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       chat.onNewMessage(/[\s\S]*/, async (thread, message) => {
         if (await maybeHandleChatMigration(message, thread.id)) return;
         const channelId = adapter.channelIdFromThreadId(thread.id);
-        await setupConfig.onInbound(channelId, thread.id, await messageToInbound(message, false, true));
+        await forwardMessage(channelId, thread.id, await messageToInbound(message, false, true));
       });
 
       // Emoji reactions (add + remove), all Chat SDK platforms. No emoji
@@ -1596,11 +1682,37 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         }
 
         // Start local HTTP server to receive forwarded Gateway events (including interactions)
+        // Reconnect gap → ask the host to replay what the dead session
+        // missed (ChannelSetup.onReconnected). Best-effort: a host error
+        // must never break event forwarding.
+        const reconnects = createGatewayReconnectTracker({
+          onReconnect: ({ disconnectedAtMs, reconnectedAtMs }) => {
+            log.info('Gateway reconnected with a new session; requesting gap recovery', {
+              adapter: adapter.name,
+              instance: config.instance,
+              gapMs: reconnectedAtMs - disconnectedAtMs,
+            });
+            const onReconnected = setupConfig.onReconnected;
+            if (!onReconnected) return;
+            void Promise.resolve()
+              .then(() =>
+                onReconnected.call(setupConfig, {
+                  channelType: adapter.name,
+                  instance: config.instance,
+                  disconnectedAt: new Date(disconnectedAtMs).toISOString(),
+                  reconnectedAt: new Date(reconnectedAtMs).toISOString(),
+                }),
+              )
+              .catch((err) => log.warn('onReconnected handler threw', { adapter: adapter.name, err }));
+          },
+        });
+
         const webhookUrl = await startLocalWebhookServer(
           gatewayAdapter,
           setupConfig,
           config.botToken,
           pollVoteDebouncer ?? undefined,
+          (type) => reconnects.onEvent(type),
         );
 
         // Exponential backoff capped at 1h. Without this, an unrecoverable
@@ -1628,6 +1740,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
             if (!listenerPromise) return;
             const reschedule = (err?: unknown) => {
               if (gatewayAbort?.signal.aborted) return;
+              reconnects.onListenerEnded();
               const ranForMs = Date.now() - startedAt;
               if (ranForMs > 5 * 60 * 1000) consecutiveFailures = 0;
               else consecutiveFailures++;
@@ -1920,7 +2033,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       platformId: string;
       lookbackMs: number;
       limit: number;
-    }): Promise<{ recoveredCount: number; earliestTimestamp?: string }> {
+    }): Promise<{ recoveredCount: number; earliestTimestamp?: string; alreadyHandledCount?: number }> {
       // No-op if setup hasn't run yet — the host must finish setup before
       // recovery makes sense (we need onInbound to replay through).
       if (!setupConfig) return { recoveredCount: 0 };
@@ -1944,7 +2057,9 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
       const cutoffMs = Date.now() - lookbackMs;
 
       let recoveredCount = 0;
+      let alreadyHandledCount = 0;
       let earliestTimestamp: string | undefined;
+      const isDM = typeof adapterAny.isDM === 'function' && adapterAny.isDM(threadId) === true;
 
       // Per-page cap. Discord's Get Channel Messages API hard-caps the
       // `limit` query param at 100 (400 code 50035 NUMBER_TYPE_MAX
@@ -1982,6 +2097,13 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
               continue;
             }
 
+            // Already forwarded by this bridge (live, or an earlier
+            // recovery pass): never route it twice.
+            if (forwardedIds.has(message.id)) {
+              alreadyHandledCount += 1;
+              continue;
+            }
+
             const timestamp = message.metadata.dateSent.toISOString();
             if (!earliestTimestamp || timestamp < earliestTimestamp) {
               earliestTimestamp = timestamp;
@@ -1989,17 +2111,16 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
             recoveredCount += 1;
 
             // We don't know whether the historical message belongs to a
-            // subscribed thread or is a DM at recovery time. Forward
-            // through onInbound with conservative defaults (isMention
-            // from the platform-confirmed flag if present; isGroup
-            // undefined so the router's existing classification path
-            // runs). The router's dedup PK on (session_id, message_id)
-            // handles re-routing of any messages already processed
-            // before the gap.
-            await setupConfig.onInbound(
+            // subscribed thread at recovery time. Forward through onInbound
+            // with isMention from fetchedMessageIsMention (REST-fetched
+            // messages carry no SDK flag) and isGroup undefined so the
+            // router's existing classification path runs. The router's
+            // dedup PK on (session_id, message_id) handles re-routing of
+            // messages processed before this process started.
+            await forwardMessage(
               channelId,
               threadId,
-              await messageToInbound(message, message.isMention === true),
+              await messageToInbound(message, fetchedMessageIsMention(message, { botUserId: config.botUserId, isDM })),
             );
           }
 
@@ -2013,10 +2134,10 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           platformId: logId(platformId),
           err: err instanceof Error ? err.message : String(err),
         });
-        return { recoveredCount, earliestTimestamp };
+        return { recoveredCount, earliestTimestamp, alreadyHandledCount };
       }
 
-      return { recoveredCount, earliestTimestamp };
+      return { recoveredCount, earliestTimestamp, alreadyHandledCount };
     },
   };
 
@@ -2174,6 +2295,7 @@ function startLocalWebhookServer(
   setupConfig: ChannelSetup,
   botToken?: string,
   pollVotes?: PollVoteDebouncer,
+  onGatewayEvent?: (type: string) => void,
 ): Promise<string> {
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
@@ -2186,7 +2308,7 @@ function startLocalWebhookServer(
       req.on('data', (chunk: Buffer) => chunks.push(chunk));
       req.on('end', () => {
         const body = Buffer.concat(chunks).toString();
-        handleForwardedEvent(body, adapter, setupConfig, botToken, pollVotes)
+        handleForwardedEvent(body, adapter, setupConfig, botToken, pollVotes, onGatewayEvent)
           .then(() => {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end('{"ok":true}');
@@ -2221,12 +2343,21 @@ async function handleForwardedEvent(
   setupConfig: ChannelSetup,
   botToken?: string,
   pollVotes?: PollVoteDebouncer,
+  onGatewayEvent?: (type: string) => void,
 ): Promise<void> {
   let event: { type: string; data: Record<string, unknown> };
   try {
     event = JSON.parse(body);
   } catch {
     return;
+  }
+
+  if (typeof event?.type === 'string') {
+    try {
+      onGatewayEvent?.(event.type);
+    } catch (err) {
+      log.warn('Gateway event observer threw', { err });
+    }
   }
 
   // Live poll vote events (arrive only when the adapter requests the

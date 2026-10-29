@@ -47,6 +47,29 @@ export interface ChannelSetup {
    * before this hook existed).
    */
   onChatMigrated?(channelType: string, oldPlatformId: string, newPlatformId: string): void | Promise<void>;
+
+  /**
+   * Called when an adapter's live connection came back after a gap while the
+   * host stayed up (e.g. the Discord Gateway re-identified with a fresh
+   * session, so events sent while it was down are never redelivered).
+   * Hosts that drive `recoverMissedMessages` should run a bounded pass that
+   * covers `disconnectedAt`..`reconnectedAt`; replays of messages the adapter
+   * already forwarded in this process are skipped by the adapter itself.
+   *
+   * Optional: hosts that don't subscribe keep the old behaviour (messages
+   * missed during a reconnect gap are not replayed).
+   */
+  onReconnected?(info: ChannelReconnectInfo): void | Promise<void>;
+}
+
+/** Gap reported by `ChannelSetup.onReconnected`. ISO-8601 timestamps. */
+export interface ChannelReconnectInfo {
+  channelType: string;
+  /** Adapter instance (registry key); undefined for the default instance. */
+  instance?: string;
+  /** Best estimate of when the connection was lost (earliest point to replay). */
+  disconnectedAt: string;
+  reconnectedAt: string;
 }
 
 /** Delivery address used for reply-to overrides and (normally) the inbound's own origin. */
@@ -449,7 +472,7 @@ export interface ChannelAdapter {
     platformId: string;
     lookbackMs: number;
     limit: number;
-  }): Promise<{ recoveredCount: number; earliestTimestamp?: string }>;
+  }): Promise<{ recoveredCount: number; earliestTimestamp?: string; alreadyHandledCount?: number }>;
 
   /**
    * Fetch the participant roster for a group chat, including each member's
