@@ -10,7 +10,12 @@ import { ABSOLUTE_CEILING_MS_RAW, CLAIM_STUCK_MS_RAW } from './config.js';
 import { log } from './log.js';
 import type { ContainerState, InboundMailbox, MailboxSession, OutboundMailbox } from './mailbox/index.js';
 import { heartbeatPath, withExistingMailboxSession } from './session-manager.js';
-import { getContainerStartedAtMs, isContainerRunning, killContainer } from './container-runner.js';
+import {
+  getContainerActivityFloorMs,
+  getContainerStartedAtMs,
+  isContainerRunning,
+  killContainer,
+} from './container-runner.js';
 import type { Session } from './types.js';
 
 import { getSessionClaim } from './db/coordination.js';
@@ -481,9 +486,16 @@ async function enforceRunningContainerSla(
     const parsed = Date.parse(claimRow.claimed_at);
     if (!Number.isNaN(parsed)) incarnationStartMs = parsed;
   }
+  // A heartbeat older than this incarnation was written by an earlier
+  // container. A spawned runtime's incarnation starts at its claim. An adopted
+  // runtime is the same container that wrote the heartbeat before the host
+  // restarted, so its own start is the floor: gating at the claim (the
+  // adoption) zeroed an idle container's heartbeat and exempted it from the
+  // idle stop (2026-10-29). Claims keep the claim-time grace below.
+  const heartbeatFloorMs = getContainerActivityFloorMs(session.id) ?? incarnationStartMs;
 
   const rawHeartbeatMs = heartbeatMtimeMs(agentGroupId, session.id);
-  const gatedHeartbeatMs = rawHeartbeatMs >= incarnationStartMs ? rawHeartbeatMs : 0;
+  const gatedHeartbeatMs = rawHeartbeatMs >= heartbeatFloorMs ? rawHeartbeatMs : 0;
   const gatedClaims = outbox.getProcessingClaims().map((claim) => {
     const claimedAt = Date.parse(claim.statusChanged);
     if (Number.isNaN(claimedAt) || claimedAt >= incarnationStartMs) return claim;

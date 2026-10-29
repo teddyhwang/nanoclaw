@@ -208,6 +208,12 @@ export interface SessionSnapshot {
   handle: SessionHandle;
   phase: SessionPhase;
   failure?: SessionFailure;
+  /**
+   * When the runtime was created, if the listing reports it. An adopting host
+   * uses it as the session's activity clock, so a container a previous host
+   * started keeps its real idle and ceiling age across host restarts.
+   */
+  startedAtMs?: number;
 }
 
 /**
