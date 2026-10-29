@@ -14,7 +14,10 @@ import {
   createChatSdkBridge,
   createPollVoteDebouncer,
   decodeDiscordCustomId,
+  createGatewayReconnectTracker,
+  createRecentIdSet,
   enrichAttachments,
+  fetchedMessageIsMention,
   htmlToMarkdown,
   isSelfAuthoredChatSdkMessage,
   parsePollVoteGatewayEvent,
@@ -1710,6 +1713,220 @@ describe('createChatSdkBridge — local Gateway webhook', () => {
         messageId: 'card-2',
         platformId: 'chan-1',
       });
+    } finally {
+      await bridge.teardown();
+    }
+  });
+});
+
+describe('fetchedMessageIsMention', () => {
+  const BOT = 'bot-1';
+  const msg = (over: Record<string, unknown> = {}) =>
+    ({
+      isMention: undefined,
+      author: { userId: 'u-1', isBot: false, isMe: false },
+      raw: { mentions: [] },
+      ...over,
+    }) as never;
+
+  it('is true for an explicit mention of this bot and false for another user', () => {
+    expect(fetchedMessageIsMention(msg({ raw: { mentions: [{ id: BOT }] } }), { botUserId: BOT, isDM: false })).toBe(
+      true,
+    );
+    expect(
+      fetchedMessageIsMention(msg({ raw: { mentions: [{ id: 'someone-else' }] } }), { botUserId: BOT, isDM: false }),
+    ).toBe(false);
+    expect(fetchedMessageIsMention(msg(), { botUserId: BOT, isDM: false })).toBe(false);
+  });
+
+  it('treats a human DM as addressed, never a bot-authored message', () => {
+    expect(fetchedMessageIsMention(msg(), { botUserId: BOT, isDM: true })).toBe(true);
+    const fromBot = msg({ author: { userId: BOT, isBot: true, isMe: true }, raw: { mentions: [{ id: BOT }] } });
+    expect(fetchedMessageIsMention(fromBot, { botUserId: BOT, isDM: true })).toBe(false);
+  });
+
+  it('keeps the SDK flag authoritative without a botUserId (non-Discord platforms unchanged)', () => {
+    expect(fetchedMessageIsMention(msg(), { isDM: true })).toBe(false);
+    expect(fetchedMessageIsMention(msg({ isMention: true }), { isDM: false })).toBe(true);
+  });
+});
+
+describe('createRecentIdSet', () => {
+  it('evicts the oldest id past capacity', () => {
+    const ids = createRecentIdSet(2);
+    ids.add('a');
+    ids.add('b');
+    ids.add('a');
+    ids.add('c');
+    expect([ids.has('a'), ids.has('b'), ids.has('c')]).toEqual([false, true, true]);
+  });
+});
+
+describe('createGatewayReconnectTracker', () => {
+  function tracker() {
+    let t = 1_000;
+    const gaps: Array<{ disconnectedAtMs: number; reconnectedAtMs: number }> = [];
+    const tr = createGatewayReconnectTracker({ now: () => t, onReconnect: (g) => gaps.push(g) });
+    return { tr, gaps, at: (ms: number) => (t = ms) };
+  }
+
+  it('ignores the initial READY and reports a later READY with the gap since the listener ended', () => {
+    const { tr, gaps, at } = tracker();
+    tr.onEvent('GATEWAY_READY');
+    at(5_000);
+    tr.onEvent('GATEWAY_MESSAGE_CREATE');
+    expect(gaps).toEqual([]);
+    at(10_000);
+    tr.onListenerEnded();
+    at(20_000);
+    tr.onListenerEnded(); // a failed retry does not move the gap start
+    at(90_000);
+    tr.onEvent('GATEWAY_READY');
+    expect(gaps).toEqual([{ disconnectedAtMs: 10_000, reconnectedAtMs: 90_000 }]);
+  });
+
+  it('uses the last event for a re-identify inside one listener run', () => {
+    const { tr, gaps, at } = tracker();
+    tr.onEvent('GATEWAY_READY');
+    at(4_000);
+    tr.onEvent('GATEWAY_MESSAGE_CREATE');
+    at(60_000);
+    tr.onEvent('GATEWAY_READY');
+    expect(gaps).toEqual([{ disconnectedAtMs: 4_000, reconnectedAtMs: 60_000 }]);
+  });
+
+  it('does not report a RESUMED session (Discord replays its events) or a first connect after failed boots', () => {
+    const { tr, gaps, at } = tracker();
+    tr.onListenerEnded();
+    at(3_000);
+    tr.onEvent('GATEWAY_READY');
+    at(4_000);
+    tr.onEvent('GATEWAY_RESUMED');
+    expect(gaps).toEqual([]);
+  });
+});
+
+describe('createChatSdkBridge — Gateway reconnect recovery', () => {
+  const BOT_TOKEN = 'test-bot-token';
+  const BOT_ID = 'bot-app-1';
+  const PLATFORM = 'discord:g-1:c-1';
+  const realFetch = globalThis.fetch;
+
+  function fetched(id: string, opts: { minutesAgo: number; mentionsBot?: boolean }) {
+    const author = { userId: 'u-1', userName: 'jcho', fullName: 'JCho', isBot: false, isMe: false };
+    return {
+      id,
+      threadId: PLATFORM,
+      text: 'hi',
+      raw: { id, mentions: opts.mentionsBot ? [{ id: BOT_ID }] : [], author: { id: 'u-1' } },
+      author,
+      metadata: { dateSent: new Date(Date.now() - opts.minutesAgo * 60_000), edited: false },
+      attachments: [],
+      toJSON: () => ({ id, text: 'hi', author }),
+    };
+  }
+
+  async function startReconnectingGateway(history: () => unknown[]) {
+    let webhookUrl = '';
+    const adapter = stubAdapter({
+      name: 'discord',
+      initialize: async () => {},
+      handleWebhook: vi.fn(async () => new Response('ok')),
+      channelIdFromThreadId: (threadId: string) => threadId,
+      isDM: () => false,
+      fetchMessages: (async () => ({ messages: history() })) as never,
+    }) as Adapter & { startGatewayListener: unknown };
+    adapter.startGatewayListener = async (_opts: unknown, _ms: number, _signal: AbortSignal, url: string) => {
+      webhookUrl = url;
+      return new Response('{}');
+    };
+    const bridge = createChatSdkBridge({ adapter, supportsThreads: true, botToken: BOT_TOKEN, botUserId: BOT_ID });
+    const inbound: Array<{ id: string; isMention: boolean }> = [];
+    // Host side of ChannelSetup.onReconnected: one bounded pass over the gap.
+    const passes: Array<Promise<unknown>> = [];
+    const onReconnected = vi.fn((info: { disconnectedAt: string; reconnectedAt: string }) => {
+      const pass = bridge.recoverMissedMessages!({
+        platformId: PLATFORM,
+        lookbackMs: Date.now() - Date.parse(info.disconnectedAt) + 5 * 60_000,
+        limit: 100,
+      });
+      passes.push(pass);
+      return pass.then(() => undefined);
+    });
+    await bridge.setup({
+      onInbound: (_p, _t, m) => {
+        inbound.push({ id: m.id, isMention: m.isMention === true });
+      },
+      onInboundEvent: () => {},
+      onMetadata: () => {},
+      onAction: () => {},
+      onReconnected,
+    });
+    const gateway = async (type: string) => {
+      const res = await realFetch(webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-discord-gateway-token': BOT_TOKEN },
+        body: JSON.stringify({ type, data: {} }),
+      });
+      expect(res.status).toBe(200);
+      // The hook fires off the request path; let it start, then settle.
+      await new Promise((r) => setImmediate(r));
+      await Promise.all(passes.splice(0));
+    };
+    return { bridge, inbound, onReconnected, gateway };
+  }
+
+  beforeEach(async () => {
+    const { initTestDb } = await import('../db/connection.js');
+    const { runMigrations } = await import('../db/migrations/index.js');
+    await runMigrations(await initTestDb());
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(null, { status: 204 })),
+    );
+  });
+
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    const { closeDb } = await import('../db/connection.js');
+    await closeDb();
+  });
+
+  it('replays one missed mention exactly once, with isMention set, across repeated reconnects', async () => {
+    const history = [fetched('m-missed', { minutesAgo: 3, mentionsBot: true }), fetched('m-chat', { minutesAgo: 2 })];
+    const { bridge, inbound, onReconnected, gateway } = await startReconnectingGateway(() => history);
+    try {
+      await gateway('GATEWAY_READY'); // initial connect: startup recovery's job
+      expect(onReconnected).not.toHaveBeenCalled();
+      await gateway('GATEWAY_READY'); // fresh session after a gap
+      expect(onReconnected).toHaveBeenCalledTimes(1);
+      expect(inbound).toEqual([
+        { id: 'm-missed', isMention: true },
+        { id: 'm-chat', isMention: false },
+      ]);
+      await gateway('GATEWAY_READY');
+      await gateway('GATEWAY_READY');
+      expect(onReconnected).toHaveBeenCalledTimes(3);
+      expect(inbound.map((m) => m.id)).toEqual(['m-missed', 'm-chat']);
+    } finally {
+      await bridge.teardown();
+    }
+  });
+
+  it('routes nothing when nothing was missed, and a RESUMED session asks for no recovery', async () => {
+    let history: unknown[] = [];
+    const { bridge, inbound, onReconnected, gateway } = await startReconnectingGateway(() => history);
+    try {
+      await gateway('GATEWAY_READY');
+      await gateway('GATEWAY_RESUMED');
+      expect(onReconnected).not.toHaveBeenCalled();
+      await gateway('GATEWAY_READY');
+      expect(onReconnected).toHaveBeenCalledTimes(1);
+      expect(inbound).toEqual([]);
+      // History older than the gap window is not "missed" either.
+      history = [fetched('m-old', { minutesAgo: 60 * 3, mentionsBot: true })];
+      await gateway('GATEWAY_READY');
+      expect(inbound).toEqual([]);
     } finally {
       await bridge.teardown();
     }
