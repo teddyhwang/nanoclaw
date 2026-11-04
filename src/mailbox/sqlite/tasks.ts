@@ -231,8 +231,27 @@ CREATE TABLE IF NOT EXISTS task_series (
   status        TEXT NOT NULL,
   recurrence    TEXT,
   process_after TEXT,
-  content       TEXT NOT NULL
+  content       TEXT NOT NULL,
+  channel_type  TEXT,
+  platform_id   TEXT,
+  thread_id     TEXT,
+  updated_at    TEXT
 );`;
+
+/** Columns added after the first snapshot shape; older inbound.dbs gain them in place. */
+const TASK_SERIES_SNAPSHOT_ADDED_COLUMNS = ['channel_type', 'platform_id', 'thread_id', 'updated_at'] as const;
+
+function ensureTaskSeriesSnapshotSchema(db: Database.Database): void {
+  db.exec(TASK_SERIES_SNAPSHOT_SCHEMA);
+  const present = new Set(
+    (db.prepare(`SELECT name FROM pragma_table_info('task_series')`).all() as Array<{ name: string }>).map(
+      (column) => column.name,
+    ),
+  );
+  for (const column of TASK_SERIES_SNAPSHOT_ADDED_COLUMNS) {
+    if (!present.has(column)) db.exec(`ALTER TABLE task_series ADD COLUMN ${column} TEXT`);
+  }
+}
 
 interface LegacyTaskSeriesSnapshotRow {
   series_id: string;
@@ -240,6 +259,10 @@ interface LegacyTaskSeriesSnapshotRow {
   recurrence: string | null;
   process_after: string | null;
   content: string;
+  channel_type?: string | null;
+  platform_id?: string | null;
+  thread_id?: string | null;
+  updated_at?: string | null;
 }
 
 type TaskSeriesSnapshotInput = TaskSeriesSnapshotRecord | LegacyTaskSeriesSnapshotRow;
@@ -254,20 +277,35 @@ function canonicalSnapshot(row: TaskSeriesSnapshotInput): TaskSeriesSnapshotReco
           recurrence: row.recurrence,
           processAfter: row.process_after,
           content: row.content,
+          channelType: row.channel_type ?? null,
+          platformId: row.platform_id ?? null,
+          threadId: row.thread_id ?? null,
+          updatedAt: row.updated_at ?? null,
         },
   );
 }
 
 /** Replace the read-only, container-visible projection of live schedule rows. */
 export function replaceTaskSeriesSnapshot(db: Database.Database, series: readonly TaskSeriesSnapshotInput[]): void {
-  db.exec(TASK_SERIES_SNAPSHOT_SCHEMA);
+  ensureTaskSeriesSnapshotSchema(db);
   const tx = db.transaction((rows: readonly TaskSeriesSnapshotInput[]) => {
     db.prepare('DELETE FROM task_series').run();
     const insert = db.prepare(
-      `INSERT INTO task_series (series_id, status, recurrence, process_after, content)
-       VALUES (@seriesId, @status, @recurrence, @processAfter, @content)`,
+      `INSERT INTO task_series
+         (series_id, status, recurrence, process_after, content, channel_type, platform_id, thread_id, updated_at)
+       VALUES
+         (@seriesId, @status, @recurrence, @processAfter, @content, @channelType, @platformId, @threadId, @updatedAt)`,
     );
-    for (const row of rows) insert.run(canonicalSnapshot(row));
+    for (const row of rows) {
+      const record = canonicalSnapshot(row);
+      insert.run({
+        ...record,
+        channelType: record.channelType ?? null,
+        platformId: record.platformId ?? null,
+        threadId: record.threadId ?? null,
+        updatedAt: record.updatedAt ?? null,
+      });
+    }
   });
   tx(series);
 }

@@ -17,6 +17,7 @@ import {
   resumeTask,
   updateTask,
   getCompletedRecurring,
+  replaceTaskSeriesSnapshot,
   type RecurringMessage,
 } from './tasks.js';
 
@@ -303,5 +304,57 @@ describe('insertRecurrence', () => {
     };
     expect(row.series_id).toBe('task-orig');
     db.close();
+  });
+});
+
+describe('replaceTaskSeriesSnapshot', () => {
+  it('projects the route and updated_at, upgrading an older snapshot table in place', () => {
+    const db = freshDb();
+    try {
+      // An inbound.db written before the route columns existed.
+      db.exec('DROP TABLE task_series');
+      db.exec(
+        'CREATE TABLE task_series (series_id TEXT PRIMARY KEY, status TEXT NOT NULL, recurrence TEXT, process_after TEXT, content TEXT NOT NULL)',
+      );
+      replaceTaskSeriesSnapshot(db, [
+        {
+          seriesId: 'task-route',
+          status: 'pending',
+          recurrence: '0 20 * * *',
+          processAfter: '2026-11-05T01:00:00.000Z',
+          content: JSON.stringify({ prompt: 'full prompt' }),
+          channelType: 'telegram',
+          platformId: 'telegram:-1',
+          threadId: null,
+          updatedAt: '2026-11-04T02:16:06.260Z',
+        },
+        // A projector that predates the route fields still validates.
+        {
+          seriesId: 'task-legacy',
+          status: 'paused',
+          recurrence: null,
+          processAfter: null,
+          content: JSON.stringify({ prompt: 'p' }),
+        },
+      ]);
+      expect(
+        db
+          .prepare(
+            'SELECT series_id, channel_type, platform_id, thread_id, updated_at FROM task_series ORDER BY series_id',
+          )
+          .all(),
+      ).toEqual([
+        { series_id: 'task-legacy', channel_type: null, platform_id: null, thread_id: null, updated_at: null },
+        {
+          series_id: 'task-route',
+          channel_type: 'telegram',
+          platform_id: 'telegram:-1',
+          thread_id: null,
+          updated_at: '2026-11-04T02:16:06.260Z',
+        },
+      ]);
+    } finally {
+      db.close();
+    }
   });
 });

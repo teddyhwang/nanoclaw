@@ -186,6 +186,10 @@ async function maintainScheduling(
           recurrence: row.recurrence,
           processAfter: row.process_after,
           content: row.content,
+          channelType: row.channel_type,
+          platformId: row.platform_id,
+          threadId: row.thread_id,
+          updatedAt: row.updated_at,
         })),
       );
     } finally {

@@ -50,7 +50,11 @@ CREATE TABLE IF NOT EXISTS task_series (
   status        TEXT NOT NULL,
   recurrence    TEXT,
   process_after TEXT,
-  content       TEXT NOT NULL
+  content       TEXT NOT NULL,
+  channel_type  TEXT,
+  platform_id   TEXT,
+  thread_id     TEXT,
+  updated_at    TEXT
 );
 `;
 
