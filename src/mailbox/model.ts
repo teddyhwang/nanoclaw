@@ -177,13 +177,22 @@ export interface TaskOccurrenceWrite {
   threadId: string | null;
 }
 
-/** Container-visible, read-only projection of a live host schedule series. */
+/**
+ * Container-visible, read-only projection of a live host schedule series.
+ * The route (where a fire is delivered) and `updatedAt` let an agent read
+ * back exactly what is stored; they are optional so older projectors stay
+ * valid and project as null.
+ */
 export interface TaskSeriesSnapshotRecord {
   seriesId: string;
   status: 'pending' | 'paused';
   recurrence: string | null;
   processAfter: string | null;
   content: string;
+  channelType?: string | null;
+  platformId?: string | null;
+  threadId?: string | null;
+  updatedAt?: string | null;
 }
 
 export interface TaskRecord {
@@ -617,6 +626,10 @@ export function parseTaskSeriesSnapshotRecord(value: unknown): TaskSeriesSnapsho
     'recurrence',
     'processAfter',
     'content',
+    'channelType',
+    'platformId',
+    'threadId',
+    'updatedAt',
   ]);
   return {
     seriesId: text(record, 'seriesId'),
@@ -624,6 +637,10 @@ export function parseTaskSeriesSnapshotRecord(value: unknown): TaskSeriesSnapsho
     recurrence: nullableText(record, 'recurrence'),
     processAfter: nullableTimestamp(record, 'processAfter'),
     content: text(record, 'content'),
+    channelType: optionalNullableText(record, 'channelType') ?? null,
+    platformId: optionalNullableText(record, 'platformId') ?? null,
+    threadId: optionalNullableText(record, 'threadId') ?? null,
+    updatedAt: optionalNullableText(record, 'updatedAt') ?? null,
   };
 }
 
