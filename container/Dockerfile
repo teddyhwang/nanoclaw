@@ -42,7 +42,7 @@ ARG BUN_VERSION=1.4.4
 # Otherwise BuildKit reuses the cached layer and the image keeps the old
 # packages indefinitely. `apt-get upgrade` also lifts packages the base
 # image already ships (e.g. libexpat1), which `install` alone leaves as-is.
-ARG APT_REFRESH=2026-11-01
+ARG APT_REFRESH=2026-11-06
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     echo "apt refresh: ${APT_REFRESH}" && \
