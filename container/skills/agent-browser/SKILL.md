@@ -1,10 +1,14 @@
 ---
 name: agent-browser
-description: Browse the web for any task — research topics, read articles, interact with web apps, fill forms, take screenshots, extract data, and test web pages. Use whenever a browser would be useful, not just when the user explicitly asks.
+description: TEMPORARILY localhost and own dev servers only (CVE-2026-125350, chromium unpatched); use camofox for every other site. Browse the web for any task — research topics, read articles, interact with web apps, fill forms, take screenshots, extract data, and test web pages. Use whenever a browser would be useful, not just when the user explicitly asks.
 allowed-tools: Bash(agent-browser:*)
 ---
 
 # Browser Automation with agent-browser
+
+<!-- TEMPORARY (2026-11-11): CVE-2026-125350, Debian chromium 156 unpatched (CISA KEV). Revert this block once Chromium 157 ships in bookworm-security. -->
+> **Temporary restriction (CVE-2026-125350, chromium unpatched):** use agent-browser **only** for `localhost` / `127.0.0.1` and your own dev servers until further notice. For every other site use `camofox`. If camofox fails for an external site, report that to the user; **do not** fall back to agent-browser. Optimus also sets `AGENT_BROWSER_ALLOWED_DOMAINS=localhost,127.0.0.1` on new containers, so `agent-browser open` refuses other domains.
+<!-- END TEMPORARY CVE-2026-125350 -->
 
 ## Quick start
 
