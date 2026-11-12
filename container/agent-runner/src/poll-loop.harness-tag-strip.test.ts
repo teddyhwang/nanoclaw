@@ -146,7 +146,10 @@ it('sanitizes the dedicated provider error field without delivering private resu
 
   const out = getUndeliveredMessages().filter((row) => row.kind === 'chat');
   expect(out).toHaveLength(1);
-  expect(JSON.parse(out[0].content).text).toBe('Please try again later.');
+  // Provider error text never reaches the channel verbatim, even when it reads
+  // like a user-facing sentence: only the fixed notices do.
+  expect(JSON.parse(out[0].content).text).toBe(GENERIC_FAILURE_NOTICE);
   expect(out[0].content).not.toContain('Private raw transport diagnostic');
+  expect(out[0].content).not.toContain('invoke');
   expect(pushes).toHaveLength(0);
 });

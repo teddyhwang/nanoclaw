@@ -90,6 +90,7 @@ import {
   isProviderAuthFailureText,
 } from './provider-auth-failure.js';
 import { emitFailureNoticeAlert } from './failure-notice-alert.js';
+import { userFailureNotice } from './user-failure-notice.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
 import type {
   AgentProvider,
@@ -2436,10 +2437,13 @@ export async function processQuery(
                 // the reason here, since the skipped notice was its only record.
                 log(`Error result — notice not sent on this route: ${event.error ?? FAILED_RUN_USER_TEXT}`);
               } else {
+                // event.error is raw provider text (API body, request id,
+                // provider names): deliverErrorResult maps it to a clean
+                // notice; only the operator alert carries the raw error.
                 await deliverErrorResult(
                   routing,
                   authFailure ? AUTH_FAILURE_USER_TEXT : (event.error ?? FAILED_RUN_USER_TEXT),
-                  { provider: deliveryProviderName, detail: archivedResult },
+                  { provider: deliveryProviderName, detail: archivedResult, rawError: event.error },
                 );
                 rememberFailedTurn(routing, isTaskTurn, [answeringPrompt]);
               }
@@ -2738,9 +2742,10 @@ export async function processQuery(
           continue;
         noticed.push(target);
         try {
-          await deliverErrorResult(target, authFailure ? AUTH_FAILURE_USER_TEXT : FAILED_RUN_USER_TEXT, {
+          await deliverErrorResult(target, authFailure ? AUTH_FAILURE_USER_TEXT : errMsg, {
             provider: activeProviderName(),
             detail: errMsg,
+            rawError: errMsg,
           });
           // A task-attributed answering turn was skipped above, so every
           // target here is an interactive (or a2a, filtered by eligibility) turn.
@@ -2882,13 +2887,6 @@ async function deliverProviderFile(providerPath: string, routing: RoutingContext
   log(`Provider file staged for automatic delivery: ${filename}`);
 }
 
-/**
- * Deliver a turn's text straight to the channel the batch arrived on. Used when
- * a turn ends in a provider error (e.g. a non-retryable 403 billing_error) with
- * no <message> envelope: the notice would otherwise be dropped as scratchpad.
- * This is the same user-facing write the outer catch block does, minus the
- * `Error:` prefix — the provider's text is already a user-facing message.
- */
 /** Never lets bookkeeping break failure handling. */
 function rememberFailedTurn(routing: RoutingContext, isTaskTurn: boolean, prompts: Array<string | undefined>): void {
   const known = prompts.filter((prompt): prompt is string => !!prompt);
@@ -2901,16 +2899,23 @@ function rememberFailedTurn(routing: RoutingContext, isTaskTurn: boolean, prompt
   }
 }
 
+/**
+ * Deliver a failure notice to the channel the batch arrived on. Used when a
+ * turn ends in a provider error result with no <message> envelope, and by the
+ * outer catch for a turn that threw. `text` may be raw provider or runner
+ * error text (API bodies, request ids, provider/model names, stack traces);
+ * it never reaches the channel as-is: userFailureNotice maps it to one short
+ * fixed notice by class (auth, rate limit, overload, timeout, context length,
+ * otherwise the generic notice). The raw error stays in the runner log, the
+ * exchange archive and the operator alert.
+ */
 async function deliverErrorResult(
   routing: RoutingContext,
   text: string,
-  cause: { provider: string; detail: string },
+  cause: { provider: string; detail: string; rawError?: string },
 ): Promise<void> {
-  log('Error result with no <message> envelope — delivering to channel');
-  // A rejected credential's raw text ("Failed to authenticate. API Error: 401
-  // OAuth access token has been revoked.") means nothing to a user and hides
-  // that the operator must act; send the plain notice instead.
-  const userText = isProviderAuthFailureText(text) ? AUTH_FAILURE_USER_TEXT : stripHarnessTagArtifacts(text);
+  log('Error result with no <message> envelope — delivering a sanitized notice to channel');
+  const userText = userFailureNotice(text);
   await writeMessageOut({
     id: generateId(),
     in_reply_to: routing.inReplyTo,
@@ -2924,7 +2929,12 @@ async function deliverErrorResult(
   // Auth failures already raise provider_auth_failure; every other notice a
   // user receives alerts the operator here (deduped host-side).
   if (userText !== AUTH_FAILURE_USER_TEXT) {
-    await emitFailureNoticeAlert({ channelType: routing.channelType, provider: cause.provider, detail: cause.detail });
+    await emitFailureNoticeAlert({
+      channelType: routing.channelType,
+      provider: cause.provider,
+      detail: cause.detail,
+      rawError: cause.rawError,
+    });
   }
 }
 

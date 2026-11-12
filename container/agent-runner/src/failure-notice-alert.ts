@@ -8,8 +8,11 @@
  * DM, 2026-11-10: about 12 hours). The host dedupes and routes this to the
  * operator's existing alert destination.
  *
- * The payload is bounded metadata only: a sanitized error class and the
- * provider name. Never message text or raw provider error payloads.
+ * The payload is bounded metadata (a sanitized error class, the provider and
+ * channel type) plus a bounded excerpt of the raw provider/runner error, which
+ * the user never sees (see user-failure-notice.ts). Never message text: the
+ * excerpt comes from the provider error field or thrown error, not the
+ * assistant's result text.
  */
 import { writeMessageOut } from './db/messages-out.js';
 
@@ -49,6 +52,21 @@ export interface FailureNoticeAlert {
   provider: string;
   /** Raw error text, used only to derive the class; never forwarded. */
   detail: string;
+  /** Raw provider/runner error for the operator; excerpted, never shown to the user. */
+  rawError?: string | null;
+}
+
+/** Longest raw-error excerpt an operator alert carries. */
+export const RAW_ERROR_EXCERPT_MAX = 500;
+
+/** One line, no control characters, bounded. Empty when there is nothing to report. */
+export function rawErrorExcerpt(raw: string | null | undefined): string {
+  const line = (raw ?? '')
+    .replace(/[\x00-\x1f\x7f-\x9f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const chars = Array.from(line);
+  return chars.length > RAW_ERROR_EXCERPT_MAX ? `${chars.slice(0, RAW_ERROR_EXCERPT_MAX - 1).join('')}…` : line;
 }
 
 /** True when a failure notice on this channel reached a person. */
@@ -75,6 +93,7 @@ export async function emitFailureNoticeAlert(alert: FailureNoticeAlert): Promise
         errorClass: classifyFailureCause(alert.detail),
         provider: token(alert.provider) ?? 'unknown',
         channelType: token(alert.channelType ?? undefined) ?? 'unknown',
+        ...(rawErrorExcerpt(alert.rawError) ? { rawError: rawErrorExcerpt(alert.rawError) } : {}),
       }),
     });
   } catch (err) {
