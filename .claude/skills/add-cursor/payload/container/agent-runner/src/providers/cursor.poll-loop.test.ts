@@ -184,7 +184,8 @@ describe('CursorProvider through the real poll-loop', () => {
       // The operator alert for the notice is a separate system row.
       const out = getUndeliveredMessages().filter((row) => row.kind === 'chat');
       expect(out).toHaveLength(1);
-      expect(JSON.parse(out[0]!.content).text).toBe('model failed mid-turn');
+      // The raw Cursor error stays in the log and operator alert; the user gets the plain notice.
+      expect(JSON.parse(out[0]!.content).text).toBe(GENERIC_FAILURE_NOTICE);
     } finally {
       cursorAgentApi.create = original.create;
       cursorAgentApi.resume = original.resume;
