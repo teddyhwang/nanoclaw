@@ -181,7 +181,8 @@ describe('CursorProvider through the real poll-loop', () => {
       await processQuery(query, ROUTING, ['m1'], 'cursor', undefined, 'fail', undefined);
 
       expect(sent).toHaveLength(1);
-      const out = getUndeliveredMessages();
+      // The operator alert for the notice is a separate system row.
+      const out = getUndeliveredMessages().filter((row) => row.kind === 'chat');
       expect(out).toHaveLength(1);
       expect(JSON.parse(out[0]!.content).text).toBe('model failed mid-turn');
     } finally {
@@ -214,7 +215,7 @@ describe('CursorProvider through the real poll-loop', () => {
       controller.abort();
 
       expect(getContinuation('cursor')).toBeUndefined();
-      const out = getUndeliveredMessages();
+      const out = getUndeliveredMessages().filter((row) => row.kind === 'chat');
       expect(out).toHaveLength(1);
       expect(JSON.parse(out[0]!.content).text).toBe(GENERIC_FAILURE_NOTICE);
     } finally {
