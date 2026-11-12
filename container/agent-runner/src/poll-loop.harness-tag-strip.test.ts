@@ -126,7 +126,7 @@ describe('harness tag artifacts stripped from deliveries (wiring)', () => {
 
     await processQuery(query, ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
 
-    const out = getUndeliveredMessages();
+    const out = getUndeliveredMessages().filter((row) => row.kind === 'chat');
     expect(out).toHaveLength(1);
     expect(JSON.parse(out[0].content).text).toBe(GENERIC_FAILURE_NOTICE);
     // No re-wrap nudge — an error result must not re-hammer the gateway.
@@ -144,7 +144,7 @@ it('sanitizes the dedicated provider error field without delivering private resu
 
   await processQuery(query, ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
 
-  const out = getUndeliveredMessages();
+  const out = getUndeliveredMessages().filter((row) => row.kind === 'chat');
   expect(out).toHaveLength(1);
   expect(JSON.parse(out[0].content).text).toBe('Please try again later.');
   expect(out[0].content).not.toContain('Private raw transport diagnostic');

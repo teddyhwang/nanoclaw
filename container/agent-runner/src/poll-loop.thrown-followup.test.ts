@@ -300,7 +300,9 @@ it('preserves the provider error for recovery when one notice write rejects, and
       throw failure;
     });
     expect(recovered).toBe(failure);
-    expect(write).toHaveBeenCalledTimes(2);
+    // Rejected notice for thread-a, then thread-b's notice and its operator
+    // alert (a rejected notice raises no alert: nothing reached the user).
+    expect(write).toHaveBeenCalledTimes(3);
     expect(visibleRows().map((row) => [JSON.parse(row.content).text, row.thread_id])).toEqual([[NOTICE, 'thread-b']]);
   } finally {
     write.mockRestore();
