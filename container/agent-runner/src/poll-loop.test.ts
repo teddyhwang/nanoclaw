@@ -7,9 +7,10 @@ import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '
 import { getPendingMessages, markCompleted, type MessageInRow } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { getAgentMailbox } from './mailbox/index.js';
-import { formatMessages, extractRouting, isClearCommand, isRunnerCommand } from './formatter.js';
+import { formatMessages, extractRouting, GENERIC_FAILURE_NOTICE, isClearCommand, isRunnerCommand } from './formatter.js';
 import { isHandledErrorResultEcho, processQuery } from './poll-loop.js';
 import { AUTH_FAILURE_USER_TEXT } from './provider-auth-failure.js';
+import { OVERLOADED_USER_TEXT, RATE_LIMIT_USER_TEXT } from './user-failure-notice.js';
 import { FAILED_TURN_KEY, consumeFailedTurnNotice } from './failed-turn-notice.js';
 import { confirmationGatePaused, noteToolResult, resetConfirmationGateState } from './confirmation-gate-state.js';
 import { MockProvider } from './providers/mock.js';
@@ -1795,6 +1796,39 @@ describe('error result with no <message> envelope', () => {
     expect(systemActions().filter((a) => a.action === 'provider_auth_failure')).toHaveLength(0);
   });
 
+  // Escalation 2026-10-14: an error result's raw provider text (API body,
+  // request id, provider names) was posted verbatim to users.
+  const RAW_PROVIDER_ERROR =
+    'API Error: 500 {"type":"error","error":{"type":"api_error","message":"Internal server error"},"request_id":"req_011CTestRequestId"} at https://api.anthropic.com/v1/messages (claude-opus-4)';
+
+  it('sends a clean notice for a raw provider error and keeps the raw detail in the operator alert', async () => {
+    const { query } = makeResultQuery({ type: 'result', text: null, isError: true, error: RAW_PROVIDER_ERROR });
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', null, false, 'TestBot', [], null, undefined, 'prompt', undefined);
+
+    const chats = getUndeliveredMessages().filter((row) => row.kind === 'chat');
+    expect(chats).toHaveLength(1);
+    expect(JSON.parse(chats[0].content)).toEqual({ text: OVERLOADED_USER_TEXT, failureNotice: true });
+    const text = JSON.parse(chats[0].content).text as string;
+    for (const leak of ['500', 'req_', 'http', 'claude', 'api_error', '{']) expect(text).not.toContain(leak);
+    const alerts = systemActions().filter((a) => a.action === 'failure_notice_delivered');
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].errorClass).toBe('upstream_unavailable');
+    expect(alerts[0].rawError).toBe(RAW_PROVIDER_ERROR);
+  });
+
+  it('maps the dual usage-limit error (which names both providers) to the plain rate-limit notice', async () => {
+    const { query } = makeResultQuery({
+      type: 'result',
+      text: null,
+      isError: true,
+      error: 'Both claude and codex have reached their usage limits. Please try again after one of the limits resets.',
+    });
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', null, false, 'TestBot', [], null, undefined, 'prompt', undefined);
+    const chats = getUndeliveredMessages().filter((row) => row.kind === 'chat');
+    expect(chats.map((row) => JSON.parse(row.content).text)).toEqual([RATE_LIMIT_USER_TEXT]);
+    expect(systemActions().find((a) => a.action === 'failure_notice_delivered')?.rawError).toContain('codex');
+  });
+
   it('leaves auth failure notices to the provider_auth_failure alert', async () => {
     const { query } = makeResultQuery({ type: 'result', text: REVOKED, isError: true });
     await processQuery(query, ERR_ROUTING, ['m1'], 'claude', null, false, 'TestBot', [], null, undefined, 'prompt', undefined);
@@ -2063,7 +2097,8 @@ describe('a2a failure notices (never answer a notice with a notice)', () => {
     const toA = agentOutbound();
     expect(toA).toHaveLength(1);
     expect(toA[0].platform_id).toBe('ag-a');
-    expect(JSON.parse(toA[0].content)).toEqual({ text: 'Incorrect API key', failureNotice: true });
+    // The raw provider error never crosses to the other agent either.
+    expect(JSON.parse(toA[0].content)).toEqual({ text: GENERIC_FAILURE_NOTICE, failureNotice: true });
 
     // A's session: the notice arrives from B and A's turn fails too.
     routeToSession(toA[0].content, 'ag-b', 'a2a-2');

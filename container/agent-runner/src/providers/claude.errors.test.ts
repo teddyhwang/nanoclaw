@@ -8,6 +8,7 @@ import { getUndeliveredMessages } from '../db/messages-out.js';
 import { closeSessionDb, getInboundDb, initTestSessionDb } from '../mailbox/sqlite/connection.js';
 import { processQuery } from '../poll-loop.js';
 import { AUTH_FAILURE_USER_TEXT } from '../provider-auth-failure.js';
+import { RATE_LIMIT_USER_TEXT } from '../user-failure-notice.js';
 import type { ProviderExchange } from './types.js';
 
 const sdkMessages: unknown[] = [];
@@ -76,9 +77,11 @@ it.each([false, true])('delivers the Claude SDK billing error once, with prior r
     claudeRuntimeContract.textDelivery === 'mid-turn-complete',
   );
 
-  expect(getUndeliveredMessages().map((row) => JSON.parse(row.content).text)).toEqual([
+  const chats = getUndeliveredMessages().filter((row) => row.kind === 'chat');
+  // The raw billing error stays in the exchange archive; the user gets the plain usage-limit notice.
+  expect(chats.map((row) => JSON.parse(row.content).text)).toEqual([
     ...(partialReply ? ['Finished the first step.'] : []),
-    BILLING_ERROR,
+    RATE_LIMIT_USER_TEXT,
   ]);
   expect(exchanges).toEqual([
     { prompt: 'continue', result: BILLING_ERROR, continuation: 'billing-session', status: 'error' },

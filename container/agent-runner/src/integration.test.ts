@@ -1348,13 +1348,14 @@ describe('poll loop — provider error recovery', () => {
     expect(out).toHaveLength(1);
     expect(JSON.parse(out[0].content).text).toBe(GENERIC_FAILURE_NOTICE);
     expect(out[0].content).not.toContain('permission denied');
-    // The thrown-error path alerts the operator once, with no message content.
+    // The thrown-error path alerts the operator once; the raw error rides in
+    // the alert only, never in the user's notice.
     const alerts = getUndeliveredMessages()
       .filter((row) => row.kind === 'system')
       .map((row) => JSON.parse(row.content))
       .filter((c) => c.action === 'failure_notice_delivered');
     expect(alerts).toHaveLength(1);
-    expect(JSON.stringify(alerts)).not.toContain('permission denied');
+    expect(alerts[0].rawError).toBe('permission denied');
 
     // Input message should be marked completed despite the error
     const pending = getPendingMessages();
