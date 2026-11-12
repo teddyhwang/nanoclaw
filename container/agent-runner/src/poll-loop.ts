@@ -89,6 +89,7 @@ import {
   emitProviderAuthFailureAlert,
   isProviderAuthFailureText,
 } from './provider-auth-failure.js';
+import { emitFailureNoticeAlert } from './failure-notice-alert.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
 import type {
   AgentProvider,
@@ -2438,6 +2439,7 @@ export async function processQuery(
                 await deliverErrorResult(
                   routing,
                   authFailure ? AUTH_FAILURE_USER_TEXT : (event.error ?? FAILED_RUN_USER_TEXT),
+                  { provider: deliveryProviderName, detail: archivedResult },
                 );
                 rememberFailedTurn(routing, isTaskTurn, [answeringPrompt]);
               }
@@ -2736,7 +2738,10 @@ export async function processQuery(
           continue;
         noticed.push(target);
         try {
-          await deliverErrorResult(target, authFailure ? AUTH_FAILURE_USER_TEXT : FAILED_RUN_USER_TEXT);
+          await deliverErrorResult(target, authFailure ? AUTH_FAILURE_USER_TEXT : FAILED_RUN_USER_TEXT, {
+            provider: activeProviderName(),
+            detail: errMsg,
+          });
           // A task-attributed answering turn was skipped above, so every
           // target here is an interactive (or a2a, filtered by eligibility) turn.
           rememberFailedTurn(target, false, promptsFor(target));
@@ -2896,7 +2901,11 @@ function rememberFailedTurn(routing: RoutingContext, isTaskTurn: boolean, prompt
   }
 }
 
-async function deliverErrorResult(routing: RoutingContext, text: string): Promise<void> {
+async function deliverErrorResult(
+  routing: RoutingContext,
+  text: string,
+  cause: { provider: string; detail: string },
+): Promise<void> {
   log('Error result with no <message> envelope — delivering to channel');
   // A rejected credential's raw text ("Failed to authenticate. API Error: 401
   // OAuth access token has been revoked.") means nothing to a user and hides
@@ -2912,6 +2921,11 @@ async function deliverErrorResult(routing: RoutingContext, text: string): Promis
     // Flagged so a receiving agent's own failure sends no notice back.
     content: JSON.stringify({ text: userText, [FAILURE_NOTICE_FIELD]: true }),
   });
+  // Auth failures already raise provider_auth_failure; every other notice a
+  // user receives alerts the operator here (deduped host-side).
+  if (userText !== AUTH_FAILURE_USER_TEXT) {
+    await emitFailureNoticeAlert({ channelType: routing.channelType, provider: cause.provider, detail: cause.detail });
+  }
 }
 
 /**

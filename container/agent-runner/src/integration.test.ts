@@ -1344,10 +1344,17 @@ describe('poll loop — provider error recovery', () => {
     await waitFor(() => getUndeliveredMessages().length > 0, 2000);
     controller.abort();
 
-    const out = getUndeliveredMessages();
+    const out = getUndeliveredMessages().filter((row) => row.kind === 'chat');
     expect(out).toHaveLength(1);
     expect(JSON.parse(out[0].content).text).toBe(GENERIC_FAILURE_NOTICE);
     expect(out[0].content).not.toContain('permission denied');
+    // The thrown-error path alerts the operator once, with no message content.
+    const alerts = getUndeliveredMessages()
+      .filter((row) => row.kind === 'system')
+      .map((row) => JSON.parse(row.content))
+      .filter((c) => c.action === 'failure_notice_delivered');
+    expect(alerts).toHaveLength(1);
+    expect(JSON.stringify(alerts)).not.toContain('permission denied');
 
     // Input message should be marked completed despite the error
     const pending = getPendingMessages();
@@ -1371,7 +1378,7 @@ describe('poll loop — provider error recovery', () => {
     await waitFor(() => getUndeliveredMessages().length > 0, 2000);
     c1.abort();
     await loop1.catch(() => {});
-    expect(getUndeliveredMessages()).toHaveLength(1);
+    expect(getUndeliveredMessages().filter((row) => row.kind === 'chat')).toHaveLength(1);
 
     insertMessage(
       'm2',
@@ -1832,7 +1839,7 @@ describe('poll loop — stale session recovery', () => {
     controller.abort();
 
     // A safe notice reaches the user; the provider diagnostic stays private.
-    const out = getUndeliveredMessages();
+    const out = getUndeliveredMessages().filter((row) => row.kind === 'chat');
     expect(out).toHaveLength(1);
     expect(JSON.parse(out[0].content).text).toBe(GENERIC_FAILURE_NOTICE);
     expect(out[0].content).not.toContain('session not found');

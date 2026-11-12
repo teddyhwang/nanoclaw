@@ -1770,6 +1770,38 @@ describe('error result with no <message> envelope', () => {
     expect(pushes).toHaveLength(0);
   });
 
+  // Danielle DM / Oct 26 Discord: a non-auth failure notice reached the user
+  // with no operator alert. Every non-auth notice now raises one bounded alert.
+  const STALL =
+    'Provider invocation failed (unknown); upstream details withheld; Provider diagnostic={"classification":"unknown","status":200,"terminationSource":"local_no_output_deadline","noRetryReason":"no_output_deadline","provider":"openai-codex"}';
+
+  it('alerts the operator once, without content, when a non-auth failure notice reaches a user', async () => {
+    const { query } = makeResultQuery({ type: 'result', text: STALL, isError: true });
+    await processQuery(query, ERR_ROUTING, ['m1'], 'pi_rpc', null, false, 'TestBot', [], null, undefined, 'prompt', undefined);
+
+    const chats = getUndeliveredMessages().filter((row) => row.kind === 'chat');
+    expect(chats).toHaveLength(1);
+    expect(JSON.parse(chats[0].content).failureNotice).toBe(true);
+    const alerts = systemActions().filter((a) => a.action === 'failure_notice_delivered');
+    expect(alerts).toEqual([
+      {
+        action: 'failure_notice_delivered',
+        errorClass: 'unknown/no_output_deadline',
+        provider: 'pi_rpc',
+        channelType: ERR_ROUTING.channelType,
+      },
+    ]);
+    expect(JSON.stringify(alerts)).not.toContain('withheld');
+    expect(systemActions().filter((a) => a.action === 'provider_auth_failure')).toHaveLength(0);
+  });
+
+  it('leaves auth failure notices to the provider_auth_failure alert', async () => {
+    const { query } = makeResultQuery({ type: 'result', text: REVOKED, isError: true });
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', null, false, 'TestBot', [], null, undefined, 'prompt', undefined);
+    expect(systemActions().filter((a) => a.action === 'failure_notice_delivered')).toHaveLength(0);
+    expect(systemActions().filter((a) => a.action === 'provider_auth_failure')).toHaveLength(1);
+  });
+
   it('does not dispatch raw credential errors hidden inside a message envelope', async () => {
     const { query } = makeResultQuery({
       type: 'result',
@@ -2067,7 +2099,7 @@ describe('a2a failure notices (never answer a notice with a notice)', () => {
     insertRow('n1', { text: 'Incorrect API key', failureNotice: true }, 'agent', 'ag-b');
     insertRow('m2', { text: 'any update?', sender: 'Alice' }, 'discord', 'chan-1');
     await failTurn();
-    const out = getUndeliveredMessages();
+    const out = getUndeliveredMessages().filter((row) => row.kind === 'chat');
     expect(out).toHaveLength(1);
     expect(JSON.parse(out[0].content).failureNotice).toBe(true);
     // The requester hears about it, not the agent whose notice came first.

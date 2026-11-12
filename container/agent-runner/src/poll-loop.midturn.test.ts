@@ -262,7 +262,7 @@ describe('mid-turn <message> block delivery', () => {
 
     await processQuery(query, CHAT_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined, true);
 
-    const out = getUndeliveredMessages();
+    const out = getUndeliveredMessages().filter((row) => row.kind === 'chat');
     expect(out).toHaveLength(2);
     expect(JSON.parse(out[0].content).text).toBe('Started on it.');
     expect(JSON.parse(out[1].content).text).toBe(GENERIC_FAILURE_NOTICE);
