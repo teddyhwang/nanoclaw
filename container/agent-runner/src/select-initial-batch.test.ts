@@ -116,12 +116,17 @@ describe('selectInitialBatch', () => {
     expect(logs[1]).toContain('Dream trigger present');
   });
 
-  it('does NOT defer non-dream when no dream is present (multi-task wakes still batch)', () => {
+  it('runs co-arriving non-dream tasks as separate turns (first task first)', () => {
+    // One turn, one principal: the host admits one task occurrence per turn.
     const recap = row('t-recap', 'task', { series_id: 'task-recap' });
     const rss = row('t-rss', 'task', { series_id: 'rss-news' });
-    const { batch, logs } = selectInitialBatch([recap, rss]);
-    expect(batch.map((m) => m.id).sort()).toEqual(['t-recap', 't-rss']);
+    const sys = row('s1', 'system', { trigger: 0 });
+    const { batch, logs } = selectInitialBatch([recap, rss, sys]);
+    expect(batch.map((m) => m.id)).toEqual(['t-recap', 's1']);
     expect(logs.some((l) => l.includes('Dream trigger'))).toBe(false);
+    expect(logs.join('\n')).toContain('deferring 1 task trigger row(s)');
+    // The deferred task then runs alone, unchanged.
+    expect(selectInitialBatch([rss]).logs).toEqual([]);
   });
 
   it('keeps multiple dream rows together (e.g. catch-up wake fires two days at once)', () => {

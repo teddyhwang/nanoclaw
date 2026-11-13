@@ -361,6 +361,23 @@ export function selectInitialBatch(messages: MessageInRow[]): {
     }
   }
 
+  // 6. Single-task initial batch (Optimus) — two series due in the same
+  //    minute (a daily 9am watch and a Friday 9am reminder) were claimed as
+  //    one turn. The host binds one principal per turn and admits one task
+  //    occurrence at a time, so it refused the pair and both tasks ran with
+  //    no owner (2026-11-13). Run the first task trigger; other task
+  //    triggers stay pending for their own turns, like the follow-up task
+  //    isolation. Dream catch-up rows (already isolated above) keep batching.
+  const taskTriggers = batch.filter((m) => m.trigger === 1 && m.kind === 'task' && !isDreamRow(m));
+  if (taskTriggers.length > 1) {
+    const deferredTasks = taskTriggers.slice(1);
+    batch = batch.filter((m) => !deferredTasks.includes(m));
+    logs.push(
+      `Several task triggers co-arrived: running the first, deferring ${deferredTasks.length} task trigger row(s) ` +
+        `— left pending for their own turn`,
+    );
+  }
+
   return { batch, logs };
 }
 
