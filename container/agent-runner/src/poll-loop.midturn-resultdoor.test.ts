@@ -695,6 +695,11 @@ describe('DB-visible sends gate the nudge', () => {
       expect(deliveredTexts()).toEqual(['On it, pulling the data…', answer.trim()]);
       expect(informedNudges(pushes)).toHaveLength(1);
       expect(informedNudges(pushes)[0]).toContain('>On it, pulling the data…</sent_message>');
+      // Nov 15 Sportball: the retry must keep a sourced answer, not retract it as unverified.
+      expect(informedNudges(pushes)[0]).toContain(
+        "this turn's tool and web-search results, which still count as checked",
+      );
+      expect(informedNudges(pushes)[0]).toContain('do not retract or weaken it');
     },
   );
 

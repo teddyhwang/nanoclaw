@@ -141,6 +141,7 @@ describe('wrapping retry names why a wrapped block was refused', () => {
     expect(pushes[0]).toContain('was wrapped, but it was refused');
     expect(pushes[0]).not.toContain('it was not wrapped');
     expect(pushes[0]).toContain('<sent_message to="ai-friends">Posted.</sent_message>');
+    expect(pushes[0]).not.toContain('still count as checked');
     expect(chatRows()).toHaveLength(1);
     expect(pendingFeedback()).toContain('to="ai-friend" is not one of your destinations; that block was not posted.');
   });

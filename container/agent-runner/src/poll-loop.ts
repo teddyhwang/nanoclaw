@@ -3190,12 +3190,19 @@ export function buildInformedWrapNudge(
     refused.length > 0
       ? `Your response was not delivered. Your <message> block was wrapped, but it was refused: ${escapePromptXml(refused.map((block) => block.detail).join('; '))}. Fix that and re-send only the missing response.`
       : `Your final text was not delivered — it was not wrapped in <message to="name">...</message> blocks:`;
+  // Nov 15 Sportball: the unwrapped answer was sourced from native web search; the retry read
+  // "Do not re-run tools" as "unverified" and replaced it with a question. Keep the answer.
+  const keepAnswer =
+    refused.length > 0
+      ? ''
+      : `That text is your own reply from this turn, built on this turn's tool and web-search results, which still count as checked. If it answers the request, send it wrapped (in full if none of it went out); do not retract or weaken it because tools can't be re-run. `;
   return (
     `<system>${reason}\n` +
     `<undelivered_text>${clip(finalText)}</undelivered_text>\n` +
     `Earlier in that turn you already sent:\n${sent.join('\n')}\n` +
     `If what was sent is the full reply, to where it was owed, respond with only <internal>done</internal> and nothing more will be sent. ` +
     `Otherwise send only what is still missing, wrapped in <message to="name">...</message>, without repeating what already went out. Do not re-run tools. ` +
+    keepAnswer +
     (refused.length > 0
       ? `A <message> tag takes to="name" (required) and optionally reply_to_message_id="#N" (a visible message id from that destination). `
       : '') +
