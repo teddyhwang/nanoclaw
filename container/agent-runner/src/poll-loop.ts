@@ -84,6 +84,7 @@ import {
 } from './formatter.js';
 import { getConfig } from './config.js';
 import { stripHarnessTagArtifacts } from './harness-tag-strip.js';
+import { decodeXmlEscapedMessageBody } from './message-body-entities.js';
 import {
   AUTH_FAILURE_USER_TEXT,
   emitProviderAuthFailureAlert,
@@ -3340,7 +3341,7 @@ export async function deliverMidTurnBlocks(
 
     const rawBody = stripInternalTags(block.body);
     const swept = sweepLocalFileLinks(stripHarnessTagArtifacts(rawBody));
-    const body = swept.text;
+    const body = decodeXmlEscapedMessageBody(swept.text);
     if (!body && swept.links.length === 0) {
       log(`Mid-turn <message to="${block.to}"> empty after sanitization — skipped`);
       continue;
@@ -3472,7 +3473,7 @@ export async function dispatchResultText(
 
     const rawBody = stripInternalTags(block.body);
     const swept = sweepLocalFileLinks(stripHarnessTagArtifacts(rawBody));
-    const body = swept.text;
+    const body = decodeXmlEscapedMessageBody(swept.text);
     const destination = findByName(block.to);
     if (!destination) {
       log(`Unknown destination in <message to="${block.to}">, dropping block`);
