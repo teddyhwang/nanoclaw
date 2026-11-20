@@ -451,6 +451,24 @@ describe('reply_to + quoted_message rendering', () => {
     );
   });
 
+  it('renders the selected Telegram quote fragment next to the full parent', () => {
+    insertMessage('m1', 'chat', {
+      sender: 'Nicole Paik',
+      text: 'Show me an example of',
+      replyTo: {
+        messageId: '8669837947:2986',
+        sender: 'Optimus',
+        text: 'Think natural oak, not bleached oak or dark walnut.',
+        quote: 'natural oak',
+        toBot: true,
+      },
+    });
+    const result = formatMessages(getPendingMessages());
+    expect(result).toContain(
+      '<quoted_message from="Optimus" message_id="8669837947:2986" mine="true" quote="natural oak">Think natural oak, not bleached oak or dark walnut.</quoted_message>',
+    );
+  });
+
   it('omits reply_to and quoted_message when no reply context', () => {
     insertMessage('m1', 'chat', { sender: 'Alice', text: 'plain' });
     const result = formatMessages(getPendingMessages());
