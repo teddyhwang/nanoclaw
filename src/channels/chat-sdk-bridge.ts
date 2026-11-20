@@ -62,6 +62,12 @@ export interface ReplyContext {
    */
   messageId?: string;
   /**
+   * The exact fragment the user selected when replying (Telegram `quote`,
+   * a TextQuote). `text` stays the whole parent; `quote` is the part the
+   * user pointed at, so the agent can tell which item they meant.
+   */
+  quote?: string;
+  /**
    * Set by reply-chain-walking extractors when an ancestor in the chain
    * is bot *participation* that has no resolvable bot-outbound id to put
    * in `messageId` — specifically an ancestor that @-mentions the bot

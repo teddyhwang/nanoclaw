@@ -688,9 +688,13 @@ function replyMessageId(replyTo: any): string | null {
 function formatReplyContext(replyTo: any): string {
   if (!replyTo) return '';
   const sender = replyTo.sender;
-  const text = replyTo.text;
+  // A selected fragment (Telegram TextQuote) is what the user pointed at;
+  // keep it next to the full parent so a short reply resolves to it.
+  const quote = typeof replyTo.quote === 'string' && replyTo.quote.trim() ? replyTo.quote : '';
+  const text = replyTo.text || quote;
   if (!sender || !text) return '';
   const mineAttr = replyTo.toBot === true ? ' mine="true"' : '';
+  const quoteAttr = quote ? ` quote="${escapeXml(quote)}"` : '';
   const parentMessageId = replyMessageId(replyTo);
   const parentMessageIdAttr = parentMessageId ? ` message_id="${escapeXml(parentMessageId)}"` : '';
 
@@ -714,7 +718,7 @@ function formatReplyContext(replyTo: any): string {
     );
   }
 
-  const parentBlock = `  <quoted_message from="${escapeXml(sender)}"${parentMessageIdAttr}${mineAttr}${ancestorBlocks.length > 0 ? ' depth="1"' : ''}>${escapeXml(text)}</quoted_message>`;
+  const parentBlock = `  <quoted_message from="${escapeXml(sender)}"${parentMessageIdAttr}${mineAttr}${quoteAttr}${ancestorBlocks.length > 0 ? ' depth="1"' : ''}>${escapeXml(text)}</quoted_message>`;
 
   return `\n${[...ancestorBlocks, parentBlock].join('\n')}\n`;
 }
