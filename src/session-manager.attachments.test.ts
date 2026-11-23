@@ -31,6 +31,7 @@ import { initTestDb, closeDb, runMigrations, createAgentGroup } from './db/index
 import { createSession } from './db/sessions.js';
 import { initSessionFolder, sessionDir, writeSessionMessage, withMailboxSession } from './session-manager.js';
 import type { Session } from './types.js';
+import { log } from './log.js';
 
 import { transcribeAudio } from './media/transcription.js';
 import { processVideo } from './media/video.js';
@@ -210,6 +211,45 @@ describe('extractAttachmentFiles — attachments sharing a name', () => {
     const names = JSON.parse(persisted).attachments.map((a: { name: string }) => a.name);
     expect(names).toEqual(['image.png', 'image-2.png', 'noext', 'noext-2']);
     expect(persisted).not.toContain('"data"');
+  });
+});
+
+describe('extractAttachmentFiles — attachment that still cannot be saved', () => {
+  it('logs the unsaved photo at error level without its bytes and leaves it without a localPath', async () => {
+    const errorSpy = vi.spyOn(log, 'error').mockImplementation(() => {});
+    // Real shape of attachment 1 of row 2872 (type image, data only, no name
+    // or localPath). Pre-create its target so the exclusive write hits EEXIST.
+    vi.spyOn(Date, 'now').mockReturnValue(1795397221946);
+    const inbox = path.join(sessionDir(AG, SESS), 'inbox', 'lost-photo');
+    fs.mkdirSync(inbox, { recursive: true });
+    fs.writeFileSync(path.join(inbox, 'attachment-1795397221946.jpg'), 'someone-else');
+    const secret = Buffer.from('photo-bytes-secret').toString('base64');
+
+    const persisted = await writeSessionMessage(AG, SESS, {
+      id: 'lost-photo',
+      kind: 'chat-sdk',
+      timestamp: now(),
+      platformId: 'telegram:1',
+      channelType: 'telegram',
+      threadId: null,
+      content: JSON.stringify({
+        text: 'guest washroom',
+        attachments: [{ type: 'image', mimeType: 'image/jpeg', size: 127895, data: secret }],
+      }),
+    });
+
+    const att = JSON.parse(persisted).attachments[0];
+    expect(att.localPath).toBeUndefined();
+    const unsaved = errorSpy.mock.calls.filter(([msg]) => String(msg).includes('not saved'));
+    expect(unsaved).toHaveLength(1);
+    expect(unsaved[0][1]).toMatchObject({ messageId: 'lost-photo', index: 0, type: 'image', hadData: true });
+    expect(JSON.stringify(errorSpy.mock.calls)).not.toContain(secret);
+  });
+
+  it('does not log an error when every attachment is saved', async () => {
+    const errorSpy = vi.spyOn(log, 'error').mockImplementation(() => {});
+    await writeSessionMessage(AG, SESS, attachmentMessage('all-saved', ['a.txt', 'b.txt']));
+    expect(errorSpy).not.toHaveBeenCalled();
   });
 });
 

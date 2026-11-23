@@ -587,6 +587,13 @@ export type SessionMessageWrite = {
  *      of either name cannot redirect a write.
  *   3. exclusive create: never follows or overwrites an existing entry.
  */
+const MEDIA_OR_FILE_TYPES = new Set(['image', 'video', 'audio', 'voice', 'file', 'document']);
+
+/** Attachments that carry bytes the agent should be able to open. */
+function isMediaOrFileAttachment(att: Record<string, unknown>): boolean {
+  return att.type === undefined || (typeof att.type === 'string' && MEDIA_OR_FILE_TYPES.has(att.type));
+}
+
 async function extractAttachmentFiles(
   agentGroupId: string,
   sessionId: string,
@@ -735,6 +742,12 @@ async function extractAttachmentFiles(
           });
           continue;
         }
+        log.error('Inbound attachment could not be saved — write failed', {
+          messageId,
+          filename,
+          code: e.code,
+          err: e.message,
+        });
         throw err;
       }
 
@@ -747,6 +760,24 @@ async function extractAttachmentFiles(
   } finally {
     inbox?.close();
   }
+
+  // Anything still without a saved file or a URL never reaches the agent; the
+  // container renders it as "not received". Say so loudly for operator alerts
+  // (metadata only, never the bytes).
+  attachments.forEach((att, index) => {
+    if (!isMediaOrFileAttachment(att)) return;
+    if (typeof att.localPath === 'string' && att.localPath.length > 0) return;
+    if (typeof att.url === 'string' && att.url.length > 0) return;
+    log.error('Inbound attachment was not saved — the agent will see it as not received', {
+      messageId,
+      index,
+      type: typeof att.type === 'string' ? att.type : undefined,
+      name: typeof att.name === 'string' ? att.name : undefined,
+      mimeType: typeof att.mimeType === 'string' ? att.mimeType : undefined,
+      size: typeof att.size === 'number' ? att.size : undefined,
+      hadData: typeof att.data === 'string',
+    });
+  });
 
   // Append video-derived keyframes after iteration so the container's
   // `extractImageAttachments` surfaces them as vision blocks. They carry a

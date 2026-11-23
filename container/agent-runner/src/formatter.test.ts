@@ -1105,7 +1105,8 @@ describe('formatAttachments — text inlining', () => {
       },
     ]);
     expect(out).not.toContain('<attached_file');
-    expect(out).toContain('[file: big.txt]');
+    // Never saved to disk and too big to inline: the agent cannot read it.
+    expect(out).toContain('[file: big.txt — not received;');
   });
 
   it('falls through to marker for non-text mimeType + extension', () => {
@@ -1118,7 +1119,7 @@ describe('formatAttachments — text inlining', () => {
       },
     ]);
     expect(out).not.toContain('<attached_file');
-    expect(out).toContain('[file: archive.zip]');
+    expect(out).toContain('[file: archive.zip — not received;');
   });
 
   it('detects text by extension when mimeType is missing', () => {
@@ -1176,6 +1177,45 @@ describe('formatAttachments — text inlining', () => {
       },
     ]);
     expect(out).toContain('name="a&amp;b&lt;c&gt;&quot;d.txt"');
+  });
+
+  it('marks an image the host could not save as not received (real shape: data only, no name/localPath)', () => {
+    // Attachment 1 of Telegram album row 2872: the second photo hit EEXIST on
+    // the host, so it kept its inline bytes and never got a localPath.
+    const out = formatAttachments([
+      { type: 'image', mimeType: 'image/jpeg', size: 127895, width: 960, height: 1280, data: 'c2Vjb25k' },
+    ]);
+    expect(out).toBe(
+      '\n[image: attachment — not received; the file could not be saved. If it matters, say so and ask the user to resend]',
+    );
+  });
+
+  it('keeps the saved marker for a saved photo next to an unsaved one', () => {
+    const out = formatAttachments([
+      { type: 'image', name: 'a.jpg', localPath: 'inbox/m/a.jpg' },
+      { type: 'image', mimeType: 'image/jpeg', data: 'c2Vjb25k' },
+    ]);
+    expect(out).toContain('[image: a.jpg — saved to /workspace/inbox/m/a.jpg]');
+    expect(out).toContain('[image: attachment — not received;');
+    expect(out.match(/not received/g)?.length).toBe(1);
+  });
+
+  it('marks video and file attachments with neither a saved file nor a URL as not received', () => {
+    const out = formatAttachments([
+      { type: 'video', name: 'clip.mp4' },
+      { type: 'file', name: 'scan.pdf', mimeType: 'application/pdf' },
+    ]);
+    expect(out).toContain('[video: clip.mp4 — not received;');
+    expect(out).toContain('[file: scan.pdf — not received;');
+  });
+
+  it('does not mark inline-readable text files or transcribed voice notes as lost', () => {
+    const out = formatAttachments([
+      { type: 'file', name: 'n.txt', mimeType: 'text/plain', data: Buffer.from('hi').toString('base64') },
+      { type: 'audio', name: 'v.ogg', transcript: 'hello there' },
+    ]);
+    expect(out).not.toContain('not received');
+    expect(out).toContain('[Voice: hello there]');
   });
 
   it('falls through when bytes are unavailable', () => {
