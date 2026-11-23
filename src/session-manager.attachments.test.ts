@@ -164,6 +164,55 @@ describe('extractAttachmentFiles — inbox dir swapped after the checks', () => 
   });
 });
 
+describe('extractAttachmentFiles — attachments sharing a name', () => {
+  it('saves both photos of a Telegram album whose derived names collide', async () => {
+    // Real shape from a Telegram album (two unnamed JPEGs, one message): the
+    // bridge sends no name, so both derive attachment-<same ms>.jpg.
+    vi.spyOn(Date, 'now').mockReturnValue(1795397221946);
+    const photo = (bytes: string, size: number) => ({
+      type: 'image',
+      mimeType: 'image/jpeg',
+      size,
+      width: 960,
+      height: 1280,
+      data: Buffer.from(bytes).toString('base64'),
+    });
+    const persisted = await writeSessionMessage(AG, SESS, {
+      id: '8669837947:3311:ag-x',
+      kind: 'chat-sdk',
+      timestamp: now(),
+      platformId: 'telegram:8669837947',
+      channelType: 'telegram',
+      threadId: null,
+      content: JSON.stringify({
+        text: 'guest washroom',
+        attachments: [photo('first', 126425), photo('second', 127895)],
+      }),
+    });
+
+    const atts = JSON.parse(persisted).attachments;
+    expect(persisted).not.toContain('"data"');
+    expect(atts.map((a: { localPath: string }) => a.localPath)).toEqual([
+      'inbox/8669837947:3311:ag-x/attachment-1795397221946.jpg',
+      'inbox/8669837947:3311:ag-x/attachment-1795397221946-2.jpg',
+    ]);
+    const inbox = path.join(sessionDir(AG, SESS), 'inbox', '8669837947:3311:ag-x');
+    expect(fs.readFileSync(path.join(inbox, 'attachment-1795397221946.jpg'), 'utf8')).toBe('first');
+    expect(fs.readFileSync(path.join(inbox, 'attachment-1795397221946-2.jpg'), 'utf8')).toBe('second');
+  });
+
+  it('saves repeated explicit names under distinct files', async () => {
+    const persisted = await writeSessionMessage(
+      AG,
+      SESS,
+      attachmentMessage('dup', ['image.png', 'image.png', 'noext', 'noext']),
+    );
+    const names = JSON.parse(persisted).attachments.map((a: { name: string }) => a.name);
+    expect(names).toEqual(['image.png', 'image-2.png', 'noext', 'noext-2']);
+    expect(persisted).not.toContain('"data"');
+  });
+});
+
 describe('extractAttachmentFiles — inbox-root symlink containment (#2828 sibling)', () => {
   it('does not write an attachment outside the session root via a symlinked inbox root', async () => {
     // Attacker-controlled location outside the session sandbox.

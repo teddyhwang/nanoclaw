@@ -615,19 +615,30 @@ async function extractAttachmentFiles(
 
   let changed = false;
   const syntheticFrames: Array<Record<string, unknown>> = [];
+  // Names already claimed by this message. Two attachments can share a name:
+  // unnamed ones get a millisecond-timestamp name (a Telegram album's photos
+  // are derived in the same tick), and clients reuse names like "image.png".
+  // Without this the second write hits EEXIST and its bytes stay inline,
+  // so the agent sees an attachment stub with no file.
+  const usedNames = new Set<string>();
   try {
+    for (const att of attachments) {
+      if (typeof att.name === 'string' && typeof att.localPath === 'string') usedNames.add(att.name);
+    }
     for (const att of attachments) {
       if (typeof att.data !== 'string') continue;
 
       const rawName = deriveAttachmentName(att);
-      const filename = isSafeAttachmentName(rawName) ? rawName : `attachment-${Date.now()}`;
-      if (filename !== rawName) {
+      const safeName = isSafeAttachmentName(rawName) ? rawName : `attachment-${Date.now()}`;
+      if (safeName !== rawName) {
         log.warn('Refused unsafe attachment filename, would escape inbox', {
           messageId,
           rawName,
-          replacement: filename,
+          replacement: safeName,
         });
       }
+      const filename = uniqueAttachmentName(safeName, usedNames);
+      usedNames.add(filename);
 
       if (inbox === undefined) {
         try {
@@ -747,6 +758,21 @@ async function extractAttachmentFiles(
   }
 
   return changed ? JSON.stringify(parsed) : contentStr;
+}
+
+/**
+ * Return `name`, or `name` with a `-2`, `-3`... suffix before its extension
+ * when another attachment of the same message already claimed it.
+ */
+export function uniqueAttachmentName(name: string, used: ReadonlySet<string>): string {
+  if (!used.has(name)) return name;
+  const dot = name.lastIndexOf('.');
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : '';
+  for (let n = 2; ; n++) {
+    const candidate = `${stem}-${n}${ext}`;
+    if (!used.has(candidate)) return candidate;
+  }
 }
 
 /** Identify audio/voice attachments by semantic type or MIME. */
