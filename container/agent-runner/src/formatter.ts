@@ -879,6 +879,9 @@ function formatInlineTextAttachmentBlock(name: string, workspacePath: string, te
  *     because the provider pulls them out as multimodal blocks downstream
  *     (see `extractImageAttachments`).
  */
+export const UNSAVED_ATTACHMENT_NOTE =
+  'not received; the file could not be saved. If it matters, say so and ask the user to resend';
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function formatAttachments(attachments: any[] | undefined): string {
   if (!Array.isArray(attachments) || attachments.length === 0) return '';
@@ -887,6 +890,24 @@ export function formatAttachments(attachments: any[] | undefined): string {
     const type = a.type || 'file';
     const localPath = a.localPath ? `/workspace/${a.localPath}` : '';
     const url = a.url || '';
+    // No saved file and no URL: the host could not save the bytes (name
+    // collision, write failure, failed download). Say so plainly — a bare
+    // `[image: attachment]` reads like a normal placeholder and the agent
+    // would answer as if it had seen everything. Text files whose bytes are
+    // still inline are fine (they get inlined below), as are transcribed
+    // voice notes.
+    if (!localPath && !url) {
+      const recovered =
+        ((type === 'audio' || type === 'voice') && typeof a.transcript === 'string' && a.transcript.trim()) ||
+        (type !== 'image' && type !== 'video' && type !== 'audio' && type !== 'voice' && isTextEligible(a)
+          ? readInlineText(a)
+          : null);
+      if (!recovered) {
+        const lost = `[${type}: ${escapeXml(name)} — ${UNSAVED_ATTACHMENT_NOTE}]`;
+        const videoMarker = type === 'video' && typeof a.videoMarker === 'string' ? a.videoMarker.trim() : '';
+        return videoMarker ? `${lost}\n${escapeXml(videoMarker)}` : lost;
+      }
+    }
     const baseMarker = localPath
       ? `[${type}: ${escapeXml(name)} — saved to ${escapeXml(localPath)}]`
       : url
